@@ -14,6 +14,7 @@ from typing import Callable, Iterator
 import zipfile
 
 from .metadata import MAX_XML_BYTES, Metadata, from_comicinfo
+from .filename_parser import parse_filename
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"})
 MAX_MEMBER_BYTES = 512 * 1024 * 1024
@@ -40,7 +41,12 @@ def is_inside(path: Path, parent: Path) -> bool:
 
 
 def is_link(path: Path) -> bool:
-    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    if path.is_symlink():
+        return True
+    if hasattr(path, "is_junction"):
+        return path.is_junction()
+    # Python 3.11 has no Path.is_junction; reject Windows reparse points too.
+    return bool(getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
 
 
 def normalized_path(path: Path) -> str:
@@ -87,14 +93,16 @@ class Snapshot:
 
     def initial_metadata(self) -> tuple[Metadata, str]:
         title = self.path.stem if self.kind == "cbz" else self.path.name
+        xml_warning = ""
         if self.xml:
             try:
                 return from_comicinfo(self.xml, title), ""
             except (ValueError, UnicodeError) as exc:
-                return Metadata(original_title=title), f"原 ComicInfo 未读取：{exc}"
+                xml_warning = f"原 ComicInfo 未读取：{exc}"
             except Exception as exc:
-                return Metadata(original_title=title), f"原 ComicInfo 格式错误：{exc}"
-        return Metadata(original_title=title), ""
+                xml_warning = f"原 ComicInfo 格式错误：{exc}"
+        metadata, warnings = parse_filename(title)
+        return metadata, "；".join(([xml_warning] if xml_warning else []) + warnings)
 
 
 def _safe_zip_name(name: str) -> bool:

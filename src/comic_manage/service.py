@@ -17,7 +17,8 @@ from typing import Callable, TextIO
 from .metadata import Metadata, to_comicinfo
 from .packaging import ExportPlan, export_cbz, make_plan
 from .repository import Comic, Repository
-from .sources import Cancelled, check_cancel, discover, inspect_source, source_id
+from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, inspect_source,
+                      is_inside, is_link, natural_key, normalized_path, source_id)
 
 MAX_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_CHARS = 8 * 1024 * 1024
@@ -38,6 +39,12 @@ class PreparedExport:
     created_at: float
     output_root: Path
     plans: list[ExportPlan]
+
+
+@dataclass
+class PreparedImport:
+    created_at: float
+    snapshots: dict[str, Snapshot]
 
 
 def _string(value, name: str) -> str:
@@ -81,15 +88,41 @@ def _metadata(value, previous: Metadata | None = None) -> Metadata:
     return Metadata.from_dict(merged)
 
 
+def _batch_changes(value, *, allow_empty: bool = False) -> dict:
+    if not isinstance(value, dict) or set(value) - {"authors", "genre"}:
+        raise ServiceError("批量资料仅支持作者和类型。")
+    if not value and not allow_empty:
+        raise ServiceError("请选择要修改的作者或类型。")
+    result = {}
+    if "authors" in value:
+        authors = _strings(value["authors"], "作者")
+        result["authors"] = list(dict.fromkeys(author.strip() for author in authors))
+        if any(len(author) > 500 for author in result["authors"]):
+            raise ServiceError("作者名称过长。")
+    if "genre" in value:
+        genre = _string(value["genre"], "类型").strip()
+        if len(genre) > 200:
+            raise ServiceError("类型名称过长。")
+        result["genre"] = genre
+    return result
+
+
+def _folder_link(path: Path) -> bool:
+    # Python 3.11 does not provide Path.is_junction on Windows.
+    return is_link(path) or bool(getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
+
+
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
-                         "plan", "export", "cancel", "set_output", "backup"})
+                         "plan", "export", "cancel", "set_output", "backup", "browse_folders",
+                         "prepare_import", "commit_import", "remove", "batch_edit"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
         self.repo = Repository(self.data_dir / "catalog.sqlite3")
         self.progress = progress or (lambda message: None)
         self.plans: OrderedDict[str, PreparedExport] = OrderedDict()
+        self.imports: OrderedDict[str, PreparedImport] = OrderedDict()
 
     @staticmethod
     def serialize(comic: Comic) -> dict:
@@ -103,7 +136,7 @@ class ComicService:
         if not isinstance(params, dict):
             raise ServiceError("params 必须是对象。")
         cancel = cancel if cancel is not None else Event()
-        if method not in ("scan", "import", "export", "cancel"):
+        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel"):
             check_cancel(cancel)
         if method == "bootstrap":
             return {"comics": [self.serialize(c) for c in self.repo.all()],
@@ -113,6 +146,23 @@ class ComicService:
             return self.scan(params, cancel)
         if method == "import":
             return self.import_files(params, cancel)
+        if method == "browse_folders":
+            return self.browse_folders(params, cancel)
+        if method == "prepare_import":
+            return self.prepare_import(params, cancel)
+        if method == "commit_import":
+            return self.commit_import(params, cancel)
+        if method == "remove":
+            identities = _strings(params.get("ids"), "作品 id")
+            self.repo.remove(identities)
+            self.plans.clear()
+            return {"count": len(identities)}
+        if method == "batch_edit":
+            identities = _strings(params.get("ids"), "作品 id")
+            changes = _batch_changes(params.get("changes"))
+            self.repo.batch_edit(identities, changes)
+            self.plans.clear()
+            return {"count": len(identities), "comics": [self.serialize(self.repo.get(i)) for i in identities]}
         if method in ("save", "approve"):
             return self.save(params, approve=method == "approve", cancel=cancel)
         if method == "page":
@@ -142,6 +192,162 @@ class ComicService:
             return {"path": str(path)}
         raise ServiceError("不支持的操作。", "METHOD_NOT_FOUND")
 
+    def excluded_sources(self) -> list[Path]:
+        output = self.repo.setting("output_root")
+        return [self.data_dir] + ([Path(output)] if output else [])
+
+    def browse_folders(self, params: dict, cancel: Event) -> dict:
+        path = _path(params.get("path"), "目录")
+        if _folder_link(path):
+            raise ServiceError("不支持浏览符号链接或目录联接。")
+        path = path.resolve(strict=True)
+        if not path.is_dir():
+            raise ServiceError("请选择一个目录。")
+        excluded = self.excluded_sources()
+
+        def visible(child):
+            return (child.name.casefold() not in SKIP_DIRS and child.is_dir() and not _folder_link(child)
+                    and not any(is_inside(child, root) for root in excluded))
+
+        children, errors = [], []
+        if any(is_inside(path, root) for root in excluded):
+            return {"path": str(path), "children": [], "errors": []}
+        for child in sorted(path.iterdir(), key=lambda p: natural_key(p.name)):
+            check_cancel(cancel)
+            try:
+                if visible(child):
+                    try:
+                        has_children = any(visible(grandchild) for grandchild in child.iterdir())
+                    except OSError:
+                        has_children = True
+                    children.append({"path": str(child), "name": child.name, "hasChildren": has_children})
+            except OSError as exc:
+                errors.append(f"{child}: {exc}")
+        return {"path": str(path), "children": children, "errors": errors}
+
+    def prepare_import(self, params: dict, cancel: Event) -> dict:
+        paths = [_path(p, "导入路径") for p in _strings(params.get("paths"), "导入路径")]
+        recursive = params.get("recursive", True)
+        if type(recursive) is not bool:
+            raise ServiceError("recursive 必须是布尔值。")
+        snapshots: dict[str, Snapshot] = {}
+        items, errors = [], []
+        excluded = self.excluded_sources()
+
+        def add(snapshot: Snapshot):
+            identity = source_id(snapshot.path)
+            if identity in snapshots:
+                return
+            check_cancel(cancel)
+            snapshots[identity] = snapshot
+            try:
+                previous = self.repo.get(identity, include_removed=True)
+            except ValueError:
+                previous = None
+            metadata, warning = snapshot.initial_metadata()
+            status = "new" if previous is None else ("removed" if self.repo.is_removed(identity) else "existing")
+            if previous:
+                metadata = previous.metadata
+                warning = previous.warning
+                if previous.fingerprint != snapshot.fingerprint:
+                    warning = "源文件已变化，导入后需要重新审核。" + warning
+            items.append({"id": identity, "source": str(snapshot.path), "kind": snapshot.kind,
+                          "page_count": len(snapshot.pages), "metadata": metadata.to_dict(),
+                          "import_status": status, "warning": warning})
+            self.progress(f"已发现 {len(items)} 本 · {snapshot.path.name}")
+
+        cancelled = False
+        try:
+            for path in paths:
+                check_cancel(cancel)
+                try:
+                    if _folder_link(path):
+                        raise ValueError("不支持导入符号链接或目录联接。")
+                    if any(is_inside(path, root) for root in excluded):
+                        raise ValueError("不能将资料库或成品目录作为漫画源导入。")
+                    if path.is_dir() and recursive:
+                        for snapshot in discover(path, exclude=excluded, cancel=cancel,
+                                                 on_error=lambda p, error: errors.append(f"{p}: {error}")):
+                            add(snapshot)
+                    else:
+                        add(inspect_source(path))
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    errors.append(f"{path}: {exc}")
+            check_cancel(cancel)
+        except Cancelled:
+            cancelled = True
+        timestamp = time.monotonic()
+        self.imports = OrderedDict((token, value) for token, value in self.imports.items()
+                                   if timestamp - value.created_at <= PLAN_TTL_SECONDS)
+        while len(self.imports) >= 8:
+            self.imports.popitem(last=False)
+        token = secrets.token_urlsafe(32)
+        self.imports[token] = PreparedImport(timestamp, snapshots)
+        return {"token": token, "items": items, "errors": errors, "cancelled": cancelled}
+
+    def commit_import(self, params: dict, cancel: Event) -> dict:
+        token = _string(params.get("token"), "导入预览")
+        identities = _strings(params.get("ids"), "作品 id")
+        defaults = _batch_changes(params.get("defaults", {}), allow_empty=True)
+        overwrite = params.get("overwriteExisting", False)
+        if type(overwrite) is not bool:
+            raise ServiceError("overwriteExisting 必须是布尔值。")
+        prepared = self.imports.get(token)
+        if prepared is None or time.monotonic() - prepared.created_at > PLAN_TTL_SECONDS:
+            self.imports.pop(token, None)
+            raise ServiceError("导入预览已失效，请重新选择并预览。", "INVALID_IMPORT")
+        if any(identity not in prepared.snapshots for identity in identities):
+            raise ServiceError("勾选的作品不在此导入预览中。", "INVALID_IMPORT")
+        self.imports.pop(token)
+        self.plans.clear()
+        completed, errors, skipped, roots = [], [], 0, []
+        cancelled = False
+        try:
+            for identity in identities:
+                check_cancel(cancel)
+                snapshot = prepared.snapshots[identity]
+                try:
+                    self.progress(f"正在导入 · {snapshot.path.name}")
+                    if _folder_link(snapshot.path):
+                        raise ServiceError("源目录已变为链接，请重新选择并预览。", "SOURCE_CHANGED")
+                    fresh = inspect_source(snapshot.path)
+                    if source_id(fresh.path) != identity or fresh.fingerprint != snapshot.fingerprint:
+                        raise ServiceError("源文件在预览后已变化，请重新预览后导入。", "SOURCE_CHANGED")
+                    check_cancel(cancel)
+                    try:
+                        previous = self.repo.get(identity, include_removed=True)
+                    except ValueError:
+                        previous = None
+                    removed = self.repo.is_removed(identity)
+                    self.repo.upsert_scan(fresh, restore=True, defaults=defaults, overwrite_existing=overwrite)
+                    if (previous is not None and not removed and not (defaults and overwrite)
+                            and previous.fingerprint == fresh.fingerprint):
+                        skipped += 1
+                    else:
+                        completed.append(identity)
+                    if fresh.kind == "folder":
+                        roots.append(str(fresh.path))
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    errors.append(f"{snapshot.path}: {exc}")
+            check_cancel(cancel)
+        except Cancelled:
+            cancelled = True
+        # Only the selected comic directories become scan roots. Browsing locations are never persisted.
+        retained = self.repo.setting("roots").splitlines()
+        exact = self.repo.setting("exact_import_roots").splitlines()
+        existing_roots = {normalized_path(Path(p)) for p in retained}
+        new_roots = [p for p in roots if normalized_path(Path(p)) not in existing_roots]
+        by_path = {normalized_path(Path(p)): p for p in retained + roots}
+        exact_by_path = {normalized_path(Path(p)): p for p in exact + new_roots}
+        self.repo.set_setting("roots", "\n".join(by_path.values()))
+        self.repo.set_setting("exact_import_roots", "\n".join(exact_by_path.values()))
+        return {"count": len(completed), "skipped": skipped, "errors": errors,
+                "cancelled": cancelled, "ids": completed}
+
     def scan(self, params: dict, cancel: Event) -> dict:
         roots = _strings(params.get("roots", self.repo.setting("roots").splitlines()), "扫描目录")
         roots = [str(_path(value, "扫描目录")) for value in roots]
@@ -151,21 +357,30 @@ class ComicService:
         self.plans.clear()
         output = self.repo.setting("output_root")
         excluded = [self.data_dir] + ([Path(output)] if output else [])
+        exact_roots = {normalized_path(Path(p)) for p in self.repo.setting("exact_import_roots").splitlines()}
         count, errors, seen = 0, [], set()
         try:
             for root in roots:
                 check_cancel(cancel)
                 try:
-                    for snapshot in discover(Path(root), exclude=excluded, cancel=cancel,
-                                             on_error=lambda path, error: errors.append(f"{path}: {error}")):
+                    if normalized_path(Path(root)) in exact_roots:
+                        if any(is_inside(Path(root), p) for p in excluded):
+                            continue
+                        if _folder_link(Path(root)):
+                            raise ValueError("扫描目录已变为符号链接或目录联接。")
+                        snapshots = [inspect_source(Path(root))]
+                    else:
+                        snapshots = discover(Path(root), exclude=excluded, cancel=cancel,
+                                             on_error=lambda path, error: errors.append(f"{path}: {error}"))
+                    for snapshot in snapshots:
                         identity = source_id(snapshot.path)
                         if identity in seen:
                             continue
                         seen.add(identity)
                         check_cancel(cancel)
-                        self.repo.upsert_scan(snapshot)
-                        count += 1
-                        self.progress(f"已扫描 {count} 本 · {snapshot.path.name}")
+                        if self.repo.upsert_scan(snapshot) is not None:
+                            count += 1
+                            self.progress(f"已扫描 {count} 本 · {snapshot.path.name}")
                 except (OSError, ValueError) as exc:
                     errors.append(f"{root}: {exc}")
             check_cancel(cancel)
@@ -186,8 +401,8 @@ class ComicService:
                     self.progress(f"正在导入 {path.name}")
                     snapshot = inspect_source(path)
                     check_cancel(cancel)
-                    self.repo.upsert_scan(snapshot)
-                    count += 1
+                    if self.repo.upsert_scan(snapshot) is not None:
+                        count += 1
                 except Cancelled:
                     raise
                 except Exception as exc:

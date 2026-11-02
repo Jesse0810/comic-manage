@@ -50,6 +50,7 @@ class Metadata:
     age_rating: str = "Unknown"
     summary: str = ""
     year: str = ""
+    month: str = ""
     cover_index: int = 0
     original_xml: str = ""
 
@@ -72,6 +73,8 @@ class Metadata:
             raise ValueError("请填写至少一位作者。")
         if self.year and (not re.fullmatch(r"\d{4}", self.year) or not 1000 <= int(self.year) <= 9999):
             raise ValueError("年份请填写四位数字，或留空。")
+        if self.month and (not re.fullmatch(r"\d{1,2}", self.month) or not 1 <= int(self.month) <= 12):
+            raise ValueError("月份请填写 1 到 12，或留空。")
         if not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", self.language):
             raise ValueError("语言请填写 ja、zh-Hans、zh-Hant 等语言代码。")
         if page_count < 1 or not 0 <= self.cover_index < page_count:
@@ -107,7 +110,7 @@ def from_comicinfo(data: bytes, fallback_title: str) -> Metadata:
         tags=[t for t in tags if t not in POSITIVE_TAGS], translated=translated,
         uncensored="无修正" in tags, full_color="全彩" in tags,
         language=language, age_rating=get("AgeRating") or "Unknown",
-        summary=get("Summary"), year=get("Year"),
+        summary=get("Summary"), year=get("Year"), month=get("Month"),
         cover_index=int(cover) if cover.isdecimal() else 0,
         original_xml=data.decode("utf-8-sig"),
     )
@@ -119,7 +122,7 @@ def to_comicinfo(metadata: Metadata, page_count: int) -> bytes:
     fields = {
         "Title": metadata.display_title, "Series": metadata.display_title,
         "LocalizedSeries": metadata.original_title.strip() if metadata.translated else "",
-        "Summary": metadata.summary.strip(), "Year": metadata.year,
+        "Summary": metadata.summary.strip(), "Year": metadata.year, "Month": metadata.month,
         "Writer": ", ".join(a.strip() for a in metadata.authors if a.strip()),
         "Translator": metadata.translator.strip() if metadata.translated else "",
         "Publisher": metadata.publisher.strip(), "Genre": metadata.genre.strip(),

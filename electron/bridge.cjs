@@ -6,8 +6,8 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup'])
-const LONG_METHODS = new Set(['scan', 'import', 'plan', 'export'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export'])
 
 function validateCall(method, params) {
   if (!METHODS.includes(method)) throw new Error('不支持的操作。')
@@ -27,7 +27,23 @@ function validateCall(method, params) {
   if (method === 'page' && (!Number.isSafeInteger(params.index) || params.index < 0)) throw new Error('页码无效。')
   if (method === 'xml' && (!Number.isSafeInteger(params.pageCount) || params.pageCount < 1)) throw new Error('页数无效。')
   if (method === 'scan') strings('roots', false)
-  if (method === 'import') strings('paths')
+  if (['import', 'prepare_import'].includes(method)) strings('paths')
+  if (method === 'browse_folders') string('path')
+  if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
+  if (['remove', 'batch_edit', 'commit_import'].includes(method)) strings('ids')
+  if (method === 'commit_import') {
+    string('token')
+    if (params.overwriteExisting !== undefined && typeof params.overwriteExisting !== 'boolean') throw new Error('覆盖选项无效。')
+  }
+  if (['commit_import', 'batch_edit'].includes(method)) {
+    const fields = params[method === 'commit_import' ? 'defaults' : 'changes']
+    if (fields === null || (fields !== undefined && (typeof fields !== 'object' || Array.isArray(fields))) || (method === 'batch_edit' && !fields)) throw new Error('批量资料无效。')
+    if (fields) {
+      if (Object.keys(fields).some(key => !['authors', 'genre'].includes(key))) throw new Error('批量字段无效。')
+      if (fields.authors !== undefined && (!Array.isArray(fields.authors) || fields.authors.length > 1000 || fields.authors.some(author => typeof author !== 'string' || !author.trim() || author.length > 32767))) throw new Error('作者无效。')
+      if (fields.genre !== undefined && (typeof fields.genre !== 'string' || !fields.genre.trim() || fields.genre.length > 32767)) throw new Error('类型无效。')
+    }
+  }
   if (method === 'plan') { strings('ids'); string('outputRoot') }
   if (method === 'export') string('token')
   if (['set_output', 'backup'].includes(method)) string('path')

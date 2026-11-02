@@ -123,11 +123,31 @@ test('request boundary rejects arbitrary methods, malformed records and unsafe n
     ['plan', {ids:['book',null],outputRoot:'C:\\Comics'}],
     ['import', {paths:[42]}],
     ['export', {token:''}],
+    ['browse_folders', {path:42}],
+    ['prepare_import', {paths:['C:\\Comics'],recursive:'yes'}],
+    ['commit_import', {token:'token',ids:['book'],defaults:{original_title:'hidden'}}],
+    ['commit_import', {token:'token',ids:['book'],overwriteExisting:1}],
+    ['batch_edit', {ids:['book'],changes:{authors:'writer'}}],
+    ['batch_edit', {ids:['book'],changes:{genre:' '}}],
+    ['batch_edit', {ids:['book'],changes:null}],
+    ['remove', {ids:['book',null]}],
     ['bootstrap', null],
     ['scan', []],
     ['save', {id:'book',metadata:{summary:'x'.repeat(4 * 1024 * 1024)}}],
   ]
   for (const [method, params] of invalid) assert.throws(() => validateCall(method, params), undefined, method)
+})
+
+test('staged import and batch actions cross the same restricted bridge', async t => {
+  const bridge = await fixture(t)
+  const operations = [
+    ['browse_folders', {path:'C:\\Comics'}],
+    ['prepare_import', {paths:['C:\\Comics','D:\\漫画'],recursive:true}],
+    ['commit_import', {token:'prepared',ids:['one','two'],defaults:{authors:['みずいろめがね'],genre:'同人志'},overwriteExisting:false}],
+    ['batch_edit', {ids:['one','two'],changes:{genre:'商业志'}}],
+    ['remove', {ids:['one']}],
+  ]
+  for (const [method, params] of operations) assert.deepEqual(await bridge.call(method, params), params)
 })
 
 test('invalid calls fail before data is sent to the service', async t => {

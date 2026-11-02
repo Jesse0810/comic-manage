@@ -87,6 +87,10 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     const result = await dialog.showOpenDialog(window, { title: '导入已有 CBZ', filters: [{ name: '漫画压缩包', extensions: ['cbz'] }], properties: ['openFile', 'multiSelections'] })
     return result.canceled ? [] : result.filePaths
   })
+  handle('comic:choose-directories', async () => {
+    const result = await dialog.showOpenDialog(window, { title: '选择一个或多个漫画文件夹', properties: ['openDirectory', 'multiSelections'] })
+    return result.canceled ? [] : result.filePaths
+  })
   handle('comic:choose-backup', async () => {
     const result = await dialog.showSaveDialog(window, { title: '备份资料库', defaultPath: `ComicManage-${new Date().toISOString().slice(0, 10)}.sqlite3`,
       filters: [{ name: 'SQLite 资料库', extensions: ['sqlite3'] }] })

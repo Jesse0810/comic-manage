@@ -2,7 +2,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { ArrowLeft, ArrowRight, Document, FolderOpened, Picture, Reading, Check, ZoomIn } from '@element-plus/icons-vue'
 import type { Comic, Metadata } from '../types'
-import { displayTitle, statusLabels, errorMessage } from '../types'
+import { displayTitle, statusLabels, errorMessage, comicGenres } from '../types'
 import { invoke } from '../api'
 const props = defineProps<{ comic: Comic | null; modelValue: Metadata | null; busy: boolean; dirty: boolean; reviewed: boolean }>()
 const emit = defineEmits<{
@@ -140,9 +140,10 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
                   <div class="form-grid">
                     <el-form-item label="社团 / 出版社"><el-input :model-value="modelValue.publisher" @update:model-value="update('publisher', $event)" placeholder="可选" /></el-form-item>
                     <el-form-item label="汉化组"><el-input :model-value="modelValue.translator" @update:model-value="update('translator', $event)" placeholder="可选" /></el-form-item>
-                    <el-form-item label="类型"><el-input :model-value="modelValue.genre" @update:model-value="update('genre', $event)" placeholder="例如：同人志" /></el-form-item>
+                    <el-form-item label="类型"><el-select :model-value="modelValue.genre" @update:model-value="update('genre', $event)" filterable allow-create clearable placeholder="选择或输入类型"><el-option v-for="genre in comicGenres" :key="genre" :label="genre" :value="genre" /></el-select></el-form-item>
                     <el-form-item label="语言"><el-select :model-value="modelValue.language" @update:model-value="update('language', $event)" filterable allow-create><el-option label="日文 · ja" value="ja" /><el-option label="简体中文 · zh-Hans" value="zh-Hans" /><el-option label="繁体中文 · zh-Hant" value="zh-Hant" /><el-option label="英文 · en" value="en" /></el-select></el-form-item>
                     <el-form-item label="发行年份"><el-input :model-value="modelValue.year" @update:model-value="update('year', $event)" placeholder="例如：2026" maxlength="4" /></el-form-item>
+                    <el-form-item label="发行月份"><el-select :model-value="modelValue.month || ''" @update:model-value="update('month', $event)" clearable placeholder="可选"><el-option v-for="month in 12" :key="month" :label="`${month} 月`" :value="String(month)" /></el-select></el-form-item>
                     <el-form-item label="年龄分级"><el-select :model-value="modelValue.age_rating" @update:model-value="update('age_rating', $event)" filterable allow-create><el-option label="未指定" value="Unknown" /><el-option label="全年龄" value="Everyone" /><el-option label="青少年" value="Teen" /><el-option label="17+" value="Mature 17+" /><el-option label="18+" value="Adults Only 18+" /></el-select></el-form-item>
                   </div>
                   <el-form-item label="作品简介"><el-input :model-value="modelValue.summary" @update:model-value="update('summary', $event)" type="textarea" :rows="3" resize="vertical" placeholder="写一段作品简介（可选）" /></el-form-item>

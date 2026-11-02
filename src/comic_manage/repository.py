@@ -52,6 +52,9 @@ class Repository:
                     action TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS removed_comics (
+                    comic_id TEXT PRIMARY KEY, removed_at TEXT NOT NULL
+                );
                 PRAGMA user_version = 1;
             """)
 
@@ -71,21 +74,33 @@ class Repository:
         value["metadata"] = Metadata.from_dict(json.loads(value["metadata"]))
         return Comic(**value)
 
-    def all(self) -> list[Comic]:
+    def all(self, *, include_removed: bool = False) -> list[Comic]:
         with self.connect() as db:
-            return [self._decode(row) for row in db.execute("SELECT * FROM comics ORDER BY updated_at DESC, id")]
+            condition = "" if include_removed else " WHERE id NOT IN (SELECT comic_id FROM removed_comics)"
+            return [self._decode(row) for row in db.execute(
+                "SELECT * FROM comics" + condition + " ORDER BY updated_at DESC, id")]
 
-    def get(self, comic_id: str) -> Comic:
+    def get(self, comic_id: str, *, include_removed: bool = False) -> Comic:
         with self.connect() as db:
-            row = db.execute("SELECT * FROM comics WHERE id=?", (comic_id,)).fetchone()
+            condition = "" if include_removed else " AND id NOT IN (SELECT comic_id FROM removed_comics)"
+            row = db.execute("SELECT * FROM comics WHERE id=?" + condition, (comic_id,)).fetchone()
         if not row:
             raise ValueError("作品记录不存在。")
         return self._decode(row)
 
-    def upsert_scan(self, snapshot: Snapshot) -> str:
+    def is_removed(self, comic_id: str) -> bool:
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (comic_id,)).fetchone() is not None
+
+    def upsert_scan(self, snapshot: Snapshot, *, restore: bool = False,
+                    defaults: dict | None = None, overwrite_existing: bool = False) -> str | None:
         comic_id = source_id(snapshot.path)
         metadata, warning = snapshot.initial_metadata()
+        defaults = defaults or {}
         with self.connect() as db:
+            removed = db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (comic_id,)).fetchone()
+            if removed and not restore:
+                return None
             previous = db.execute("SELECT * FROM comics WHERE id=?", (comic_id,)).fetchone()
             if previous:
                 if previous["fingerprint"] != snapshot.fingerprint:
@@ -94,7 +109,20 @@ class Repository:
                         snapshot.fingerprint, len(snapshot.pages),
                         "源文件已变化，请重新预览并审核。" + warning, now(), comic_id))
                     self._event(db, comic_id, "source_changed", snapshot.fingerprint)
+                if removed:
+                    db.execute("DELETE FROM removed_comics WHERE comic_id=?", (comic_id,))
+                    db.execute("UPDATE comics SET status='draft', updated_at=? WHERE id=?", (now(), comic_id))
+                    self._event(db, comic_id, "restore", str(snapshot.path))
+                if defaults and overwrite_existing:
+                    metadata = Metadata.from_dict(json.loads(previous["metadata"]))
+                    for key, value in defaults.items():
+                        setattr(metadata, key, value)
+                    db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
+                        json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
+                    self._event(db, comic_id, "batch_edit", "导入时批量更新作者或类型")
                 return comic_id
+            for key, value in defaults.items():
+                setattr(metadata, key, value)
             db.execute("""INSERT INTO comics
                 (id, source, kind, fingerprint, page_count, metadata, warning, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (
@@ -102,6 +130,34 @@ class Repository:
                 len(snapshot.pages), json.dumps(metadata.to_dict(), ensure_ascii=False), warning, now()))
             self._event(db, comic_id, "import", str(snapshot.path))
         return comic_id
+
+    def remove(self, comic_ids: list[str]) -> None:
+        """Hide catalog entries only. Source images and exported files are untouched."""
+        with self.connect() as db:
+            self._require_visible(db, comic_ids)
+            for comic_id in comic_ids:
+                db.execute("INSERT INTO removed_comics (comic_id, removed_at) VALUES (?, ?)", (comic_id, now()))
+                self._event(db, comic_id, "remove", "从漫画库移除，保留源文件、成品和人工资料")
+
+    @staticmethod
+    def _require_visible(db, comic_ids: list[str]):
+        for comic_id in comic_ids:
+            row = db.execute("SELECT 1 FROM comics WHERE id=? AND id NOT IN "
+                             "(SELECT comic_id FROM removed_comics)", (comic_id,)).fetchone()
+            if row is None:
+                raise ValueError("作品记录不存在或已移除。")
+
+    def batch_edit(self, comic_ids: list[str], changes: dict) -> None:
+        with self.connect() as db:
+            self._require_visible(db, comic_ids)
+            for comic_id in comic_ids:
+                row = db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()
+                metadata = Metadata.from_dict(json.loads(row["metadata"]))
+                for key, value in changes.items():
+                    setattr(metadata, key, value)
+                db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
+                    json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
+                self._event(db, comic_id, "batch_edit", "批量修改作者或类型；需要重新审核")
 
     def save(self, comic_id: str, metadata: Metadata) -> None:
         # Drafts may be incomplete. Every edit invalidates previous approval/export status.

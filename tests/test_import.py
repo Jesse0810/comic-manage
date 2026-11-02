@@ -1,0 +1,264 @@
+"""Selection-based import, catalog removal and bulk editing behavior."""
+from pathlib import Path
+import tempfile
+from threading import Event
+import unittest
+from unittest.mock import patch
+import zipfile
+
+from comic_manage.metadata import Metadata
+from comic_manage.service import ComicService, PLAN_TTL_SECONDS, ServiceError
+from comic_manage.sources import inspect_source, source_id
+
+
+class ImportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.library = self.root / "选择漫画"
+        self.first = self.book("作者甲的漫画")
+        self.second = self.book("作者乙的漫画")
+        self.service = ComicService(self.root / "data")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def book(self, name, parent=None):
+        book = (parent or self.library) / name
+        book.mkdir(parents=True)
+        (book / "1.jpg").write_bytes(b"first-page")
+        return book
+
+    def preview(self, *paths, **extra):
+        return self.service.call("prepare_import", {"paths": [str(p) for p in (paths or (self.library,))], **extra})
+
+    def commit(self, preview, ids=None, **extra):
+        return self.service.call("commit_import", {"token": preview["token"],
+                                 "ids": ids or [item["id"] for item in preview["items"]], **extra})
+
+    def imported(self, book=None):
+        book = book or self.first
+        self.commit(self.preview(book))
+        return source_id(book)
+
+    def test_preview_is_read_only_and_deduplicates_overlapping_folders(self):
+        result = self.preview(self.library, self.first, self.library)
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual({item["import_status"] for item in result["items"]}, {"new"})
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(self.service.repo.all(), [])
+        self.assertEqual(self.service.repo.setting("roots"), "")
+
+    def test_only_checked_books_are_imported_and_remembered_for_rescan(self):
+        preview = self.preview()
+        first_id = source_id(self.first)
+        result = self.commit(preview, [first_id], defaults={"authors": ["  已知作者  "], "genre": "同人志"})
+        self.assertEqual(result["count"], 1)
+        comic = self.service.repo.get(first_id)
+        self.assertEqual(comic.metadata.authors, ["已知作者"])
+        self.assertEqual(comic.metadata.genre, "同人志")
+        self.assertEqual(comic.status, "draft")
+        roots = self.service.repo.setting("roots").splitlines()
+        self.assertEqual(len(roots), 1)
+        self.assertTrue(Path(roots[0]).samefile(self.first))
+        self.assertEqual(self.service.call("scan", {})["count"], 1)
+        self.assertEqual([c.id for c in self.service.repo.all()], [first_id])
+
+    def test_unchecked_nested_book_is_not_imported_on_rescan(self):
+        nested = self.book("未勾选的子漫画", parent=self.first)
+        preview = self.preview(self.first)
+        self.assertEqual(len(preview["items"]), 2)
+        self.commit(preview, [source_id(self.first)])
+        self.service.call("scan", {})
+        with self.assertRaises(ValueError):
+            self.service.repo.get(source_id(nested))
+
+    def test_nonrecursive_preview_inspects_only_selected_folder(self):
+        self.book("子漫画", parent=self.first)
+        result = self.preview(self.first, recursive=False)
+        self.assertEqual([item["id"] for item in result["items"]], [source_id(self.first)])
+
+    def test_existing_manual_metadata_and_approval_survive_default_import(self):
+        identity = self.imported()
+        metadata = Metadata(original_title="人工标题", authors=["人工作者"], genre="商业志", summary="人工说明")
+        self.service.call("approve", {"id": identity, "metadata": metadata.to_dict()})
+        preview = self.preview(self.first)
+        item = preview["items"][0]
+        self.assertEqual(item["import_status"], "existing")
+        self.assertEqual(item["metadata"]["original_title"], "人工标题")
+        result = self.commit(preview, defaults={"authors": ["批量作者"], "genre": "同人志"})
+        self.assertEqual((result["count"], result["skipped"]), (0, 1))
+        comic = self.service.repo.get(identity)
+        self.assertEqual(comic.metadata.to_dict(), metadata.to_dict())
+        self.assertEqual(comic.status, "approved")
+
+    def test_explicit_overwrite_updates_only_author_and_type_and_revokes_review(self):
+        identity = self.imported()
+        metadata = Metadata(original_title="人工标题", authors=["旧作者"], summary="保留说明", tags=["保留标签"])
+        self.service.call("approve", {"id": identity, "metadata": metadata.to_dict()})
+        self.commit(self.preview(self.first), defaults={"authors": ["新作者"], "genre": "单行本"}, overwriteExisting=True)
+        comic = self.service.repo.get(identity)
+        self.assertEqual(comic.metadata.authors, ["新作者"])
+        self.assertEqual(comic.metadata.genre, "单行本")
+        self.assertEqual((comic.metadata.original_title, comic.metadata.summary, comic.metadata.tags),
+                         ("人工标题", "保留说明", ["保留标签"]))
+        self.assertEqual(comic.status, "draft")
+
+    def test_remove_hides_record_without_touching_source_or_output_and_rescan_skips_it(self):
+        identity = self.imported()
+        metadata = Metadata(original_title="人工标题", authors=["作者"])
+        self.service.call("save", {"id": identity, "metadata": metadata.to_dict()})
+        output = self.root / "成品.cbz"
+        output.write_bytes(b"existing-export")
+        self.service.repo.mark_packaged(identity, output, {})
+        self.assertEqual(self.service.call("remove", {"ids": [identity]})["count"], 1)
+        self.assertEqual(self.service.call("bootstrap")["comics"], [])
+        with self.assertRaises(ValueError):
+            self.service.call("page", {"id": identity})
+        self.assertEqual(self.service.call("scan", {})["count"], 0)
+        self.assertEqual((self.first / "1.jpg").read_bytes(), b"first-page")
+        self.assertEqual(output.read_bytes(), b"existing-export")
+        retained = self.service.repo.get(identity, include_removed=True)
+        self.assertEqual(retained.metadata.original_title, "人工标题")
+        self.assertTrue(Path(retained.output).samefile(output))
+
+    def test_explicit_reimport_restores_removed_book_preserving_manual_data_as_draft(self):
+        identity = self.imported()
+        self.service.call("approve", {"id": identity, "metadata": {"authors": ["人工作者"], "original_title": "人工标题"}})
+        self.service.call("remove", {"ids": [identity]})
+        preview = self.preview(self.first)
+        self.assertEqual(preview["items"][0]["import_status"], "removed")
+        self.assertEqual(self.commit(preview, defaults={"authors": ["不应覆盖"]})["count"], 1)
+        comic = self.service.repo.get(identity)
+        self.assertEqual(comic.metadata.authors, ["人工作者"])
+        self.assertEqual(comic.metadata.original_title, "人工标题")
+        self.assertEqual(comic.status, "draft")
+
+    def test_remove_and_batch_edit_validate_all_ids_before_any_changes(self):
+        self.commit(self.preview())
+        identity = source_id(self.first)
+        before = self.service.repo.get(identity).metadata.to_dict()
+        for method, extra in [("remove", {}), ("batch_edit", {"changes": {"authors": ["不应修改"]}})]:
+            with self.subTest(method=method), self.assertRaises(ValueError):
+                self.service.call(method, {"ids": [identity, "missing-id"], **extra})
+            self.assertFalse(self.service.repo.is_removed(identity))
+            self.assertEqual(self.service.repo.get(identity).metadata.to_dict(), before)
+
+    def test_batch_edit_revokes_review_and_keeps_other_fields_and_export_reference(self):
+        self.commit(self.preview())
+        identities = [source_id(self.first), source_id(self.second)]
+        for identity in identities:
+            self.service.call("approve", {"id": identity, "metadata": {"authors": ["旧作者"], "summary": "保留说明"}})
+            self.service.repo.mark_packaged(identity, self.root / f"{identity}.cbz", {})
+        result = self.service.call("batch_edit", {"ids": identities, "changes": {"authors": ["统一作者"], "genre": "商业志"}})
+        self.assertEqual(result["count"], 2)
+        for identity in identities:
+            comic = self.service.repo.get(identity)
+            self.assertEqual(comic.metadata.authors, ["统一作者"])
+            self.assertEqual(comic.metadata.genre, "商业志")
+            self.assertEqual(comic.metadata.summary, "保留说明")
+            self.assertTrue(comic.output.endswith(f"{identity}.cbz"))
+            self.assertEqual(comic.status, "draft")
+
+    def test_batch_operations_invalidate_prepared_export(self):
+        identity = self.imported()
+        for operation, args in [("batch_edit", {"changes": {"genre": "同人志"}}), ("remove", {})]:
+            self.service.call("approve", {"id": identity, "metadata": {"authors": ["作者"]}})
+            plan = self.service.call("plan", {"ids": [identity], "outputRoot": str(self.root / "output")})
+            self.service.call(operation, {"ids": [identity], **args})
+            with self.assertRaisesRegex(ServiceError, "失效"):
+                self.service.call("export", {"token": plan["token"]})
+
+    def test_stale_source_is_reported_without_importing_changed_book(self):
+        preview = self.preview()
+        (self.first / "2.jpg").write_bytes(b"new-page")
+        result = self.commit(preview)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("变化", result["errors"][0])
+        self.assertEqual([c.id for c in self.service.repo.all()], [source_id(self.second)])
+
+    def test_import_token_is_bounded_expiring_and_one_use_and_rejects_injected_id(self):
+        preview = self.preview(self.first)
+        with self.assertRaises(ServiceError):
+            self.commit(preview, [source_id(self.second)])
+        self.assertEqual(self.service.repo.all(), [])
+        self.commit(preview)
+        with self.assertRaisesRegex(ServiceError, "失效"):
+            self.commit(preview)
+        preview = self.preview(self.second)
+        self.service.imports[preview["token"]].created_at -= PLAN_TTL_SECONDS + 1
+        with self.assertRaisesRegex(ServiceError, "失效"):
+            self.commit(preview)
+        for _ in range(10):
+            self.preview(self.first)
+        self.assertLessEqual(len(self.service.imports), 8)
+
+    def test_cancelled_preview_returns_discovered_selection_without_writing_catalog(self):
+        cancel = Event()
+        self.service.progress = lambda _: cancel.set()
+        result = self.service.call("prepare_import", {"paths": [str(self.library)]}, cancel)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(self.service.repo.all(), [])
+
+    def test_cancelled_commit_keeps_only_completed_records_and_roots(self):
+        preview = self.preview()
+        cancel = Event()
+        original = self.service.repo.upsert_scan
+
+        def stop_after_first(*args, **kwargs):
+            result = original(*args, **kwargs)
+            cancel.set()
+            return result
+
+        with patch.object(self.service.repo, "upsert_scan", side_effect=stop_after_first):
+            result = self.service.call("commit_import", {"token": preview["token"],
+                                       "ids": [item["id"] for item in preview["items"]]}, cancel)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(len(self.service.repo.all()), 1)
+        self.assertEqual(len(self.service.repo.setting("roots").splitlines()), 1)
+
+    def test_cbz_files_can_be_selected_alongside_folders(self):
+        archive = self.root / "现有漫画.cbz"
+        with zipfile.ZipFile(archive, "w") as target:
+            target.writestr("1.jpg", b"archive-image")
+        preview = self.preview(self.first, archive)
+        self.assertEqual({item["kind"] for item in preview["items"]}, {"folder", "cbz"})
+        self.assertEqual(self.commit(preview, defaults={"genre": "单行本"})["count"], 2)
+        self.assertEqual({c.metadata.genre for c in self.service.repo.all()}, {"单行本"})
+
+    def test_folder_browser_skips_system_catalog_and_output_folders(self):
+        (self.library / ".git").mkdir()
+        self.service = ComicService(self.library / "data")
+        output = self.library / "output"
+        output.mkdir()
+        self.service.call("set_output", {"path": str(output)})
+        self.book("child", parent=self.first)
+        result = self.service.call("browse_folders", {"path": str(self.library)})
+        children = {child["name"]: child for child in result["children"]}
+        self.assertEqual(set(children), {self.first.name, self.second.name})
+        self.assertTrue(children[self.first.name]["hasChildren"])
+        self.assertFalse(children[self.second.name]["hasChildren"])
+        preview = self.preview(self.service.data_dir, output)
+        self.assertEqual(preview["items"], [])
+        self.assertEqual(len(preview["errors"]), 2)
+
+    def test_malformed_bulk_arguments_do_not_mutate_catalog(self):
+        identity = self.imported()
+        for changes in [{}, {"authors": []}, {"authors": "作者"}, {"genre": " "}, {"genre": 3},
+                        {"original_title": "不允许的批量字段"}]:
+            with self.subTest(changes=changes), self.assertRaises(ServiceError):
+                self.service.call("batch_edit", {"ids": [identity], "changes": changes})
+        for params in [{"paths": [str(self.first)], "recursive": 1}, {"paths": []}, {"paths": ["relative"]}]:
+            with self.subTest(params=params), self.assertRaises(ServiceError):
+                self.service.call("prepare_import", params)
+        preview = self.preview(self.first)
+        with self.assertRaises(ServiceError):
+            self.commit(preview, overwriteExisting="true")
+        self.assertEqual(self.service.repo.get(identity).metadata.authors, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
