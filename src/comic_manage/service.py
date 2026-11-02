@@ -1,0 +1,437 @@
+"""Local JSON-lines service for Electron, without Qt or a network listener."""
+from __future__ import annotations
+
+import argparse
+import base64
+from collections import OrderedDict
+from dataclasses import asdict, dataclass
+import json
+import os
+from pathlib import Path
+import secrets
+import sys
+from threading import Event, Lock, Thread
+import time
+from typing import Callable, TextIO
+
+from .metadata import Metadata, to_comicinfo
+from .packaging import ExportPlan, export_cbz, make_plan
+from .repository import Comic, Repository
+from .sources import Cancelled, check_cancel, discover, inspect_source, source_id
+
+MAX_PAGE_BYTES = 32 * 1024 * 1024
+MAX_REQUEST_CHARS = 8 * 1024 * 1024
+PLAN_TTL_SECONDS = 15 * 60
+PAGE_MIMES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+              ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+              ".tif": "image/tiff", ".tiff": "image/tiff", ".avif": "image/avif"}
+
+
+class ServiceError(ValueError):
+    def __init__(self, message: str, code: str = "INVALID_ARGUMENT"):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class PreparedExport:
+    created_at: float
+    output_root: Path
+    plans: list[ExportPlan]
+
+
+def _string(value, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ServiceError(f"{name} 必须是有效文本。")
+    return value
+
+
+def _strings(value, name: str) -> list[str]:
+    if not isinstance(value, list) or not value or len(value) > 10_000:
+        raise ServiceError(f"{name} 必须是有效列表。")
+    return list(dict.fromkeys(_string(v, name) for v in value))
+
+
+def _path(value, name: str) -> Path:
+    result = Path(_string(value, name)).expanduser()
+    if not result.is_absolute():
+        raise ServiceError(f"{name} 必须是完整路径。")
+    return Path(os.path.abspath(result))
+
+
+def _metadata(value, previous: Metadata | None = None) -> Metadata:
+    if not isinstance(value, dict):
+        raise ServiceError("metadata 必须是作品资料对象。")
+    merged = previous.to_dict() if previous else Metadata().to_dict()
+    for key, item in value.items():
+        if key not in merged:
+            continue
+        if key in ("authors", "tags"):
+            if not isinstance(item, list) or len(item) > 10_000 or any(not isinstance(v, str) for v in item):
+                raise ServiceError(f"{key} 必须是文本列表。")
+        elif key in ("translated", "uncensored", "full_color"):
+            if type(item) is not bool:
+                raise ServiceError(f"{key} 必须是布尔值。")
+        elif key == "cover_index":
+            if type(item) is not int or item < 0:
+                raise ServiceError("cover_index 必须是非负整数。")
+        elif not isinstance(item, str) or len(item) > 2 * 1024 * 1024:
+            raise ServiceError(f"{key} 必须是长度合适的文本。")
+        merged[key] = item
+    return Metadata.from_dict(merged)
+
+
+class ComicService:
+    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
+                         "plan", "export", "cancel", "set_output", "backup"})
+
+    def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
+        self.data_dir = data_dir.resolve()
+        self.repo = Repository(self.data_dir / "catalog.sqlite3")
+        self.progress = progress or (lambda message: None)
+        self.plans: OrderedDict[str, PreparedExport] = OrderedDict()
+
+    @staticmethod
+    def serialize(comic: Comic) -> dict:
+        return asdict(comic)
+
+    def call(self, method: str, params: dict | None = None, cancel: Event | None = None):
+        if method not in self.METHODS:
+            raise ServiceError("不支持的操作。", "METHOD_NOT_FOUND")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise ServiceError("params 必须是对象。")
+        cancel = cancel if cancel is not None else Event()
+        if method not in ("scan", "import", "export", "cancel"):
+            check_cancel(cancel)
+        if method == "bootstrap":
+            return {"comics": [self.serialize(c) for c in self.repo.all()],
+                    "roots": self.repo.setting("roots").splitlines(),
+                    "outputRoot": self.repo.setting("output_root"), "dataDir": str(self.data_dir)}
+        if method == "scan":
+            return self.scan(params, cancel)
+        if method == "import":
+            return self.import_files(params, cancel)
+        if method in ("save", "approve"):
+            return self.save(params, approve=method == "approve", cancel=cancel)
+        if method == "page":
+            return self.page(params, cancel)
+        if method == "xml":
+            comic = self.repo.get(_string(params["id"], "id")) if params.get("id") else None
+            metadata = _metadata(params.get("metadata", {}), comic.metadata if comic else None)
+            page_count = params.get("pageCount", comic.page_count if comic else None)
+            if type(page_count) is not int or page_count < 1:
+                raise ServiceError("pageCount 必须是正整数。")
+            return {"xml": to_comicinfo(metadata, page_count).decode("utf-8")}
+        if method == "plan":
+            return self.prepare(params, cancel)
+        if method == "export":
+            return self.export(params, cancel)
+        if method == "cancel":
+            cancel.set()
+            return {"cancelled": True}
+        if method == "set_output":
+            path = _path(params.get("path"), "成品目录")
+            self.repo.set_setting("output_root", str(path))
+            self.plans.clear()
+            return {"outputRoot": str(path)}
+        if method == "backup":
+            path = _path(params.get("path"), "备份路径")
+            self.repo.backup(path)
+            return {"path": str(path)}
+        raise ServiceError("不支持的操作。", "METHOD_NOT_FOUND")
+
+    def scan(self, params: dict, cancel: Event) -> dict:
+        roots = _strings(params.get("roots", self.repo.setting("roots").splitlines()), "扫描目录")
+        roots = [str(_path(value, "扫描目录")) for value in roots]
+        retained = self.repo.setting("roots").splitlines()
+        by_path = {os.path.normcase(p): p for p in retained + roots}
+        self.repo.set_setting("roots", "\n".join(by_path.values()))
+        self.plans.clear()
+        output = self.repo.setting("output_root")
+        excluded = [self.data_dir] + ([Path(output)] if output else [])
+        count, errors, seen = 0, [], set()
+        try:
+            for root in roots:
+                check_cancel(cancel)
+                try:
+                    for snapshot in discover(Path(root), exclude=excluded, cancel=cancel,
+                                             on_error=lambda path, error: errors.append(f"{path}: {error}")):
+                        identity = source_id(snapshot.path)
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        check_cancel(cancel)
+                        self.repo.upsert_scan(snapshot)
+                        count += 1
+                        self.progress(f"已扫描 {count} 本 · {snapshot.path.name}")
+                except (OSError, ValueError) as exc:
+                    errors.append(f"{root}: {exc}")
+            check_cancel(cancel)
+        except Cancelled:
+            return {"count": count, "errors": errors, "cancelled": True}
+        return {"count": count, "errors": errors, "cancelled": False}
+
+    def import_files(self, params: dict, cancel: Event) -> dict:
+        paths = [_path(p, "CBZ 路径") for p in _strings(params.get("paths"), "CBZ 路径")]
+        self.plans.clear()
+        count, errors = 0, []
+        try:
+            for path in paths:
+                check_cancel(cancel)
+                try:
+                    if path.suffix.lower() != ".cbz":
+                        raise ValueError("导入文件必须为 CBZ。")
+                    self.progress(f"正在导入 {path.name}")
+                    snapshot = inspect_source(path)
+                    check_cancel(cancel)
+                    self.repo.upsert_scan(snapshot)
+                    count += 1
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    errors.append(f"{path}: {exc}")
+            check_cancel(cancel)
+        except Cancelled:
+            return {"count": count, "errors": errors, "cancelled": True}
+        return {"count": count, "errors": errors, "cancelled": False}
+
+    def save(self, params: dict, *, approve: bool, cancel: Event) -> dict:
+        identity = _string(params.get("id"), "id")
+        comic = self.repo.get(identity)
+        metadata = _metadata(params.get("metadata"), comic.metadata)
+        self.plans.clear()
+        self.repo.save(identity, metadata)
+        if approve:
+            check_cancel(cancel)
+            self.progress("正在确认源文件与作品资料…")
+            snapshot = inspect_source(Path(comic.source))
+            check_cancel(cancel)
+            self.repo.approve(identity, snapshot)
+        return self.serialize(self.repo.get(identity))
+
+    def page(self, params: dict, cancel: Event) -> dict:
+        comic = self.repo.get(_string(params.get("id"), "id"))
+        index = params.get("index", 0)
+        if type(index) is not int or index < 0:
+            raise ServiceError("页码必须是非负整数。")
+        snapshot = inspect_source(Path(comic.source))
+        if snapshot.fingerprint != comic.fingerprint:
+            raise ServiceError("源文件已变化，请重新扫描后预览。", "SOURCE_CHANGED")
+        if index >= len(snapshot.pages):
+            raise ServiceError("页码超出图片范围。")
+        member = snapshot.pages[index]
+        if member.size > MAX_PAGE_BYTES:
+            raise ServiceError("此页超过 32 MiB，暂不能预览，仍可无损打包。", "PAGE_TOO_LARGE")
+        mime = PAGE_MIMES.get(Path(member.name).suffix.lower())
+        if mime is None:
+            raise ServiceError("此图片格式暂不支持预览。")
+        check_cancel(cancel)
+        data = snapshot.page_bytes(index)
+        if len(data) > MAX_PAGE_BYTES:
+            raise ServiceError("此页超过 32 MiB，暂不能预览。", "PAGE_TOO_LARGE")
+        check_cancel(cancel)
+        return {"dataUrl": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+                "name": member.name, "index": index, "total": len(snapshot.pages)}
+
+    def prepare(self, params: dict, cancel: Event) -> dict:
+        identities = _strings(params.get("ids"), "作品 id")
+        output_root = _path(params.get("outputRoot"), "成品目录")
+        plans, destinations, items = [], set(), []
+        for identity in identities:
+            check_cancel(cancel)
+            comic = self.repo.get(identity)
+            self.progress(f"检查生成计划 · {comic.metadata.display_title}")
+            plan = make_plan(comic, output_root)
+            destination = os.path.normcase(str(plan.destination))
+            if destination in destinations:
+                raise ServiceError("多本作品使用了相同输出路径，请调整后重试。")
+            destinations.add(destination)
+            plans.append(plan)
+            items.append({"id": identity, "title": comic.metadata.display_title, "source": comic.source,
+                          "destination": str(plan.destination), "pageCount": len(plan.snapshot.pages),
+                          "attachmentCount": len(plan.snapshot.extras)})
+        check_cancel(cancel)
+        now = time.monotonic()
+        self.plans = OrderedDict((token, p) for token, p in self.plans.items()
+                                 if now - p.created_at <= PLAN_TTL_SECONDS)
+        while len(self.plans) >= 8:
+            self.plans.popitem(last=False)
+        token = secrets.token_urlsafe(32)
+        self.plans[token] = PreparedExport(now, output_root, plans)
+        return {"token": token, "items": items, "totalBytes": sum(
+            sum(m.size for m in p.snapshot.pages + p.snapshot.extras) + len(p.xml) for p in plans)}
+
+    def export(self, params: dict, cancel: Event) -> dict:
+        token = _string(params.get("token"), "生成计划")
+        prepared = self.plans.pop(token, None)
+        if prepared is None or time.monotonic() - prepared.created_at > PLAN_TTL_SECONDS:
+            raise ServiceError("生成计划已失效，请重新预览并确认。", "INVALID_PLAN")
+        completed, errors = [], []
+        try:
+            fresh = []
+            for previous in prepared.plans:
+                check_cancel(cancel)
+                current = make_plan(self.repo.get(previous.comic.id), prepared.output_root)
+                if (current.destination != previous.destination or current.xml != previous.xml
+                        or current.snapshot.fingerprint != previous.snapshot.fingerprint):
+                    raise ServiceError("作品在生成计划确认后发生变化，请重新预览。", "INVALID_PLAN")
+                fresh.append(current)
+            for plan in fresh:
+                check_cancel(cancel)
+                try:
+                    report = export_cbz(plan, cancel=cancel, progress=self.progress)
+                    self.repo.mark_packaged(plan.comic.id, plan.destination, report)
+                    completed.append(str(plan.destination))
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    errors.append(f"{plan.comic.source}: {exc}")
+        except Cancelled:
+            return {"completed": completed, "errors": errors, "cancelled": True}
+        return {"completed": completed, "errors": errors, "cancelled": False}
+
+
+def error_payload(exc: Exception) -> dict:
+    if isinstance(exc, ServiceError):
+        code = exc.code
+    elif isinstance(exc, Cancelled):
+        code = "CANCELLED"
+    elif isinstance(exc, FileExistsError):
+        code = "TARGET_EXISTS"
+    elif isinstance(exc, FileNotFoundError):
+        code = "SOURCE_UNAVAILABLE"
+    elif isinstance(exc, OSError):
+        code = "IO_ERROR"
+    elif isinstance(exc, (ValueError, KeyError, TypeError)):
+        code = "INVALID_ARGUMENT"
+    else:
+        code = "INTERNAL_ERROR"
+    return {"message": str(exc) or type(exc).__name__, "code": code}
+
+
+class JsonLineServer:
+    def __init__(self, data_dir: Path, output: TextIO):
+        self.output = output
+        self.output_lock = Lock()
+        self.state_lock = Lock()
+        self.active: tuple[Thread, Event] | None = None
+        self.service = ComicService(data_dir, self.progress)
+
+    def emit(self, value: dict):
+        with self.output_lock:
+            self.output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self.output.flush()
+
+    def progress(self, message: str):
+        self.emit({"event": "task-progress", "data": {"message": message}})
+
+    def accept(self, request):
+        identity = request.get("id") if isinstance(request, dict) else None
+        try:
+            if not isinstance(request, dict):
+                raise ServiceError("请求必须是对象。")
+            if not isinstance(identity, str) or not identity or len(identity) > 128:
+                raise ServiceError("请求 id 必须是非空文本。")
+            method = request.get("method")
+            if not isinstance(method, str) or method not in self.service.METHODS:
+                raise ServiceError("不支持的操作。", "METHOD_NOT_FOUND")
+            params = request.get("params", {})
+            if not isinstance(params, dict):
+                raise ServiceError("params 必须是对象。")
+            with self.state_lock:
+                if method == "cancel":
+                    if self.active:
+                        self.active[1].set()
+                    self.emit({"id": identity, "result": {"cancelled": True}})
+                    return
+                if self.active is not None:
+                    raise ServiceError("正在执行其他操作，请稍候。", "BUSY")
+                cancel = Event()
+                worker = Thread(target=self.run_request, args=(identity, method, params, cancel),
+                                name=f"comic-{method}")
+                self.active = (worker, cancel)
+                worker.start()
+        except Exception as exc:
+            self.emit({"id": identity, "error": error_payload(exc)})
+
+    def run_request(self, identity: str, method: str, params: dict, cancel: Event):
+        try:
+            response = {"id": identity, "result": self.service.call(method, params, cancel)}
+        except Exception as exc:
+            response = {"id": identity, "error": error_payload(exc)}
+        with self.state_lock:
+            self.active = None
+        self.emit(response)
+
+    def serve(self, source: TextIO):
+        try:
+            while line := source.readline(MAX_REQUEST_CHARS + 1):
+                if len(line) > MAX_REQUEST_CHARS:
+                    while line and not line.endswith("\n"):
+                        line = source.readline(MAX_REQUEST_CHARS + 1)
+                    self.emit({"id": None, "error": {"message": "请求过大。", "code": "INVALID_ARGUMENT"}})
+                    continue
+                if not line.strip():
+                    continue
+                try:
+                    request = json.loads(line)
+                except (ValueError, UnicodeError):
+                    self.emit({"id": None, "error": {"message": "无效的 JSON 请求。", "code": "PARSE_ERROR"}})
+                    continue
+                self.accept(request)
+        finally:
+            with self.state_lock:
+                active = self.active
+                if active:
+                    active[1].set()
+            if active:
+                active[0].join()
+
+
+class CatalogLock:
+    """OS-held lock, released even if the service is terminated."""
+    def __init__(self, data_dir: Path):
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self.handle = (data_dir / "desktop-service.lock").open("a+b")
+
+    def __enter__(self):
+        self.handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.handle.seek(0)
+            if self.handle.read(1) == b"":
+                self.handle.write(b"\0")
+                self.handle.flush()
+        except OSError:
+            self.handle.close()
+            raise ServiceError("此资料库已由另一个漫画整理服务打开。", "CATALOG_LOCKED") from None
+        return self
+
+    def __exit__(self, *_):
+        self.handle.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Comic Manage local desktop service")
+    parser.add_argument("--data-dir", type=Path, required=True)
+    args = parser.parse_args()
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="strict")
+    try:
+        with CatalogLock(args.data_dir):
+            JsonLineServer(args.data_dir, sys.stdout).serve(sys.stdin)
+    except Exception as exc:
+        print(json.dumps({"error": error_payload(exc)}, ensure_ascii=False), file=sys.stderr, flush=True)
+        raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+    main()

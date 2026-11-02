@@ -1,28 +1,36 @@
 name: Test
-
-on:
-  push:
-  pull_request:
-
+on: [push, pull_request]
 permissions:
   contents: read
-
 jobs:
-  windows-tests:
+  core:
     runs-on: windows-latest
     strategy:
       matrix:
         python-version: ['3.11', '3.12', '3.13']
     env:
       PYTHONPATH: src
-      QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-      - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
-
+      - run: python -m unittest tests.test_core tests.test_service -v
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - shell: pwsh
+        run: '"COMIC_MANAGE_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV'
+      - run: npm ci
+      - run: npm run test:bridge
+      - run: npm run build
+      - run: npm run test:desktop

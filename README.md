@@ -1,98 +1,85 @@
-# Comic Manage · v1 初始版
+# Comic Manage · Electron 版
 
-Windows 本地漫画整理软件：浏览本机 / NAS 图片文件夹与已有 CBZ，人工编辑和审核元数据，生成经过校验、可交给 Kavita 扫描的 CBZ。
+本地漫画整理软件，采用 **Electron + Vue 3 + TypeScript + Element Plus**。浏览本机或 NAS 图片目录与 CBZ，编辑中日文资料、预览页面、人工审核，并生成经过完整性校验的 CBZ。
 
-本分支用 **Python + PySide6 + SQLite** 重建原 Tauri/Vue 骨架。v1 已实现实际文件处理流程，不包含网络刮削。软件不发送漫画、目录或元数据到服务器。
+Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plus 提供界面。已验证的 Python 扫描、SQLite、ComicInfo 和无损打包逻辑保留为独立本地服务，通过进程管道通信，**不开放 HTTP 端口**。便携包内置服务，无需用户安装 Python 或 Node.js。
 
-## 启动
+## Windows 便携版
 
-**Windows 便携版**：解压 `ComicManage-v1-windows-x64.zip`，双击目录内 `ComicManage.exe`。保留整个目录，不要单独移动 exe。便携包不需要安装 Python；资料库默认仍保存在本机用户数据目录。
+解压 `ComicManage-Electron-1.1.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
 
-**源码版**：安装 64 位 Python 3.11 或更新版本，解压本仓库，双击 `start.bat`。首次启动会联网安装固定版本的 PySide6。也可以执行：
+1. 添加本地或 NAS 目录，或导入已有 CBZ。
+2. 选择独立成品目录。
+3. 选择作品，编辑原名、中文名、作者、标签等信息，预览页面并选择封面。
+4. 保存草稿；核对后勾选审核确认，再点击“审核通过”。
+5. 多选已审核作品，查看生成计划，确认目标路径后生成。
 
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe run.py
-```
+图片不转码，逐图片与附件验证 ZIP CRC 和 SHA-256，校验成功后才发布正式 CBZ。不会覆盖已有目标，不会删除原始图片。修改元数据或扫描到源变化后需要重新审核。
 
-除 Qt 外，核心文件处理使用 Python 标准库。SQLite 资料库不应放在 NAS 上；漫画源目录和成品目录可以使用映射盘或 `\\NAS\share\漫画`。共享目录的 Windows 访问权限需事先配置好。
+已汉化作品使用中文 Series 和日文 LocalizedSeries；未汉化作品只保留原名。正向标签只生成“汉化”“无修正”“全彩”。完整规则见 [v1 元数据与文件规则](docs/V1_QT.md#元数据规则)，这些规则继续适用。
 
-## 使用流程
+## 原有资料库
 
-1. **添加目录**：递归扫描。每个含直接图片的文件夹视为一本作品；嵌套文件夹若也含图片，会作为另外一本作品。一个现有 CBZ 视为一本作品。扫描不会移动或改写源文件。
-2. **选择成品目录**：使用独立目录，建议与原始漫画目录并列。重新扫描时会跳过当前成品目录和本机资料库目录。
-3. **编辑资料**：填完整原名、中文名、作者、社团、汉化组、类型、标签、语言、年份、简介、年龄分级。多作者用逗号分隔。预览各页，并选择封面。可查看将写入的 XML。
-4. **保存草稿**：人工修改保存在 SQLite，不会写回原始 ComicInfo。任何修改都撤销先前审核状态。
-5. **人工审核**：核对标题、作者、页序和封面，勾选确认后点击“审核通过”。尚未审核的作品不能生成 CBZ。
-6. **生成所选 CBZ**：Ctrl / Shift 多选已审核作品，查看路径计划，确认后生成。每本独立完成、独立校验；错误和取消不会回滚此前已成功的作品。全部源文件保留。
-7. 把**成品目录**添加到 Kavita 的 Manga 书库并扫描。请先用几本作品核对实际显示、页序和双标题搜索。
+Windows 默认仍使用 `%LOCALAPPDATA%\ComicManage\ComicManage\catalog.sqlite3`，与 Qt 版相同。不会另建空库覆盖旧资料。Chromium 缓存在该目录的 electron/ 子目录。
 
-支持按中文名、原名、作者、标签和汉化组搜索，按作者和处理状态筛选。v1 的审核为逐本确认，打包支持多选。
+**切换前退出旧 Qt 版并备份资料库，不要同时操作同一个资料库。** 可在软件中备份，或关闭软件后复制 SQLite 文件。备份不含漫画图片。
 
-## 元数据规则
-
-| 内容 | ComicInfo 写法 |
-| --- | --- |
-| 已汉化 | `Series` / `Title` 为完整中文名；`LocalizedSeries` 为完整日文原名 |
-| 未汉化 | `Series` / `Title` 为完整原名；不生成 `LocalizedSeries` |
-| 多位作者 | `Writer` 为逗号分隔作者列表，不复制多份漫画 |
-| 正向标记 | 只为勾选项生成 `汉化`、`无修正`、`全彩` 标签 |
-| 默认情况 | 不生成 `生肉`、`有修正`、`黑白` 等反向标签 |
-| 语言 | 汉化切换时默认 `zh-Hans`；未汉化默认 `ja`，可手动填写 `zh-Hant` 等 |
-| 封面 | `Pages/Page` 的 `Image` 为从 0 开始的页序，`Type="FrontCover"` |
-
-`ComicInfo.xml` 写在 CBZ 根目录。已有 ComicInfo 的其他字段（例如 Number、Volume、Web）保留；本软件管理的字段和封面信息按当前审核数据重写。v1 只读取 UTF-8 XML；无效或不支持的原 XML 会显示警告，并改为人工录入。原 XML 始终留在源文件中。未填写的年龄分级为 Unknown，不推断作品是否成人向。
-
-Kavita 官方说明 `LocalizedSeries` 支持第二名称搜索，也会参与合并系列。因此，其他作者的已审核同名作品会阻止审核，需人工调整标题或使用独立资料库管理；这只能检查**本资料库**，不能识别 Kavita 内已有的全部同名作品。
-
-参考：[Kavita 漫画元数据](https://wiki.kavitareader.com/guides/metadata/comics/)、[Kavita 扫描规则](https://wiki.kavitareader.com/guides/scanner/)。Kavita 的 `LocalizedSeries` 属于其扩展字段，不能据此保证其他阅读器完全兼容。
-
-## 文件与校验规则
-
-- 图片扩展名：JPG / JPEG / PNG / WebP / GIF / BMP / TIFF / AVIF。预览由本机 Qt 图片插件决定，不支持预览的图片仍可按原字节打包。v1 校验字节完整性，不保证源图片可成功解码。
-- 页序按源文件名自然排序，例如 `1, 2, 10`；输出为 `pages/00001.jpg` 等。嵌套 CBZ 按完整相对路径排序。若需要自定义页序，应先整理源文件名，重新扫描再审核。
-- 图片**不解码重编码**，使用 ZIP_STORED 避免重复压缩。现有 CBZ 的非图片附件保留到 `extras/`；图片文件夹只打包本层图片和新 ComicInfo，其他文件及子目录留在原处。
-- 成品路径：`成品目录/作者A & 作者B/作品标题 [来源ID].cbz`。文件名会替换 Windows 禁用字符并限制长度；XML 中保留完整标题。来源 ID 基于源路径，相同标题的不同来源不会直接相互覆盖。
-- 每本先写成品目录下的随机 `.partial` 文件，对每张图片和每个附件重新读取，验证 ZIP CRC、SHA-256、清单、页数及 XML。通过后才原子发布为正式 CBZ；Windows 重命名拒绝已存在目标。
-- 目标已存在时拒绝生成；源文件在预览后或打包中变化时拒绝发布。普通取消和异常会清理当次临时文件。断电 / 强制结束后可能留下 `.partial`，确认程序未运行后可手动清理。
-- 扫描签名依据路径、大小、修改时间，以及 CBZ 成员 CRC / XML 摘要。它用于检测常规源变化，不是内容去重工具；源文件大小和修改时间被人为同时恢复时，文件夹签名可能无法识别变化。打包的 SHA-256 用于证明此次读取与成品字节一致。
-- 单条目上限 512 MiB、单本解压总量 64 GiB、10 万条目；拒绝加密 CBZ、危险内部路径、重复条目和符号链接。不支持 CBR、RAR、7z、PDF 或 ZIP 后缀导入；可先在外部转换为 CBZ。
-- NAS 离线或扫描中断不会删除数据库记录。缺失源文件会在预览 / 审核 / 生成时报告。网络阻塞时取消需等待系统文件操作返回。
-- **v1 不执行源文件删除、替换现有 CBZ、批量覆盖或自动刮削。**
-
-## 本机资料与备份
-
-默认资料库由 Qt 的 `AppLocalDataLocation` 决定，Windows 通常位于 `%LOCALAPPDATA%\ComicManage\ComicManage\catalog.sqlite3`。可用 `--data-dir` 指定独立目录，例如：
+可以指定独立本机数据目录：
 
 ```powershell
 .\ComicManage.exe --data-dir D:\ComicManageData
 ```
 
-“备份资料库”使用 SQLite 备份 API，备份元数据、来源路径、审核和校验记录，不包含漫画。恢复时关闭软件，将备份复制为数据目录下的 `catalog.sqlite3`，或放入新的 `--data-dir` 目录。请保留原库备份。源路径变化后会视为新来源，v1 不自动合并移动后的记录，也不自动清理旧索引。
+漫画源目录与成品目录可位于 NAS，SQLite 资料目录应放本机。共享目录需已配置 Windows 访问权限。NAS 断开不会清理索引；源路径移动后仍视为新来源。
 
-## 开发与测试
+## 源码开发
+
+需要 Node.js 22.12+（建议 24 LTS）与 Python 3.11+。在项目目录执行：
 
 ```powershell
-$env:PYTHONPATH = "$PWD\src"
-$env:QT_QPA_PLATFORM = "offscreen"
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+py -3 -m venv .venv
+npm ci
+npm run dev
 ```
 
-测试使用临时合成文件与 Qt 测试图片，包括编辑 → 审核 → 预览计划 → 打包的实际界面流程、双标题搜索、校验失败、源变化、重名、取消、CBZ 附件和备份。尚未在用户实际 NAS 与 Kavita 实例上验收。
+也可双击 start.bat，它会检查开发环境、安装依赖、构建并启动 Electron。`npm run dev` 同时启动 Vite 与 Electron，支持界面热更新。
 
-构建 Windows 64 位便携包：
+默认使用项目 .venv 的 Python，可通过 `COMIC_MANAGE_PYTHON` 指定完整路径。文件服务只用标准库，不需要 PySide6。
+
+```powershell
+npm run build          # Vue 类型检查与生产构建
+npm start              # 启动已构建界面
+npm run test:core      # 核心与 JSON 服务测试
+npm run test:bridge    # 进程通信边界测试
+npm run test:desktop   # 实际 Electron 窗口与文件流程测试
+```
+
+开发命令默认读原资料库。测试使用临时合成样本；手工调试可通过 `npm run dev -- --data-dir D:\ComicManageTestData` 隔离资料。
+
+## Windows 构建
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\.venv\Scripts\python.exe scripts\build_windows.py
+npm run dist:win
 ```
 
-结果位于 `dist/ComicManage/` 与 `dist/ComicManage-v1-windows-x64.zip`。使用 `--onedir` 保留 Qt 插件及第三方许可，避免单文件解包启动。首次构建的 exe 未进行代码签名。
+结果在 release/，包括 Windows x64 ZIP。Electron 通过 extraResources 启动内置 ComicManageService.exe，不调用用户系统 Python。首次构建未进行代码签名。
 
-## 后续范围
+## 项目结构
 
-- v2：可插拔来源刮削、候选对照、原始返回与人工字段分离。
-- v3：作者别名、来源 ID、内容去重、增量导入、替换与源清理策略。
+| 目录 | 用途 |
+| --- | --- |
+| frontend/ | Vue 3 + Element Plus 界面 |
+| electron/ | 主进程、隔离 preload、受限 IPC 与服务生命周期 |
+| src/comic_manage/service.py | 标准库 JSON-lines 服务、任务取消、一次性生成计划 |
+| src/comic_manage/{sources,metadata,repository,packaging}.py | 已有文件与数据库核心 |
+| tests/、electron/tests/ | 核心、服务与 IPC 测试 |
+| scripts/ | 开发、构建和依赖许可复制 |
 
-当前没有假刮削结果或自动通过机制。后续接入来源必须遵循相同的人工确认规则。
+旧 Qt 界面源码暂留作历史参考，默认入口已改为 Electron。运行旧界面需单独安装 PySide6-Essentials==6.10.2，再运行 run.py；Electron 便携包不包含 Qt。旧版说明在 [docs/V1_QT.md](docs/V1_QT.md)。
+
+## 当前范围
+
+继续使用人工审核、计划预览与校验发布流程，不含网络刮削、内容去重、自动删除或覆盖替换。大于 32 MiB 的单张图片暂不能预览，仍可原字节打包。TIFF 等格式能否预览由 Chromium 解码支持决定。NAS 取消需等待系统文件读取返回。
+
+实际 NAS、Kavita 入库与海量文件性能仍需用户环境验收。双标题规则参考 [Kavita 官方元数据说明](https://wiki.kavitareader.com/guides/metadata/comics/)。

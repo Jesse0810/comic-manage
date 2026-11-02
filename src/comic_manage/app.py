@@ -7,13 +7,14 @@ import sys
 from threading import Event
 
 from PySide6.QtCore import Qt, QThread, QTimer, QStandardPaths, QUrl, QBuffer, QByteArray, QIODevice, QLockFile
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QCloseEvent, QImageReader
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QCloseEvent, QImageReader, QFont, QPainter, QPen, QPainterPath
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QListWidget, QTableWidget,
     QTableWidgetItem, QAbstractItemView, QHeaderView, QSplitter, QScrollArea,
-    QFormLayout, QPlainTextEdit, QCheckBox, QSpinBox, QTabWidget, QFileDialog,
-    QMessageBox, QDialog, QDialogButtonBox, QProgressBar,
+    QPlainTextEdit, QCheckBox, QSpinBox, QTabWidget, QFileDialog,
+    QMessageBox, QDialog, QDialogButtonBox, QProgressBar, QStackedWidget,
+    QGridLayout, QToolButton, QSizePolicy, QAbstractSpinBox,
 )
 
 from . import __version__
@@ -41,6 +42,55 @@ def button(text: str, callback, primary=False) -> QPushButton:
         item.setObjectName("primary")
     item.clicked.connect(callback)
     return item
+
+
+class SourceLabel(QLabel):
+    """Keep long NAS paths in one line without widening the details panel."""
+
+    def __init__(self):
+        super().__init__()
+        self.full_text = ""
+        self.setObjectName("source")
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):
+        self.full_text = text
+        self.setToolTip(text)
+        self.elide_text()
+
+    def elide_text(self):
+        super().setText(self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideMiddle, max(0, self.width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.elide_text()
+
+
+class EmptyDetailsIcon(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(64, 64)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#edf5f0"))
+        painter.drawRoundedRect(self.rect(), 18, 18)
+        painter.setPen(QPen(QColor("#6e9987"), 1.6))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        book = QPainterPath()
+        book.moveTo(16, 20)
+        book.quadTo(24, 18, 32, 23)
+        book.quadTo(40, 18, 48, 20)
+        book.lineTo(48, 44)
+        book.quadTo(40, 42, 32, 47)
+        book.quadTo(24, 42, 16, 44)
+        book.closeSubpath()
+        painter.drawPath(book)
+        painter.drawLine(32, 23, 32, 47)
+        painter.end()
 
 
 class ExportDialog(QDialog):
@@ -196,111 +246,7 @@ class MainWindow(QMainWindow):
         lib.addWidget(self.selection_note)
         self.splitter.addWidget(library)
 
-        self.editor = QFrame()
-        self.editor.setObjectName("editor")
-        edit = QVBoxLayout(self.editor)
-        edit.setContentsMargins(16, 15, 16, 15)
-        edit.addWidget(label("作品资料", "section"))
-        self.source_label = label("选择一部漫画开始整理", "source")
-        self.source_label.setWordWrap(True)
-        self.source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        edit.addWidget(self.source_label)
-        self.tabs = QTabWidget()
-        self.form_container = QWidget()
-        form_outer = QVBoxLayout(self.form_container)
-        form_outer.setContentsMargins(0, 10, 0, 0)
-        preview = QHBoxLayout()
-        self.cover = label("图片预览", "cover")
-        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cover.setFixedSize(132, 165)
-        self.cover.setWordWrap(True)
-        preview.addWidget(self.cover)
-        pages = QVBoxLayout()
-        pages.addWidget(label("本地页面", "eyebrow"))
-        self.page = QSpinBox()
-        self.page.setPrefix("第 ")
-        self.page.setSuffix(" 页")
-        self.page.setMinimum(1)
-        self.page.valueChanged.connect(self.load_preview)
-        pages.addWidget(self.page)
-        self.cover_button = button("将此页设为封面", self.set_cover)
-        pages.addWidget(self.cover_button)
-        self.preview_note = label("", "source")
-        self.preview_note.setWordWrap(True)
-        pages.addWidget(self.preview_note)
-        pages.addStretch()
-        preview.addLayout(pages, 1)
-        form_outer.addLayout(preview)
-        self.fields: dict[str, QLineEdit] = {}
-        form = QFormLayout()
-        form.setVerticalSpacing(9)
-        for key, title, placeholder in [
-            ("original_title", "日文原名 *", "完整保留原名"),
-            ("chinese_title", "中文名称", "汉化作品必填"),
-            ("authors", "作者 *", "多位作者用逗号分隔"),
-            ("publisher", "社团 / 出版社", "可选"),
-            ("translator", "汉化组", "可选"),
-            ("genre", "类型", "例如：同人志"),
-            ("tags", "其他标签", "逗号分隔"),
-        ]:
-            field = QLineEdit()
-            field.setPlaceholderText(placeholder)
-            field.textChanged.connect(self.mark_dirty)
-            self.fields[key] = field
-            form.addRow(title, field)
-        flags_widget = QWidget()
-        flags = QHBoxLayout(flags_widget)
-        flags.setContentsMargins(0, 0, 0, 0)
-        self.flags = {}
-        for key, title in [("translated", "汉化"), ("uncensored", "无修正"), ("full_color", "全彩")]:
-            checkbox = QCheckBox(title)
-            checkbox.toggled.connect(self.mark_dirty)
-            self.flags[key] = checkbox
-            flags.addWidget(checkbox)
-        self.flags["translated"].toggled.connect(self.translation_changed)
-        form.addRow("正向标签", flags_widget)
-        for key, title, placeholder in [("language", "语言", "ja / zh-Hans / zh-Hant"), ("year", "发行年份", "可留空")]:
-            field = QLineEdit()
-            field.setPlaceholderText(placeholder)
-            field.textChanged.connect(self.mark_dirty)
-            self.fields[key] = field
-            form.addRow(title, field)
-        self.age = QComboBox()
-        self.age.setEditable(True)
-        self.age.addItems(AGE_RATINGS)
-        self.age.currentTextChanged.connect(self.mark_dirty)
-        form.addRow("年龄分级", self.age)
-        self.summary = QPlainTextEdit()
-        self.summary.setFixedHeight(70)
-        self.summary.setPlaceholderText("作品简介（可选）")
-        self.summary.textChanged.connect(self.mark_dirty)
-        form.addRow("简介", self.summary)
-        form_outer.addLayout(form)
-        self.warning = label("", "source")
-        self.warning.setWordWrap(True)
-        form_outer.addWidget(self.warning)
-        form_outer.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.form_container)
-        self.tabs.addTab(scroll, "资料与预览")
-        self.xml_preview = QPlainTextEdit()
-        self.xml_preview.setReadOnly(True)
-        self.tabs.addTab(self.xml_preview, "ComicInfo.xml")
-        self.tabs.currentChanged.connect(self.update_xml)
-        edit.addWidget(self.tabs, 1)
-        self.review_check = QCheckBox("已核对作品、原名、作者、页序与封面")
-        edit.addWidget(self.review_check)
-        edit_actions = QHBoxLayout()
-        self.save_button = button("保存草稿", self.save_current)
-        self.approve_button = button("审核通过", self.approve_current, True)
-        edit_actions.addWidget(self.save_button)
-        edit_actions.addWidget(self.approve_button)
-        edit.addLayout(edit_actions)
-        source_actions = QHBoxLayout()
-        source_actions.addWidget(button("打开源位置", self.open_source))
-        source_actions.addWidget(button("打开成品", self.open_output))
-        edit.addLayout(source_actions)
+        self.build_editor()
         self.splitter.addWidget(self.editor)
         self.splitter.setSizes([710, 460])
         self.splitter.setStretchFactor(0, 1)
@@ -322,6 +268,238 @@ class MainWindow(QMainWindow):
         layout.addWidget(content, 1)
         self.statusBar().showMessage("元数据保存在本机资料库；源文件保持原样。")
 
+    def build_editor(self):
+        self.editor = QFrame()
+        self.editor.setObjectName("editor")
+        self.editor.setMinimumWidth(400)
+        self.editor.setMaximumWidth(580)
+        edit = QVBoxLayout(self.editor)
+        edit.setContentsMargins(20, 20, 20, 18)
+        edit.setSpacing(14)
+        heading = QHBoxLayout()
+        heading.addWidget(label("作品资料", "section"))
+        heading.addStretch()
+        self.panel_status = label("", "statusBadge")
+        heading.addWidget(self.panel_status)
+        edit.addLayout(heading)
+
+        self.editor_stack = QStackedWidget()
+        self.editor_stack.setObjectName("editorStack")
+        edit.addWidget(self.editor_stack, 1)
+        self.editor_empty = QWidget()
+        self.editor_empty.setObjectName("editorEmpty")
+        empty = QVBoxLayout(self.editor_empty)
+        empty.setContentsMargins(14, 0, 14, 55)
+        empty.setSpacing(12)
+        empty.addStretch()
+        empty.addWidget(EmptyDetailsIcon(), 0, Qt.AlignmentFlag.AlignHCenter)
+        empty.addSpacing(4)
+        title = label("先选择一部漫画", "emptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.addWidget(title)
+        note = label("从左侧列表选择作品，\n在这里预览页面、编辑资料并完成审核。", "emptyDescription")
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        note.setWordWrap(True)
+        empty.addWidget(note)
+        empty.addStretch()
+        self.editor_stack.addWidget(self.editor_empty)
+
+        self.editor_content = QWidget()
+        self.editor_content.setObjectName("editorContent")
+        sheet = QVBoxLayout(self.editor_content)
+        sheet.setContentsMargins(0, 0, 0, 0)
+        sheet.setSpacing(12)
+        self.source_label = SourceLabel()
+        sheet.addWidget(self.source_label)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("detailsTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
+        self.form_container = QWidget()
+        self.form_container.setObjectName("detailsForm")
+        form = QVBoxLayout(self.form_container)
+        form.setContentsMargins(0, 16, 12, 8)
+        form.setSpacing(16)
+
+        preview_card = QFrame()
+        preview_card.setObjectName("previewCard")
+        preview = QHBoxLayout(preview_card)
+        preview.setContentsMargins(12, 12, 12, 12)
+        preview.setSpacing(16)
+        self.cover = label("页面预览", "cover")
+        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover.setFixedSize(100, 134)
+        self.cover.setWordWrap(True)
+        preview.addWidget(self.cover)
+        pages = QVBoxLayout()
+        pages.setSpacing(8)
+        pages.addWidget(label("页面预览", "groupTitle"))
+        self.preview_note = label("", "source")
+        self.preview_note.setWordWrap(True)
+        pages.addWidget(self.preview_note)
+        page_controls = QHBoxLayout()
+        page_controls.setSpacing(4)
+        previous = button("‹", lambda: self.page.stepDown())
+        previous.setObjectName("pageArrow")
+        previous.setFixedSize(28, 30)
+        previous.setToolTip("上一页")
+        page_controls.addWidget(previous)
+        self.page = QSpinBox()
+        self.page.setPrefix("第 ")
+        self.page.setSuffix(" 页")
+        self.page.setMinimum(1)
+        self.page.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page.setFixedWidth(84)
+        self.page.valueChanged.connect(self.load_preview)
+        page_controls.addWidget(self.page)
+        following = button("›", lambda: self.page.stepUp())
+        following.setObjectName("pageArrow")
+        following.setFixedSize(28, 30)
+        following.setToolTip("下一页")
+        page_controls.addWidget(following)
+        page_controls.addStretch()
+        pages.addLayout(page_controls)
+        self.cover_button = button("设为封面", self.set_cover)
+        self.cover_button.setObjectName("textButton")
+        pages.addWidget(self.cover_button, 0, Qt.AlignmentFlag.AlignLeft)
+        preview.addLayout(pages, 1)
+        form.addWidget(preview_card)
+        form.addWidget(label("基本信息", "groupTitle"))
+        self.fields: dict[str, QLineEdit] = {}
+
+        def field_block(title, widget):
+            block = QWidget()
+            row = QVBoxLayout(block)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            caption = label(title, "fieldLabel")
+            caption.setBuddy(widget)
+            row.addWidget(caption)
+            row.addWidget(widget)
+            return block
+
+        def field(key, title, placeholder):
+            widget = QLineEdit()
+            widget.setPlaceholderText(placeholder)
+            widget.textChanged.connect(self.mark_dirty)
+            self.fields[key] = widget
+            return field_block(title, widget)
+
+        for key, title, placeholder in [
+            ("original_title", "日文原名 *", "完整保留作品原名"),
+            ("chinese_title", "中文名称", "汉化作品填写中文名"),
+            ("authors", "作者 *", "多位作者用逗号分隔"),
+        ]:
+            form.addWidget(field(key, title, placeholder))
+
+        flags_widget = QWidget()
+        flags_widget.setObjectName("metadataFlags")
+        flags = QHBoxLayout(flags_widget)
+        flags.setContentsMargins(0, 0, 0, 0)
+        flags.setSpacing(8)
+        self.flags = {}
+        for key, title in [("translated", "汉化"), ("uncensored", "无修正"), ("full_color", "全彩")]:
+            checkbox = QCheckBox(title)
+            checkbox.toggled.connect(self.mark_dirty)
+            self.flags[key] = checkbox
+            flags.addWidget(checkbox)
+        self.flags["translated"].toggled.connect(self.translation_changed)
+        form.addWidget(field_block("作品标记", flags_widget))
+        form.addWidget(field("tags", "其他标签", "用逗号分隔，例如：日常, 校园"))
+
+        self.more_toggle = QToolButton()
+        self.more_toggle.setObjectName("moreToggle")
+        self.more_toggle.setText("出版与补充信息")
+        self.more_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.more_toggle.setCheckable(True)
+        self.more_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.more_toggle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.more_toggle.setToolTip("社团、汉化组、类型、语言、年份、分级与简介")
+        form.addWidget(self.more_toggle)
+        self.supplement = QWidget()
+        extra = QGridLayout(self.supplement)
+        extra.setContentsMargins(0, 0, 0, 0)
+        extra.setHorizontalSpacing(12)
+        extra.setVerticalSpacing(14)
+        extra.setColumnStretch(0, 1)
+        extra.setColumnStretch(1, 1)
+        for row, col, key, title, placeholder in [
+            (0, 0, "publisher", "社团 / 出版社", "可选"),
+            (0, 1, "translator", "汉化组", "可选"),
+            (1, 0, "genre", "类型", "例如：同人志"),
+            (1, 1, "language", "语言", "ja / zh-Hans"),
+            (2, 0, "year", "发行年份", "可留空"),
+        ]:
+            extra.addWidget(field(key, title, placeholder), row, col)
+        self.age = QComboBox()
+        self.age.setEditable(True)
+        self.age.addItems(AGE_RATINGS)
+        self.age.currentTextChanged.connect(self.mark_dirty)
+        extra.addWidget(field_block("年龄分级", self.age), 2, 1)
+        self.summary = QPlainTextEdit()
+        self.summary.setFixedHeight(84)
+        self.summary.setPlaceholderText("写一段作品简介（可选）")
+        self.summary.textChanged.connect(self.mark_dirty)
+        extra.addWidget(field_block("简介", self.summary), 3, 0, 1, 2)
+        self.supplement.hide()
+        self.more_toggle.toggled.connect(self.toggle_supplement)
+        form.addWidget(self.supplement)
+        self.warning = label("", "source")
+        self.warning.setWordWrap(True)
+        self.warning.hide()
+        form.addWidget(self.warning)
+        form.addStretch()
+        scroll = QScrollArea()
+        scroll.setObjectName("detailsScroll")
+        scroll.viewport().setObjectName("detailsViewport")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self.form_container)
+        self.tabs.addTab(scroll, "资料与预览")
+        self.xml_preview = QPlainTextEdit()
+        self.xml_preview.setObjectName("xmlPreview")
+        self.xml_preview.setReadOnly(True)
+        self.tabs.addTab(self.xml_preview, "ComicInfo.xml")
+        self.tabs.currentChanged.connect(self.update_xml)
+        sheet.addWidget(self.tabs, 1)
+
+        review = QFrame()
+        review.setObjectName("reviewArea")
+        actions = QVBoxLayout(review)
+        actions.setContentsMargins(0, 14, 0, 0)
+        actions.setSpacing(12)
+        self.review_check = QCheckBox("已核对作品、原名、作者、页序与封面")
+        self.review_check.setObjectName("reviewCheck")
+        actions.addWidget(self.review_check)
+        edit_actions = QHBoxLayout()
+        edit_actions.setSpacing(10)
+        self.save_button = button("保存草稿", self.save_current)
+        self.approve_button = button("审核通过", self.approve_current, True)
+        edit_actions.addWidget(self.save_button)
+        edit_actions.addWidget(self.approve_button)
+        actions.addLayout(edit_actions)
+        source_actions = QHBoxLayout()
+        for text, callback in [("打开源位置", self.open_source), ("打开成品", self.open_output)]:
+            link = button(text, callback)
+            link.setObjectName("textButton")
+            source_actions.addWidget(link)
+        source_actions.addStretch()
+        actions.addLayout(source_actions)
+        sheet.addWidget(review)
+        self.editor_stack.addWidget(self.editor_content)
+
+    def toggle_supplement(self, expanded):
+        self.supplement.setVisible(expanded)
+        self.more_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def set_panel_status(self, status):
+        self.panel_status.setText("未保存" if status == "edited" else STATUS.get(status, ""))
+        self.panel_status.setVisible(bool(status))
+        self.panel_status.setProperty("state", status)
+        self.panel_status.style().unpolish(self.panel_status)
+        self.panel_status.style().polish(self.panel_status)
+
     def notify(self, title: str, text: str, detail: str = "", error=False):
         message = QMessageBox(self)
         message.setIcon(QMessageBox.Icon.Warning if error else QMessageBox.Icon.Information)
@@ -334,6 +512,7 @@ class MainWindow(QMainWindow):
     def mark_dirty(self, *_):
         if not self.loading and self.current:
             self.dirty = True
+            self.set_panel_status("edited")
             self.review_check.setChecked(False)
             self.statusBar().showMessage("有未保存的修改；保存后需要重新审核。")
 
@@ -436,7 +615,9 @@ class MainWindow(QMainWindow):
             self.show_comic(self.repo.get(rows[selected_row].id))
         else:
             self.current = None
-            self.source_label.setText("选择一部漫画开始整理")
+            self.editor_stack.setCurrentWidget(self.editor_empty)
+            self.set_panel_status("")
+            self.source_label.setText("")
             self.cover.clear()
 
     def selection_changed(self, row, _col, previous_row, _previous_col):
@@ -459,6 +640,8 @@ class MainWindow(QMainWindow):
     def show_comic(self, comic: Comic):
         self.loading = True
         self.current = comic
+        self.editor_stack.setCurrentWidget(self.editor_content)
+        self.set_panel_status(comic.status)
         self.editor.setEnabled(not self.busy)
         metadata = comic.metadata
         for key, field in self.fields.items():
@@ -473,6 +656,7 @@ class MainWindow(QMainWindow):
         self.page.setValue(min(metadata.cover_index + 1, comic.page_count))
         self.source_label.setText(comic.source)
         self.warning.setText(comic.warning)
+        self.warning.setVisible(bool(comic.warning))
         self.review_check.setChecked(comic.status in ("approved", "packaged"))
         self.dirty = False
         self.loading = False
@@ -789,6 +973,7 @@ def main():
     app.setOrganizationName("ComicManage")
     app.setApplicationName("ComicManage")
     app.setStyle("Fusion")
+    app.setFont(QFont("Microsoft YaHei UI", 10))
     QImageReader.setAllocationLimit(128)
     app.setStyleSheet(STYLE)
     data_dir = args.data_dir or Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))

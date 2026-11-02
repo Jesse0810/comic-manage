@@ -1,1 +1,1 @@
-PySide6-Essentials==6.10.2
+# Electron file service uses only Python's standard library.

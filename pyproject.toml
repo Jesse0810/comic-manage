@@ -4,17 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-manage"
-version = "1.0.0"
+version = "1.1.0"
 description = "Windows 本地漫画整理与 Kavita CBZ 元数据编辑器"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["PySide6-Essentials==6.10.2"]
+dependencies = []
 
 [project.optional-dependencies]
 build = ["PyInstaller==6.19.0"]
+legacy-qt = ["PySide6-Essentials==6.10.2"]
 
-[project.gui-scripts]
-comic-manage = "comic_manage.app:main"
+[project.scripts]
+comic-manage-service = "comic_manage.service:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -9,3 +9,8 @@ dist/
 .pytest_cache/
 *.partial
 local-data/
+node_modules/
+renderer-dist/
+release/
+*.log
+.npm-cache/
