@@ -78,7 +78,7 @@ class ServiceTests(unittest.TestCase):
         result = self.service.call("bootstrap")
         self.assertEqual(result["comics"][0]["metadata"]["authors"], ["作者甲", "作者乙"])
         self.assertEqual(result["comics"][0]["status"], "draft")
-        self.assertEqual(Path(result["dataDir"]), self.data)
+        self.assertTrue(Path(result["dataDir"]).samefile(self.data))
 
     def test_scan_retains_manual_data_and_skips_output_and_catalog(self):
         self.approve()
