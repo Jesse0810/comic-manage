@@ -30,7 +30,7 @@ class CoreTests(unittest.TestCase):
         self.comic_id = self.repo.upsert_scan(self.snapshot)
         self.metadata = Metadata(original_title="日本語の作品 & <原名>", chinese_title="完整中文名",
                                  authors=["作者甲", "作者乙"], translated=True, language="zh-Hans",
-                                 translator="测试汉化组", uncensored=True, full_color=True)
+                                 translator="测试汉化组", uncensored=True, full_color=True, age_rating="R18+")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -40,16 +40,18 @@ class CoreTests(unittest.TestCase):
         self.repo.approve(self.comic_id, inspect_source(self.book))
         return self.repo.get(self.comic_id)
 
-    def test_dual_titles_positive_tags_and_xml_escaping(self):
+    def test_title_series_and_namespaced_tags_with_xml_escaping(self):
         root = parse_xml(to_comicinfo(self.metadata, 3))
         self.assertEqual(root.findtext("Series"), "完整中文名")
-        self.assertEqual(root.findtext("LocalizedSeries"), "日本語の作品 & <原名>")
-        self.assertEqual(root.findtext("Tags"), "汉化, 无修正, 全彩")
+        self.assertIsNone(root.find("LocalizedSeries"))
+        self.assertEqual(root.findtext("Title"), "完整中文名")
+        self.assertEqual(root.findtext("BlackAndWhite"), "No")
+        self.assertEqual(root.findtext("Tags"), "修正状态:无修正")
         self.assertEqual(root.findtext("Writer"), "作者甲, 作者乙")
         self.assertEqual(root.findtext("PageCount"), "3")
 
     def test_raw_omits_localized_and_reverse_tags(self):
-        metadata = replace(self.metadata, translated=False, uncensored=False, full_color=False,
+        metadata = replace(self.metadata, title=self.metadata.original_title, translator="", translated=False, uncensored=False, full_color=False,
                            language="ja", tags=["生肉", "有修正", "黑白", "校园"])
         root = parse_xml(to_comicinfo(metadata, 3))
         self.assertIsNone(root.find("LocalizedSeries"))
@@ -58,7 +60,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(root.findtext("Series"), self.metadata.original_title)
 
     def test_import_preserves_unknown_fields_and_cover(self):
-        data = b'<ComicInfo><Series>Chinese</Series><LocalizedSeries>Japanese</LocalizedSeries><LanguageISO>zh-Hans</LanguageISO><Writer>A, B</Writer><Number>7</Number><Web>https://example.org</Web><Pages><Page Image="2" Type="FrontCover"/></Pages></ComicInfo>'
+        data = b'<ComicInfo><Series>Chinese</Series><LocalizedSeries>Japanese</LocalizedSeries><LanguageISO>zh-Hans</LanguageISO><Writer>A, B</Writer><Translator>Group</Translator><AgeRating>Everyone</AgeRating><Number>7</Number><Web>https://example.org</Web><Pages><Page Image="2" Type="FrontCover"/></Pages></ComicInfo>'
         metadata = from_comicinfo(data, "fallback")
         self.assertEqual(metadata.cover_index, 2)
         root = parse_xml(to_comicinfo(metadata, 3))
@@ -67,7 +69,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(root.find("./Pages/Page").get("Image"), "2")
 
     def test_required_metadata_and_cover_bounds(self):
-        for metadata in [replace(self.metadata, original_title=""), replace(self.metadata, chinese_title=""),
+        for metadata in [replace(self.metadata, title=""), replace(self.metadata, age_rating="Unknown"),
                          replace(self.metadata, authors=[]), replace(self.metadata, year="xx"),
                          replace(self.metadata, cover_index=3), replace(self.metadata, summary="bad\x00text")]:
             with self.subTest(metadata=metadata), self.assertRaises(ValueError):

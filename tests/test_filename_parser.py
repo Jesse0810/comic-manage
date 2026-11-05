@@ -59,7 +59,7 @@ class FilenameParserTests(unittest.TestCase):
         self.assertEqual(metadata.original_title, "作品")
 
     def test_explicit_genres_without_guessing(self):
-        for label, expected in (("商業誌", "商业志"), ("商业志", "商业志"), ("單行本", "单行本")):
+        for label, expected in (("商業誌", "漫画"), ("商业志", "漫画"), ("單行本", "漫画")):
             with self.subTest(label=label):
                 metadata, _ = parse_filename(f"[作者] 作品 [{label}]")
                 self.assertEqual(metadata.genre, expected)
@@ -189,7 +189,7 @@ class InitialMetadataTests(unittest.TestCase):
 class MonthMappingTests(unittest.TestCase):
     def test_month_round_trip_preserves_other_xml_fields(self):
         metadata = from_comicinfo(
-            b"<ComicInfo><Series>Title</Series><Writer>Author</Writer><Month>1</Month><Month>2</Month><CustomField>Keep me</CustomField></ComicInfo>", "fallback"
+            b"<ComicInfo><Series>Title</Series><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month><Month>2</Month><CustomField>Keep me</CustomField></ComicInfo>", "fallback"
         )
         self.assertEqual(metadata.month, "1")
         metadata.month = "10"
@@ -200,7 +200,7 @@ class MonthMappingTests(unittest.TestCase):
         self.assertEqual(from_comicinfo(xml, "fallback").month, "10")
 
     def test_empty_month_removes_existing_month(self):
-        metadata = from_comicinfo(b"<ComicInfo><Series>Title</Series><Writer>Author</Writer><Month>1</Month></ComicInfo>", "fallback")
+        metadata = from_comicinfo(b"<ComicInfo><Series>Title</Series><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month></ComicInfo>", "fallback")
         metadata.month = ""
         self.assertIsNone(ET.fromstring(to_comicinfo(metadata, 1)).find("Month"))
 
@@ -210,11 +210,11 @@ class MonthMappingTests(unittest.TestCase):
     def test_month_validation_is_bounded_and_optional(self):
         for month in ("", "1", "01", "12"):
             with self.subTest(month=month):
-                Metadata(original_title="Title", authors=["Author"], month=month).validate(1)
+                Metadata(original_title="Title", authors=["Author"], month=month, age_rating="Everyone").validate(1)
         for month in ("0", "13", "-1", "1.5", "Jan", "001"):
             with self.subTest(month=month):
                 with self.assertRaisesRegex(ValueError, "月份"):
-                    Metadata(original_title="Title", authors=["Author"], month=month).validate(1)
+                    Metadata(original_title="Title", authors=["Author"], month=month, age_rating="Everyone").validate(1)
 
 
 if __name__ == "__main__":

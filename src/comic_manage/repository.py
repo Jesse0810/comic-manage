@@ -57,6 +57,29 @@ class Repository:
                 );
                 PRAGMA user_version = 1;
             """)
+        self._migrate_metadata()
+
+    def _migrate_metadata(self) -> None:
+        # Back up before rewriting any older manual metadata. New records always contain title.
+        with self.connect() as db:
+            legacy = [(row["id"], json.loads(row["metadata"]), row["warning"])
+                      for row in db.execute("SELECT id, metadata, warning FROM comics")
+                      if "title" not in json.loads(row["metadata"])]
+        if not legacy:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = self.path.with_name(f"{self.path.stem}.before-metadata-v1_1-{stamp}.sqlite3")
+        self.backup(backup)
+        with self.connect() as db:
+            for comic_id, previous, warning in legacy:
+                metadata = Metadata.from_dict(previous)
+                note = "元数据规范已升级，原资料已自动备份，请核对作品与系列、年龄分级、译者后重新审核。"
+                if previous.get("age_rating", "Unknown") not in ("Unknown", "Everyone", "MA15+", "R18+", "Adults Only 18+", "全年龄", "R15", "R18"):
+                    note += f" 原分级 {previous['age_rating']} 无法准确对应，已留待确认。"
+                db.execute("UPDATE comics SET metadata=?, status='draft', warning=?, updated_at=? WHERE id=?", (
+                    json.dumps(metadata.to_dict(), ensure_ascii=False), "；".join(filter(None, [warning, note])), now(), comic_id))
+                self._event(db, comic_id, "metadata_rules_migration", json.dumps({"backup": str(backup), "previous": previous}, ensure_ascii=False))
+            db.execute("INSERT INTO settings VALUES ('metadata_rules', '1.1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
 
     @contextmanager
     def connect(self):
@@ -167,11 +190,14 @@ class Repository:
             self._event(db, comic_id, "edit", "人工修改元数据")
 
     def conflicts(self, comic_id: str, metadata: Metadata) -> list[Comic]:
-        titles = {title_key(t) for t in (metadata.display_title, metadata.original_title) if t.strip()}
+        if metadata.series.strip():
+            # An explicit series is a deliberate grouping choice. Writers may change between volumes.
+            return []
+        titles = {title_key(t) for t in (metadata.series or metadata.display_title, metadata.localized_series) if t.strip()}
         authors = {title_key(a) for a in metadata.authors}
         return [c for c in self.all() if c.id != comic_id and c.status in ("approved", "packaged")
                 and authors != {title_key(a) for a in c.metadata.authors}
-                and titles.intersection(title_key(t) for t in (c.metadata.display_title, c.metadata.original_title) if t.strip())]
+                and titles.intersection(title_key(t) for t in (c.metadata.series or c.metadata.display_title, c.metadata.localized_series) if t.strip())]
 
     def approve(self, comic_id: str, snapshot: Snapshot) -> None:
         comic = self.get(comic_id)

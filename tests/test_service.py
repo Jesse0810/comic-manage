@@ -61,7 +61,7 @@ class ServiceTests(unittest.TestCase):
         self.service = ComicService(self.data, self.progress.append)
         self.identity = self.service.repo.upsert_scan(inspect_source(self.book))
         self.metadata = Metadata(original_title="春の旅", chinese_title="春日旅途", authors=["作者甲", "作者乙"],
-                                 translated=True, language="zh-Hans", tags=["日常"], full_color=True)
+                                 translated=True, language="zh-Hans", tags=["日常"], full_color=True, translator="测试汉化组", age_rating="Everyone")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -144,7 +144,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         with zipfile.ZipFile(result["completed"][0]) as archive:
             self.assertEqual(archive.read("pages/00001.png"), b"first-page")
-            self.assertIn("<LocalizedSeries>春の旅</LocalizedSeries>", archive.read("ComicInfo.xml").decode())
+            self.assertIn("<Title>春日旅途</Title>", archive.read("ComicInfo.xml").decode())
+            self.assertNotIn("<LocalizedSeries>", archive.read("ComicInfo.xml").decode())
         self.assertEqual((self.book / "1.png").read_bytes(), b"first-page")
         self.assertEqual(self.service.repo.get(self.identity).status, "packaged")
         with self.assertRaises(ServiceError):

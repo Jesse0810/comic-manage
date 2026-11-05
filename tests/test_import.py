@@ -80,7 +80,7 @@ class ImportTests(unittest.TestCase):
 
     def test_existing_manual_metadata_and_approval_survive_default_import(self):
         identity = self.imported()
-        metadata = Metadata(original_title="人工标题", authors=["人工作者"], genre="商业志", summary="人工说明")
+        metadata = Metadata(age_rating="Everyone", original_title="人工标题", authors=["人工作者"], genre="商业志", summary="人工说明")
         self.service.call("approve", {"id": identity, "metadata": metadata.to_dict()})
         preview = self.preview(self.first)
         item = preview["items"][0]
@@ -94,19 +94,20 @@ class ImportTests(unittest.TestCase):
 
     def test_explicit_overwrite_updates_only_author_and_type_and_revokes_review(self):
         identity = self.imported()
-        metadata = Metadata(original_title="人工标题", authors=["旧作者"], summary="保留说明", tags=["保留标签"])
+        metadata = Metadata(age_rating="Everyone", original_title="人工标题", authors=["旧作者"], summary="保留说明", tags=["保留标签"])
         self.service.call("approve", {"id": identity, "metadata": metadata.to_dict()})
         self.commit(self.preview(self.first), defaults={"authors": ["新作者"], "genre": "单行本"}, overwriteExisting=True)
         comic = self.service.repo.get(identity)
         self.assertEqual(comic.metadata.authors, ["新作者"])
-        self.assertEqual(comic.metadata.genre, "单行本")
+        self.assertEqual(comic.metadata.genre, "漫画")
+        self.assertEqual(comic.metadata.publication_format, "单行本")
         self.assertEqual((comic.metadata.original_title, comic.metadata.summary, comic.metadata.tags),
                          ("人工标题", "保留说明", ["保留标签"]))
         self.assertEqual(comic.status, "draft")
 
     def test_remove_hides_record_without_touching_source_or_output_and_rescan_skips_it(self):
         identity = self.imported()
-        metadata = Metadata(original_title="人工标题", authors=["作者"])
+        metadata = Metadata(age_rating="Everyone", original_title="人工标题", authors=["作者"])
         self.service.call("save", {"id": identity, "metadata": metadata.to_dict()})
         output = self.root / "成品.cbz"
         output.write_bytes(b"existing-export")
@@ -124,7 +125,7 @@ class ImportTests(unittest.TestCase):
 
     def test_explicit_reimport_restores_removed_book_preserving_manual_data_as_draft(self):
         identity = self.imported()
-        self.service.call("approve", {"id": identity, "metadata": {"authors": ["人工作者"], "original_title": "人工标题"}})
+        self.service.call("approve", {"id": identity, "metadata": {"age_rating": "Everyone", "authors": ["人工作者"], "original_title": "人工标题"}})
         self.service.call("remove", {"ids": [identity]})
         preview = self.preview(self.first)
         self.assertEqual(preview["items"][0]["import_status"], "removed")
@@ -148,14 +149,15 @@ class ImportTests(unittest.TestCase):
         self.commit(self.preview())
         identities = [source_id(self.first), source_id(self.second)]
         for identity in identities:
-            self.service.call("approve", {"id": identity, "metadata": {"authors": ["旧作者"], "summary": "保留说明"}})
+            self.service.call("approve", {"id": identity, "metadata": {"age_rating": "Everyone", "authors": ["旧作者"], "summary": "保留说明"}})
             self.service.repo.mark_packaged(identity, self.root / f"{identity}.cbz", {})
         result = self.service.call("batch_edit", {"ids": identities, "changes": {"authors": ["统一作者"], "genre": "商业志"}})
         self.assertEqual(result["count"], 2)
         for identity in identities:
             comic = self.service.repo.get(identity)
             self.assertEqual(comic.metadata.authors, ["统一作者"])
-            self.assertEqual(comic.metadata.genre, "商业志")
+            self.assertEqual(comic.metadata.genre, "漫画")
+            self.assertEqual(comic.metadata.release_type, "商业")
             self.assertEqual(comic.metadata.summary, "保留说明")
             self.assertTrue(comic.output.endswith(f"{identity}.cbz"))
             self.assertEqual(comic.status, "draft")
@@ -163,7 +165,7 @@ class ImportTests(unittest.TestCase):
     def test_batch_operations_invalidate_prepared_export(self):
         identity = self.imported()
         for operation, args in [("batch_edit", {"changes": {"genre": "同人志"}}), ("remove", {})]:
-            self.service.call("approve", {"id": identity, "metadata": {"authors": ["作者"]}})
+            self.service.call("approve", {"id": identity, "metadata": {"age_rating": "Everyone", "authors": ["作者"]}})
             plan = self.service.call("plan", {"ids": [identity], "outputRoot": str(self.root / "output")})
             self.service.call(operation, {"ids": [identity], **args})
             with self.assertRaisesRegex(ServiceError, "失效"):
@@ -227,7 +229,8 @@ class ImportTests(unittest.TestCase):
         preview = self.preview(self.first, archive)
         self.assertEqual({item["kind"] for item in preview["items"]}, {"folder", "cbz"})
         self.assertEqual(self.commit(preview, defaults={"genre": "单行本"})["count"], 2)
-        self.assertEqual({c.metadata.genre for c in self.service.repo.all()}, {"单行本"})
+        self.assertEqual({c.metadata.genre for c in self.service.repo.all()}, {"漫画"})
+        self.assertEqual({c.metadata.publication_format for c in self.service.repo.all()}, {"单行本"})
 
     def test_folder_browser_skips_system_catalog_and_output_folders(self):
         (self.library / ".git").mkdir()

@@ -1,7 +1,7 @@
 {
   "name": "comic-manage",
   "productName": "Comic Manage",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "本地漫画资料管理与无损 CBZ 整理",
   "author": "Jesse0810",

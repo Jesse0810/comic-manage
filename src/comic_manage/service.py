@@ -73,7 +73,7 @@ def _metadata(value, previous: Metadata | None = None) -> Metadata:
     for key, item in value.items():
         if key not in merged:
             continue
-        if key in ("authors", "tags"):
+        if key in ("authors", "tags", "pencillers", "web", "original_works", "characters"):
             if not isinstance(item, list) or len(item) > 10_000 or any(not isinstance(v, str) for v in item):
                 raise ServiceError(f"{key} 必须是文本列表。")
         elif key in ("translated", "uncensored", "full_color"):
@@ -85,6 +85,8 @@ def _metadata(value, previous: Metadata | None = None) -> Metadata:
         elif not isinstance(item, str) or len(item) > 2 * 1024 * 1024:
             raise ServiceError(f"{key} 必须是长度合适的文本。")
         merged[key] = item
+    if "title" not in value and any(key in value for key in ("original_title", "chinese_title", "translated")):
+        merged.pop("title", None)  # Older clients may still submit the former title fields.
     return Metadata.from_dict(merged)
 
 

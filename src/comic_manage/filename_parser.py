@@ -2,8 +2,8 @@
 
 Only a leading date and explicit labels are authoritative. A leading plain
 bracket group is an author hint; unknown groups within the title stay intact.
-The result is a draft: translated titles still require a Chinese title entered
-by the user, and source ComicInfo metadata takes precedence over these hints.
+The result is a draft: age and translation credits still require confirmation,
+and source ComicInfo metadata takes precedence over these hints.
 """
 
 from __future__ import annotations
@@ -160,6 +160,7 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
             metadata.uncensored = True
         elif label == "全彩":
             metadata.full_color = True
+            metadata.black_and_white = "No"
         elif label in _GENRES:
             genre = _GENRES[label]
             if metadata.genre and metadata.genre != genre:
@@ -199,6 +200,7 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
         cursor = group.end
     pieces.append(name[cursor:])
     metadata.original_title = re.sub(r"[ \t]{2,}", " ", "".join(pieces)).strip()
+    metadata.title = metadata.original_title
     metadata.authors = list(dict.fromkeys(metadata.authors))
     metadata.tags = list(dict.fromkeys(metadata.tags))
     metadata.publisher = ", ".join(publishers)
@@ -209,4 +211,7 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
         warnings.append("发现多个汉化组，已全部保留，请确认。")
     if not metadata.original_title:
         warnings.append("未识别到作品标题，请手动填写完整原名。")
+    metadata.normalize()
+    if "未知汉化" in translators:
+        warnings.append("尚未确认实际译者或汉化组，请补录后审核。")
     return metadata, list(dict.fromkeys(warnings))

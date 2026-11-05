@@ -7,7 +7,7 @@ import DetailsPanel from './components/DetailsPanel.vue'
 import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
 import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult } from './types'
-import { clone, displayTitle, statusLabels, errorMessage } from './types'
+import { clone, displayTitle, statusLabels, errorMessage, customTags } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
@@ -58,7 +58,7 @@ const filtered = computed(() => {
   const term = search.value.trim().normalize('NFKC').toLocaleLowerCase()
   return comics.value.filter(c => {
     const m = c.metadata
-    const searchable = [m.original_title, m.chinese_title, ...m.authors, ...m.tags, m.translator].join(' ').normalize('NFKC').toLocaleLowerCase()
+    const searchable = [m.title, m.series, m.localized_series, m.original_title, m.chinese_title, ...m.authors, ...m.pencillers, m.publisher, m.translator, m.genre, ...m.tags, ...customTags(m), m.summary, ...m.web, m.number, m.volume, m.year].join(' ').normalize('NFKC').toLocaleLowerCase()
     return (section.value === 'all' || c.status === section.value)
       && (!author.value || m.authors.includes(author.value)) && (!term || searchable.includes(term))
   })
@@ -240,8 +240,11 @@ async function approveCurrent() {
   if (!current.value || !form.value || disabled.value) return
   if (!reviewed.value) { ElMessage.warning('请先核对作品，并勾选审核确认'); return }
   const m = form.value
-  if (!m.original_title.trim()) { ElMessage.warning('请填写完整日文原名'); return }
-  if (m.translated && !m.chinese_title.trim()) { ElMessage.warning('汉化作品需要填写中文名称'); return }
+  if (!m.title.trim()) { ElMessage.warning('请填写作品名称'); return }
+  if (!['Everyone', 'MA15+', 'R18+'].includes(m.age_rating)) { ElMessage.warning('请在“内容与分类”中确认年龄分级：全年龄、R15 或 R18'); return }
+  const translators = m.translator.split(/[,，;；\n]/).map(value => value.trim()).filter(Boolean)
+  if (translators.some(value => ['未知汉化', '未知漢化', '中国翻訳', '中国翻译', '中國翻譯', '未知翻译'].includes(value))) { ElMessage.warning('请在“创作与出版”中补充已知翻译版本的实际译者或汉化组'); return }
+  if (m.localized_series.trim() && (!m.series.trim() || m.localized_series.trim() === m.series.trim())) { ElMessage.warning('本地化系列名称需对应实际系列，且不能与系列名称相同'); return }
   if (!m.authors.some(a => a.trim())) { ElMessage.warning('请填写至少一位作者'); return }
   await runTask('审核作品', () => invoke('approve', { id: current.value!.id, metadata: clone(form.value) }), () => {
     ElMessage.success('审核通过，可以生成 CBZ')
@@ -344,13 +347,13 @@ onBeforeUnmount(() => unsubscribe?.())
 
       <div class="work-area">
         <section class="library-panel">
-          <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索中日文标题、作者或标签" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
+          <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
           <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length" @click="openBatchEditor">批量编辑</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
             <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
               <el-table-column type="selection" width="43" :reserve-selection="true" :selectable="() => !disabled" />
-              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><span v-if="scope.row.metadata.translated && scope.row.metadata.original_title">{{ scope.row.metadata.original_title }}</span><span v-else class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span></div></div></template></el-table-column>
+              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><span v-if="scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span></div></div></template></el-table-column>
               <el-table-column label="作者" min-width="105" show-overflow-tooltip><template #default="scope"><span :class="{ 'muted-text': !scope.row.metadata.authors.length }">{{ scope.row.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
               <el-table-column label="页数" width="60" align="center"><template #default="scope"><span class="page-count">{{ scope.row.page_count }}</span></template></el-table-column>
               <el-table-column label="状态" width="92"><template #default="scope"><span class="status-pill" :class="scope.row.status">{{ statusLabels[scope.row.status as ComicStatus] }}</span></template></el-table-column>

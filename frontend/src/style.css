@@ -377,3 +377,39 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
   .import-preview-table { max-height: 225px; }
   .folder-picker, .cbz-picker { max-height: 280px; }
 }
+
+/* Metadata rules v1.1: five sections keep the expanded editor navigable. */
+.metadata-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+.metadata-tools > span { color: #7c8e7b; font-size: 11px; line-height: 1.6; }
+.metadata-tools .el-button { font-size: 11px; flex-shrink: 0; }
+.metadata-sections { border-top: 0; }
+.metadata-sections .el-collapse-item__header { height: 48px; font-size: 13px; font-weight: 600; gap: 9px; color: #324f40; background: #fff; }
+.metadata-sections .el-collapse-item__content { padding: 10px 0 6px; }
+.metadata-sections .el-collapse-item__wrap { border-bottom-color: #e8eee8; }
+.metadata-sections .section-number { width: 23px; height: 23px; border-radius: 6px; background: #edf3ec; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: #64836b; flex: 0 0 auto; }
+.metadata-sections .el-form-item { margin-bottom: 17px; }
+.metadata-sections .el-form-item__content { min-width: 0; }
+.metadata-sections .el-select { width: 100%; min-width: 0; }
+.metadata-help { width: 100%; font-size: 11px; color: #839181; line-height: 1.65; margin: 6px 0 0; font-weight: 400; }
+.metadata-help.section-help { margin: -5px 0 16px; }
+.metadata-inline-warning { margin: 5px 0 0; color: #a2773d; font-size: 11px; line-height: 1.6; }
+.metadata-triple-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.metadata-triple-grid .el-form-item { min-width: 0; }
+.metadata-triple-grid .el-form-item__label { font-size: 11px; }
+.metadata-triple-grid .el-input__wrapper, .metadata-triple-grid .el-select__wrapper { padding-left: 8px; padding-right: 8px; }
+.date-group-label { display: block; margin-bottom: 9px; color: #435c48; font-size: 12px; }
+.correction-field, .page-count-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #e5ebe1; background: #f8faf5; border-radius: 7px; margin-bottom: 17px; }
+.correction-field strong, .page-count-field strong { font-size: 12px; font-weight: 500; color: #4d6b51; }
+.correction-field p, .page-count-field p { color: #86967d; font-size: 11px; line-height: 1.6; margin: 4px 0 0; }
+.correction-field .el-checkbox { margin: 0; flex-shrink: 0; }
+.page-count-field > span { font-size: 21px; font-weight: 600; color: #39775d; white-space: nowrap; }
+.page-count-field small { font-weight: 400; font-size: 11px; }
+.custom-tag-preview { background: #f8faf6; border-radius: 7px; padding: 11px 12px; margin: -1px 0 14px; }
+.custom-tag-preview > span { display: block; color: #73866a; font-size: 11px; margin-bottom: 7px; }
+.custom-tag-preview > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.custom-tag-preview .el-tag { height: auto; min-height: 23px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; padding-top: 3px; padding-bottom: 3px; }
+.custom-tag-preview p { color: #9aa68f; font-size: 11px; line-height: 1.6; margin: 0; }
+
+.legacy-name-note { margin-bottom: 12px; padding: 10px 12px; border-radius: 7px; background: #f7f8f5; color: #77816c; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.legacy-name-note strong { font-weight: 500; color: #5d7052; }
+.legacy-name-note p { margin: 5px 0 0; }
