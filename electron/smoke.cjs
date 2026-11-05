@@ -81,7 +81,11 @@ async function run() {
     }
     throw new Error(`Timed out: ${label}\n${await evaluate('document.body.innerText')}`)
   }
-  const click = text => evaluate(`(() => { const item = [...document.querySelectorAll('button')].find(b => b.getClientRects().length && !b.disabled && b.textContent.trim() === ${JSON.stringify(text)}); if (!item) throw new Error('Button missing: '+${JSON.stringify(text)}); item.click() })()`)
+  const click = async text => {
+    // Page loads and service requests may outlive a render on slower CI machines.
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.getClientRects().length && !b.disabled && b.textContent.trim() === ${JSON.stringify(text)})`, `enabled button ${text}`)
+    await evaluate(`(() => { const item = [...document.querySelectorAll('button')].find(b => b.getClientRects().length && !b.disabled && b.textContent.trim() === ${JSON.stringify(text)}); if (!item) throw new Error('Button missing: '+${JSON.stringify(text)}); item.click() })()`)
+  }
   const capture = async name => {
     await delay(250) // Let transitions and Chromium paint catch up with Vue state.
     await fs.writeFile(path.join(screenshots, name), (await window.webContents.capturePage()).toPNG())
@@ -189,7 +193,6 @@ async function run() {
   await waitFor("document.querySelector('.large-page img')?.complete", 'large preview')
   await evaluate("document.querySelector('[aria-label=下一页]').click()")
   await waitFor("document.querySelector('.page-counter input')?.value === '2'", 'page navigation')
-  await delay(150)
   await click('将此页设为封面')
   await evaluate("document.querySelector('.review-checkbox').click()")
   await evaluate("[...document.querySelectorAll('.el-tabs__item')].find(x=>x.textContent === '基本资料').click()")

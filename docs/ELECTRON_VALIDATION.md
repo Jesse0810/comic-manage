@@ -16,6 +16,7 @@
 - 流程结束确认源图片原字节保留、成品存在、数据库状态为 packaged、封面页索引正确、备份存在。
 - 隔离渲染进程内没有 window.require / window.process，任意方法请求被拒绝。
 - 1180×800 小窗口下审核栏及导入确认按钮保持可见，页面、资料和 XML 分区独立滚动。
+- Windows 便携 ZIP 的全部条目通过 CRC 检查；包内版本为 1.3.0，界面与构建产物一致，内置服务启动并通过新增标准字段、独立角色标签及来源链接导出验证。
 
 核心与服务使用 Python 标准库；Electron 便携包未包含 Qt。内置后台为 PyInstaller console 模式，由 Electron 隐藏启动，不依赖系统 Python。
 
