@@ -186,6 +186,41 @@ class Metadata:
         unknown_translator = any(t in UNKNOWN_TRANSLATORS for t in split_values(self.translator))
         if unknown_translator:
             raise ValueError("已确认有翻译的作品请补录实际译者或汉化组；未知汉化信息仍需人工确认。")
+        self.validate_fields(set(self.__dataclass_fields__) - {"original_xml"})
+        if page_count < 1 or not 0 <= self.cover_index < page_count:
+            raise ValueError("封面页码超出图片范围，请重新选择。")
+
+    def validate_fields(self, fields: set[str]) -> None:
+        """Check the edited values and their dependencies without requiring a complete draft."""
+        if fields & {"year", "month", "day"}:
+            self._validate_date()
+        for field_name, label, minimum in (("count", "系列总数", 1), ("volume", "卷号", 0)):
+            number = getattr(self, field_name)
+            if field_name in fields and number and (not re.fullmatch(r"\d+", number) or not minimum <= int(number) <= 2147483647):
+                raise ValueError(f"{label}请填写有效整数，或留空。")
+        if fields & {"series", "localized_series"} and self.localized_series.strip() and not self.series.strip():
+            raise ValueError("本地化系列名需要对应的系列名称，请同时检查这两个字段。")
+        if "black_and_white" in fields and self.black_and_white not in ("Unknown", "Yes", "No"):
+            raise ValueError("黑白 / 彩色状态无效。")
+        if "manga" in fields and self.manga not in ("Unknown", "Yes", "No", "YesAndRightToLeft"):
+            raise ValueError("阅读方向无效。")
+        if "language" in fields and not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", self.language):
+            raise ValueError("语言请填写 ja、zh-Hans、zh-Hant 等语言代码。")
+        if "web" in fields:
+            for url in self.web:
+                parsed = urlsplit(url)
+                if parsed.scheme not in ("http", "https") or not parsed.netloc or re.search(r"\s", url):
+                    raise ValueError("来源链接请填写完整的 http 或 https 作品详情页地址。")
+        for field_name in fields:
+            value = getattr(self, field_name)
+            values = value if isinstance(value, list) else [value]
+            if any(isinstance(v, str) and re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", v) for v in values):
+                raise ValueError("元数据中含有 XML 不支持的字符。")
+            if field_name in {"original_works", "characters", "release_type", "publication_format", "tags"}:
+                if any(re.search(r"[,，;；\n]", v) for v in values):
+                    raise ValueError("每个标签值请单独填写，不能包含逗号、分号或换行。")
+
+    def _validate_date(self) -> None:
         if self.year and (not re.fullmatch(r"\d{4}", self.year) or not 1000 <= int(self.year) <= 9999):
             raise ValueError("年份请填写四位数字，或留空。")
         if self.month and (not re.fullmatch(r"\d{1,2}", self.month) or not 1 <= int(self.month) <= 12):
@@ -198,30 +233,6 @@ class Metadata:
             limit = calendar.monthrange(int(self.year) if self.year else 2000, int(self.month))[1]
             if int(self.day) > limit:
                 raise ValueError("发售日期不是有效的日历日期。")
-        for name, number, minimum in (("系列总数", self.count, 1), ("卷号", self.volume, 0)):
-            if number and (not re.fullmatch(r"\d+", number) or not minimum <= int(number) <= 2147483647):
-                raise ValueError(f"{name}请填写有效整数，或留空。")
-        if self.localized_series.strip() and not self.series.strip():
-            raise ValueError("本地化系列名需要对应的系列名称，不用于单本作品别名。")
-        if self.black_and_white not in ("Unknown", "Yes", "No"):
-            raise ValueError("黑白 / 彩色状态无效。")
-        if self.manga not in ("Unknown", "Yes", "No", "YesAndRightToLeft"):
-            raise ValueError("阅读方向无效。")
-        if not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", self.language):
-            raise ValueError("语言请填写 ja、zh-Hans、zh-Hant 等语言代码。")
-        for url in self.web:
-            parsed = urlsplit(url)
-            if parsed.scheme not in ("http", "https") or not parsed.netloc or re.search(r"\s", url):
-                raise ValueError("来源链接请填写完整的 http 或 https 作品详情页地址。")
-        if page_count < 1 or not 0 <= self.cover_index < page_count:
-            raise ValueError("封面页码超出图片范围，请重新选择。")
-        values = asdict(self)
-        values.pop("original_xml")
-        if any(re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", str(v)) for v in values.values()):
-            raise ValueError("元数据中含有 XML 不支持的控制字符。")
-        for field_values in (self.original_works, self.characters, [self.release_type, self.publication_format], self.tags):
-            if any(re.search(r"[,，;；\n]", value) for value in field_values):
-                raise ValueError("每个标签值请单独填写，不能包含逗号、分号或换行。")
 
     def to_dict(self) -> dict:
         self.normalize()

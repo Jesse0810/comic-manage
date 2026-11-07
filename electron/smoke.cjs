@@ -230,16 +230,34 @@ async function run() {
   await waitFor("document.body.innerText.includes('没有找到匹配的作品')", 'empty filter with reserved selection')
   await click('清除筛选')
   await waitFor("document.querySelectorAll('.table-area .el-table__body .el-checkbox input:checked').length === 2", 'checkboxes restored after empty filter')
+  const beforeBatch = new Map(catalog.comics.map(book => [book.id, book.metadata]))
+  const batchChanges = {
+    series: '旅途系列',
+    release_type: '商业',
+    publication_format: '分卷',
+    age_rating: 'MA15+',
+  }
+  window.setSize(1180, 800)
   await click('批量编辑')
-  await toggle('batch-enable-authors')
-  await selectValue('batch-authors', '批量校订作者')
-  await toggle('batch-enable-genre')
-  await selectValue('batch-genre', '漫画')
+  assert.equal(await evaluate("[...document.querySelectorAll('.batch-edit-dialog .el-dialog__footer button')].find(b => b.textContent.trim() === '保存 2 本作品')?.disabled"), true)
+  await toggle('batch-enable-series')
+  await setField('batch-series', batchChanges.series)
+  await toggle('batch-enable-release-type')
+  await chooseOption('batch-release-type', batchChanges.release_type)
+  await toggle('batch-enable-publication-format')
+  await chooseOption('batch-publication-format', batchChanges.publication_format)
+  await toggle('batch-enable-age-rating')
+  await chooseOption('batch-age-rating', 'R15')
+  assert.equal(await evaluate("document.querySelector('.batch-edit-dialog .el-dialog__footer').getBoundingClientRect().bottom <= window.innerHeight"), true)
+  await capture('ComicManage-Electron-batch.png')
   await click('保存 2 本作品')
   await waitFor("document.body.innerText.includes('已更新 2 本作品')", 'batch metadata edit')
   await waitFor("!document.querySelector('.table-disabled') && !document.querySelector('.batch-edit-dialog')", 'batch dialog released')
   catalog = await call('bootstrap')
-  assert.equal(catalog.comics.every(book => book.status === 'draft' && book.metadata.authors[0] === '批量校订作者' && book.metadata.genre === '漫画'), true)
+  for (const book of catalog.comics) {
+    assert.equal(book.status, 'draft')
+    assert.deepEqual(book.metadata, { ...beforeBatch.get(book.id), ...batchChanges }, 'Only the checked metadata fields change')
+  }
   assert.equal(catalog.comics.find(book => book.id === id).output, packaged.output)
   await evaluate("[...document.querySelectorAll('.table-area .el-table__header .el-checkbox')].find(item=>item.getClientRects().length).click()")
   await waitFor("!document.querySelector('.selected-count')", 'batch selection cleared')
@@ -267,7 +285,7 @@ async function run() {
   await dismissResult()
   catalog = await call('bootstrap')
   assert.equal(catalog.comics.length, 2)
-  assert.deepEqual(catalog.comics.find(book => book.id === secondId).metadata.authors, ['批量校订作者'])
+  assert.deepEqual(catalog.comics.find(book => book.id === secondId).metadata, { ...beforeBatch.get(secondId), ...batchChanges })
   await click('备份资料库')
   await waitFor("document.body.innerText.includes('已备份目录索引')", 'catalog backup')
   await dismissResult()
@@ -279,7 +297,7 @@ async function run() {
   assert.equal(javascriptErrors.filter(x => /Uncaught|TypeError|ReferenceError/.test(x)).length, 0, javascriptErrors.join('\n'))
   window.destroy()
   await desktop.bridge.stop()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, standard XML, review, preview, cover, verified export, batch edit revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, standard XML, review, preview, cover, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

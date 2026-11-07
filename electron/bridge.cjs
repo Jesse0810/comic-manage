@@ -8,6 +8,43 @@ const path = require('node:path')
 
 const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export'])
+const BATCH_TEXT_FIELDS = new Set([
+  'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator',
+  'release_type', 'publication_format', 'year', 'month', 'day', 'language',
+  'age_rating', 'black_and_white', 'manga',
+])
+const BATCH_LIST_FIELDS = new Set(['authors', 'pencillers', 'original_works', 'characters', 'web'])
+const BATCH_ENUMS = {
+  release_type: ['', '同人', '商业'],
+  age_rating: ['Unknown', 'Everyone', 'MA15+', 'R18+'],
+  black_and_white: ['Unknown', 'Yes', 'No'],
+  manga: ['Unknown', 'Yes', 'No', 'YesAndRightToLeft'],
+}
+
+function validBatchText(value, allowEmpty = false) {
+  return typeof value === 'string' && value.length <= 32767 && !value.includes('\0')
+    && (value === '' ? allowEmpty : value.trim().length > 0)
+}
+
+function validateBatchEdit(changes) {
+  if (!changes || typeof changes !== 'object' || Array.isArray(changes)) throw new Error('批量资料无效。')
+  const entries = Object.entries(changes)
+  if (!entries.length) throw new Error('请选择要批量修改的资料。')
+
+  for (const [field, value] of entries) {
+    if (BATCH_LIST_FIELDS.has(field)) {
+      if (!Array.isArray(value) || value.length > 1000 || (field === 'authors' && value.length === 0)
+          || value.some(item => !validBatchText(item))) throw new Error(`批量字段 ${field} 的列表无效。`)
+    } else if (field === 'uncensored') {
+      if (typeof value !== 'boolean') throw new Error('无修正选项无效。')
+    } else if (BATCH_TEXT_FIELDS.has(field)) {
+      if (!validBatchText(value, field !== 'language')) throw new Error(`批量字段 ${field} 的文本无效。`)
+      if (Object.hasOwn(BATCH_ENUMS, field) && !BATCH_ENUMS[field].includes(value.trim())) throw new Error(`批量字段 ${field} 的选项无效。`)
+    } else {
+      throw new Error('批量字段无效。')
+    }
+  }
+}
 
 function validateCall(method, params) {
   if (!METHODS.includes(method)) throw new Error('不支持的操作。')
@@ -34,16 +71,15 @@ function validateCall(method, params) {
   if (method === 'commit_import') {
     string('token')
     if (params.overwriteExisting !== undefined && typeof params.overwriteExisting !== 'boolean') throw new Error('覆盖选项无效。')
-  }
-  if (['commit_import', 'batch_edit'].includes(method)) {
-    const fields = params[method === 'commit_import' ? 'defaults' : 'changes']
-    if (fields === null || (fields !== undefined && (typeof fields !== 'object' || Array.isArray(fields))) || (method === 'batch_edit' && !fields)) throw new Error('批量资料无效。')
+    const fields = params.defaults
+    if (fields === null || (fields !== undefined && (typeof fields !== 'object' || Array.isArray(fields)))) throw new Error('批量资料无效。')
     if (fields) {
       if (Object.keys(fields).some(key => !['authors', 'genre'].includes(key))) throw new Error('批量字段无效。')
       if (fields.authors !== undefined && (!Array.isArray(fields.authors) || fields.authors.length > 1000 || fields.authors.some(author => typeof author !== 'string' || !author.trim() || author.length > 32767))) throw new Error('作者无效。')
       if (fields.genre !== undefined && (typeof fields.genre !== 'string' || !fields.genre.trim() || fields.genre.length > 32767)) throw new Error('类型无效。')
     }
   }
+  if (method === 'batch_edit') validateBatchEdit(params.changes)
   if (method === 'plan') { strings('ids'); string('outputRoot') }
   if (method === 'export') string('token')
   if (['set_output', 'backup'].includes(method)) string('path')

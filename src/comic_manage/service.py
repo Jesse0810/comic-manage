@@ -14,7 +14,7 @@ from threading import Event, Lock, Thread
 import time
 from typing import Callable, TextIO
 
-from .metadata import Metadata, to_comicinfo
+from .metadata import AGE_RATINGS, Metadata, to_comicinfo
 from .packaging import ExportPlan, export_cbz, make_plan
 from .repository import Comic, Repository
 from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, inspect_source,
@@ -23,6 +23,17 @@ from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, in
 MAX_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_CHARS = 8 * 1024 * 1024
 PLAN_TTL_SECONDS = 15 * 60
+BATCH_TEXT_FIELDS = frozenset({
+    "series", "localized_series", "number", "count", "volume", "translator", "genre",
+    "publication_format", "year", "month", "day", "language",
+})
+BATCH_LIST_FIELDS = frozenset({"pencillers", "original_works", "characters", "web"})
+BATCH_CHOICES = {
+    "release_type": ("", "同人", "商业"),
+    "age_rating": AGE_RATINGS,
+    "black_and_white": ("Unknown", "Yes", "No"),
+    "manga": ("Unknown", "Yes", "No", "YesAndRightToLeft"),
+}
 PAGE_MIMES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
               ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
               ".tif": "image/tiff", ".tiff": "image/tiff", ".avif": "image/avif"}
@@ -90,22 +101,62 @@ def _metadata(value, previous: Metadata | None = None) -> Metadata:
     return Metadata.from_dict(merged)
 
 
-def _batch_changes(value, *, allow_empty: bool = False) -> dict:
+def _batch_authors(value) -> list[str]:
+    authors = list(dict.fromkeys(author.strip() for author in _strings(value, "作者")))
+    if any(len(author) > 500 for author in authors):
+        raise ServiceError("作者名称过长。")
+    return authors
+
+
+def _import_defaults(value) -> dict:
     if not isinstance(value, dict) or set(value) - {"authors", "genre"}:
-        raise ServiceError("批量资料仅支持作者和类型。")
-    if not value and not allow_empty:
-        raise ServiceError("请选择要修改的作者或类型。")
+        raise ServiceError("导入默认值仅支持作者和类型。")
     result = {}
     if "authors" in value:
-        authors = _strings(value["authors"], "作者")
-        result["authors"] = list(dict.fromkeys(author.strip() for author in authors))
-        if any(len(author) > 500 for author in result["authors"]):
-            raise ServiceError("作者名称过长。")
+        result["authors"] = _batch_authors(value["authors"])
     if "genre" in value:
         genre = _string(value["genre"], "类型").strip()
         if len(genre) > 200:
             raise ServiceError("类型名称过长。")
         result["genre"] = genre
+    return result
+
+
+def _batch_changes(value) -> dict:
+    if not isinstance(value, dict) or not value:
+        raise ServiceError("请勾选要批量编辑的字段。")
+    result = {}
+    for field, item in value.items():
+        if field == "authors":
+            result[field] = _batch_authors(item)
+        elif field in BATCH_LIST_FIELDS:
+            if not isinstance(item, list) or len(item) > 1000:
+                raise ServiceError(f"{field} 必须是文本列表。")
+            items = [_string(entry, field).strip() for entry in item]
+            limit = 32767 if field == "web" else 500
+            if any(len(entry) > limit for entry in items):
+                raise ServiceError(f"{field} 的值过长。")
+            result[field] = items
+        elif field in BATCH_TEXT_FIELDS or field in BATCH_CHOICES:
+            limit = 200 if field == "genre" else 32767
+            if not isinstance(item, str) or len(item) > limit or "\x00" in item or (item and not item.strip()):
+                raise ServiceError(f"{field} 必须是有效文本，或留空以清除。")
+            item = item.strip()
+            if field in BATCH_CHOICES and item not in BATCH_CHOICES[field]:
+                raise ServiceError(f"{field} 的选项无效。")
+            result[field] = item
+        elif field == "uncensored":
+            if type(item) is not bool:
+                raise ServiceError("修正状态必须是布尔值。")
+            result[field] = item
+        else:
+            raise ServiceError(f"不支持批量编辑字段 {field}。")
+    if result.get("genre"):
+        # Accept legacy content types without setting a second field as a side effect.
+        normalized = Metadata(genre=result["genre"])
+        if normalized.tags or not normalized.genre:
+            raise ServiceError("请填写内容类型。普通题材请在作品标签中编辑。")
+        result["genre"] = normalized.genre
     return result
 
 
@@ -162,9 +213,10 @@ class ComicService:
         if method == "batch_edit":
             identities = _strings(params.get("ids"), "作品 id")
             changes = _batch_changes(params.get("changes"))
-            self.repo.batch_edit(identities, changes)
-            self.plans.clear()
-            return {"count": len(identities), "comics": [self.serialize(self.repo.get(i)) for i in identities]}
+            count = self.repo.batch_edit(identities, changes)
+            if count:
+                self.plans.clear()
+            return {"count": count, "comics": [self.serialize(self.repo.get(i)) for i in identities]}
         if method in ("save", "approve"):
             return self.save(params, approve=method == "approve", cancel=cancel)
         if method == "page":
@@ -292,7 +344,7 @@ class ComicService:
     def commit_import(self, params: dict, cancel: Event) -> dict:
         token = _string(params.get("token"), "导入预览")
         identities = _strings(params.get("ids"), "作品 id")
-        defaults = _batch_changes(params.get("defaults", {}), allow_empty=True)
+        defaults = _import_defaults(params.get("defaults", {}))
         overwrite = params.get("overwriteExisting", False)
         if type(overwrite) is not bool:
             raise ServiceError("overwriteExisting 必须是布尔值。")

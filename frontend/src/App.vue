@@ -196,7 +196,11 @@ async function openBatchEditor() {
 
 async function batchSaved(count: number) {
   loading.value = true
-  try { await refresh(); ElMessage.success(`已更新 ${count} 本作品，请重新审核`) }
+  try {
+    await refresh()
+    if (count) ElMessage.success(`已更新 ${count} 本作品，请重新审核`)
+    else ElMessage.info('所选作品的资料没有变化')
+  }
   catch (error) { showError(errorMessage(error)) }
   finally { loading.value = false }
 }

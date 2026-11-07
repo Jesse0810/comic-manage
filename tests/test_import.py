@@ -157,10 +157,61 @@ class ImportTests(unittest.TestCase):
             comic = self.service.repo.get(identity)
             self.assertEqual(comic.metadata.authors, ["统一作者"])
             self.assertEqual(comic.metadata.genre, "漫画")
-            self.assertEqual(comic.metadata.release_type, "商业")
+            self.assertEqual(comic.metadata.release_type, "")
             self.assertEqual(comic.metadata.summary, "保留说明")
             self.assertTrue(comic.output.endswith(f"{identity}.cbz"))
             self.assertEqual(comic.status, "draft")
+
+    def test_batch_series_fields_preserve_book_specific_values_and_can_be_cleared(self):
+        self.commit(self.preview())
+        identities = [source_id(self.first), source_id(self.second)]
+        before = {}
+        for index, identity in enumerate(identities, start=1):
+            self.service.call("save", {"id": identity, "metadata": {
+                "title": f"第 {index} 册", "number": str(index), "series": "旧系列",
+                "authors": [f"作者 {index}"], "age_rating": "R18+", "uncensored": True,
+                "localized_series": "已有译名", "original_works": ["保留原作"],
+            }})
+            before[identity] = self.service.repo.get(identity).metadata.to_dict()
+        changes = {"series": "新系列", "release_type": "同人", "publication_format": "合集", "age_rating": "MA15+"}
+        result = self.service.call("batch_edit", {"ids": identities, "changes": changes})
+        self.assertEqual(result["count"], 2)
+        for comic in result["comics"]:
+            self.assertEqual(comic["metadata"], {**before[comic["id"]], **changes})
+            xml = self.service.call("xml", {"id": comic["id"]})["xml"]
+            self.assertIn("<Series>新系列</Series>", xml)
+            self.assertIn("发行性质:同人", xml)
+            self.assertIn("出版形态:合集", xml)
+            self.assertNotIn("修正状态:无修正", xml)
+        clear = {"series": "", "localized_series": "", "release_type": "", "publication_format": "", "original_works": []}
+        result = self.service.call("batch_edit", {"ids": identities, "changes": clear})
+        self.assertEqual(result["count"], 2)
+        for comic in result["comics"]:
+            self.assertEqual(comic["metadata"], {**before[comic["id"]], **changes, **clear})
+
+    def test_batch_conflict_rolls_back_earlier_changes_in_same_batch(self):
+        self.commit(self.preview())
+        identities = [source_id(self.first), source_id(self.second)]
+        self.service.call("save", {"id": identities[1], "metadata": {
+            "series": "原系列", "localized_series": "已有译名", "authors": ["原作者"],
+            "pencillers": ["绘画者"], "year": "2024", "month": "2", "day": "29",
+        }})
+        before = [self.service.repo.get(identity) for identity in identities]
+        for changes, error in [({"series": "已有译名"}, "本地化系列名"), ({"series": ""}, "本地化系列名"),
+                               ({"authors": ["绘画者"]}, "已有绘画者"), ({"year": "2025"}, "日历日期")]:
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, error):
+                self.service.call("batch_edit", {"ids": identities, "changes": {"release_type": "商业", **changes}})
+            self.assertEqual([self.service.repo.get(identity) for identity in identities], before)
+
+    def test_unchanged_batch_keeps_review_and_prepared_export(self):
+        identity = self.imported()
+        metadata = {"authors": ["作者"], "series": "系列", "age_rating": "Everyone"}
+        self.service.call("approve", {"id": identity, "metadata": metadata})
+        plan = self.service.call("plan", {"ids": [identity], "outputRoot": str(self.root / "output")})
+        result = self.service.call("batch_edit", {"ids": [identity], "changes": metadata})
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["comics"][0]["status"], "approved")
+        self.assertIn(plan["token"], self.service.plans)
 
     def test_batch_operations_invalidate_prepared_export(self):
         identity = self.imported()
@@ -250,9 +301,11 @@ class ImportTests(unittest.TestCase):
 
     def test_malformed_bulk_arguments_do_not_mutate_catalog(self):
         identity = self.imported()
-        for changes in [{}, {"authors": []}, {"authors": "作者"}, {"genre": " "}, {"genre": 3},
-                        {"original_title": "不允许的批量字段"}]:
-            with self.subTest(changes=changes), self.assertRaises(ServiceError):
+        for changes in [{}, {"authors": []}, {"authors": "作者"}, {"genre": " "}, {"genre": 3}, {"genre": "恋爱"},
+                        {"original_title": "不允许的批量字段"}, {"age_rating": "R21"}, {"release_type": "不明"},
+                        {"uncensored": "false"}, {"uncensored": True}, {"volume": "-1"}, {"language": "中文"},
+                        {"characters": ["正常", "无\u0007效"]}, {"web": ["ftp://example.org"]}]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.service.call("batch_edit", {"ids": [identity], "changes": changes})
         for params in [{"paths": [str(self.first)], "recursive": 1}, {"paths": []}, {"paths": ["relative"]}]:
             with self.subTest(params=params), self.assertRaises(ServiceError):
@@ -260,6 +313,8 @@ class ImportTests(unittest.TestCase):
         preview = self.preview(self.first)
         with self.assertRaises(ServiceError):
             self.commit(preview, overwriteExisting="true")
+        with self.assertRaises(ServiceError):
+            self.commit(preview, defaults={"series": "导入仅支持作者和类型"})
         self.assertEqual(self.service.repo.get(identity).metadata.authors, [])
 
 

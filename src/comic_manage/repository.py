@@ -170,17 +170,39 @@ class Repository:
             if row is None:
                 raise ValueError("作品记录不存在或已移除。")
 
-    def batch_edit(self, comic_ids: list[str], changes: dict) -> None:
+    def batch_edit(self, comic_ids: list[str], changes: dict) -> int:
+        count = 0
+        fields = set(changes)
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             self._require_visible(db, comic_ids)
             for comic_id in comic_ids:
                 row = db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()
-                metadata = Metadata.from_dict(json.loads(row["metadata"]))
-                for key, value in changes.items():
-                    setattr(metadata, key, value)
+                stored = json.loads(row["metadata"])
+                before = Metadata.from_dict(stored).to_dict()
+                metadata = Metadata.from_dict({**before, **changes})
+                actual = {key: value for key, value in metadata.to_dict().items() if before[key] != value}
+                try:
+                    # Canonicalization is allowed for checked fields only.
+                    unselected = actual.keys() - fields
+                    if "pencillers" in unselected:
+                        raise ValueError("作者和已有绘画者重名，请同时勾选并调整独立绘画者。")
+                    if "localized_series" in unselected:
+                        raise ValueError("新系列名和已有本地化系列名相同，请同时勾选并调整本地化系列名。")
+                    if unselected:
+                        raise ValueError("本次填写会影响未勾选的字段，请检查批量编辑内容。")
+                    if changes.get("uncensored") and metadata.age_rating != "R18+":
+                        raise ValueError("只有 R18 作品可以设置为无修正。")
+                    metadata.validate_fields(fields)
+                except ValueError as error:
+                    raise ValueError(f"《{before['title']}》{error}") from error
+                if not actual:
+                    continue
                 db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
-                    json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
-                self._event(db, comic_id, "batch_edit", "批量修改作者或类型；需要重新审核")
+                    json.dumps({**stored, **actual}, ensure_ascii=False), now(), comic_id))
+                self._event(db, comic_id, "batch_edit", f"批量修改 {', '.join(actual)}。需要重新审核。")
+                count += 1
+        return count
 
     def save(self, comic_id: str, metadata: Metadata) -> None:
         # Drafts may be incomplete. Every edit invalidates previous approval/export status.
