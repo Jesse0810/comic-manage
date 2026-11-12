@@ -1,7 +1,7 @@
 {
   "name": "comic-manage",
   "productName": "Comic Manage",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "本地漫画资料管理与无损 CBZ 整理",
   "author": "Jesse0810",
@@ -43,7 +43,9 @@
       { "from": "build/service/ComicManageService", "to": "service" },
       { "from": "README.md", "to": "README.md" },
       { "from": "THIRD_PARTY_NOTICES.md", "to": "THIRD_PARTY_NOTICES.md" },
-      { "from": "build/frontend-licenses", "to": "licenses/frontend" }
+      { "from": "build/frontend-licenses", "to": "licenses/frontend" },
+      { "from": "scripts/sync-komga.ps1", "to": "scripts/sync-komga.ps1" },
+      { "from": "docs/NAS_METADATA.md", "to": "KOMGA_METADATA.md" }
     ],
     "win": { "target": ["zip"], "signAndEditExecutable": false },
     "artifactName": "ComicManage-Electron-${version}-windows-${arch}.${ext}"

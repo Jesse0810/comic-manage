@@ -1,6 +1,6 @@
 'use strict'
 const { contextBridge, ipcRenderer } = require('electron')
-const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup']
+const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga']
 
 contextBridge.exposeInMainWorld('comic', {
   invoke: (method, params = {}) => methods.includes(method)
@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('comic', {
   chooseDirectories: () => ipcRenderer.invoke('comic:choose-directories'),
   chooseCbz: () => ipcRenderer.invoke('comic:choose-cbz'),
   chooseBackup: () => ipcRenderer.invoke('comic:choose-backup'),
+  chooseKomgaManifest: () => ipcRenderer.invoke('comic:choose-komga-manifest'),
   openLocation: (kind, id) => ipcRenderer.invoke('comic:open-location', kind, id),
   getVersion: () => ipcRenderer.invoke('comic:version'),
   setWindowState: state => ipcRenderer.send('comic:window-state', { dirty: state?.dirty === true, busy: state?.busy === true }),

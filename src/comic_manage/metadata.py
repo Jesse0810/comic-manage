@@ -66,8 +66,10 @@ class Metadata:
     translated: bool = False
     full_color: bool = False
     title: str | None = None
+    collection_mode: str | None = None
     series: str = ""
     localized_series: str = ""
+    localized_series_label: str = "zh-Hans"
     number: str = ""
     count: str = ""
     volume: str = ""
@@ -99,6 +101,8 @@ class Metadata:
             self.title = (self.chinese_title if self.translated and self.chinese_title.strip() else self.original_title).strip()
             if self.full_color and self.black_and_white == "Unknown":
                 self.black_and_white = "No"
+        if self.collection_mode is None:
+            self.collection_mode = "series" if self.series.strip() else "oneshot"
         self.normalize()
 
     def normalize(self) -> None:
@@ -182,24 +186,33 @@ class Metadata:
         if not self.authors:
             raise ValueError("请填写至少一位作者。")
         if self.age_rating not in AGE_RATINGS[1:]:
-            raise ValueError("请人工确认年龄分级：全年龄、R15 或 R18。")
+            raise ValueError("请人工确认年龄分级：全年龄、MA15+ 或 R18。")
         unknown_translator = any(t in UNKNOWN_TRANSLATORS for t in split_values(self.translator))
         if unknown_translator:
             raise ValueError("已确认有翻译的作品请补录实际译者或汉化组；未知汉化信息仍需人工确认。")
-        self.validate_fields(set(self.__dataclass_fields__) - {"original_xml"})
+        if self.collection_mode == "series" and (not self.series.strip() or not self.number.strip()):
+            raise ValueError("系列作品请填写共同系列名称和本册编号 Number。完整一卷也使用 Number 排序。")
+        fields = set(self.__dataclass_fields__) - {"original_xml", "volume"}
+        if self.collection_mode == "oneshot":
+            fields -= {"series", "number", "count", "localized_series", "localized_series_label"}
+        self.validate_fields(fields)
         if page_count < 1 or not 0 <= self.cover_index < page_count:
             raise ValueError("封面页码超出图片范围，请重新选择。")
 
     def validate_fields(self, fields: set[str]) -> None:
         """Check the edited values and their dependencies without requiring a complete draft."""
+        if "collection_mode" in fields and self.collection_mode not in ("oneshot", "series"):
+            raise ValueError("作品组织方式请使用独立作品或真实系列。")
         if fields & {"year", "month", "day"}:
             self._validate_date()
         for field_name, label, minimum in (("count", "系列总数", 1), ("volume", "卷号", 0)):
             number = getattr(self, field_name)
             if field_name in fields and number and (not re.fullmatch(r"\d+", number) or not minimum <= int(number) <= 2147483647):
                 raise ValueError(f"{label}请填写有效整数，或留空。")
-        if fields & {"series", "localized_series"} and self.localized_series.strip() and not self.series.strip():
-            raise ValueError("本地化系列名需要对应的系列名称，请同时检查这两个字段。")
+        if fields & {"series", "localized_series", "collection_mode"} and self.collection_mode == "series" and self.localized_series.strip() and not self.series.strip():
+            raise ValueError("系列别名需要对应的真实系列名称。")
+        if fields & {"localized_series", "localized_series_label", "collection_mode"} and self.collection_mode == "series" and self.localized_series.strip() and not self.localized_series_label.strip():
+            raise ValueError("请填写系列别名标签，如 zh-Hans 或原名。")
         if "black_and_white" in fields and self.black_and_white not in ("Unknown", "Yes", "No"):
             raise ValueError("黑白 / 彩色状态无效。")
         if "manga" in fields and self.manga not in ("Unknown", "Yes", "No", "YesAndRightToLeft"):
@@ -280,6 +293,7 @@ def from_comicinfo(data: bytes, fallback_title: str) -> Metadata:
         translator = "未知汉化"
     return Metadata(
         title=title, original_title=title, series=get("Series"), localized_series=get("LocalizedSeries"),
+        collection_mode="series" if get("Series") else "oneshot",
         number=get("Number"), count=get("Count") if get("Count") != "-1" else "",
         volume=get("Volume") if get("Volume") != "-1" else "",
         authors=split_values(get("Writer")), pencillers=split_values(get("Penciller")), publisher=get("Publisher"),
@@ -302,17 +316,19 @@ def to_comicinfo(metadata: Metadata, page_count: int) -> bytes:
     value.validate(page_count)
     root = parse_xml(value.original_xml) if value.original_xml else ET.Element("ComicInfo")
     fields = {
-        "Title": value.display_title, "Series": value.series.strip() or value.display_title,
-        "Number": value.number.strip(), "Count": value.count, "Volume": value.volume,
-        "LocalizedSeries": value.localized_series.strip() if value.series.strip() else "",
+        "Title": value.display_title, "Series": value.series.strip() if value.collection_mode == "series" else "",
+        "Number": value.number.strip() if value.collection_mode == "series" else "",
+        "Count": value.count if value.collection_mode == "series" else "", "Volume": "",
+        "LocalizedSeries": "",  # Komga alternateTitles are supplied through its API.
         "Summary": value.summary.strip(), "Year": value.year, "Month": value.month, "Day": value.day,
         "Writer": ", ".join(value.authors), "Penciller": ", ".join(value.pencillers),
         "Translator": value.translator.strip(), "Publisher": value.publisher.strip(), "Genre": value.genre,
         "Tags": ", ".join(value.all_tags), "AgeRating": value.age_rating, "Web": " ".join(value.web),
         "PageCount": str(page_count), "LanguageISO": value.language,
         "BlackAndWhite": value.black_and_white, "Manga": value.manga,
-        "Characters": "",  # User's rule uses independent 角色: tags as the sole authority.
-        "SeriesSort": "",  # Kavita gives this priority over Series; do not retain a stale series override.
+        "Characters": ", ".join(value.characters),  # Komga character entities plus portable 角色: tag copies.
+        "SeriesSort": "",
+        "SeriesGroup": "", "StoryArc": "", "StoryArcNumber": "", "AlternateSeries": "", "AlternateNumber": "",
     }
     for name, content in fields.items():
         for previous in list(root.findall(name)):

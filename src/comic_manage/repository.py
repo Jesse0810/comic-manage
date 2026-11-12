@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from .metadata import Metadata, title_key
+from .metadata import Metadata
 from .sources import Snapshot, source_id
 
 
@@ -60,26 +60,27 @@ class Repository:
         self._migrate_metadata()
 
     def _migrate_metadata(self) -> None:
-        # Back up before rewriting any older manual metadata. New records always contain title.
+        # Back up before converting either an earlier catalog or the former Kavita rules.
         with self.connect() as db:
             legacy = [(row["id"], json.loads(row["metadata"]), row["warning"])
                       for row in db.execute("SELECT id, metadata, warning FROM comics")
-                      if "title" not in json.loads(row["metadata"])]
+                      if not {"title", "collection_mode", "localized_series_label"}.issubset(json.loads(row["metadata"]))]
         if not legacy:
             return
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        backup = self.path.with_name(f"{self.path.stem}.before-metadata-v1_1-{stamp}.sqlite3")
+        rule = "metadata-v1_1" if any("title" not in previous for _, previous, _ in legacy) else "komga-v1_1-K"
+        backup = self.path.with_name(f"{self.path.stem}.before-{rule}-{stamp}.sqlite3")
         self.backup(backup)
         with self.connect() as db:
             for comic_id, previous, warning in legacy:
                 metadata = Metadata.from_dict(previous)
-                note = "元数据规范已升级，原资料已自动备份，请核对作品与系列、年龄分级、译者后重新审核。"
+                note = "已切换 Komga 元数据规范，原资料已自动备份，请核对独立作品或系列方式、本册编号、年龄分级与译者后重新审核。"
                 if previous.get("age_rating", "Unknown") not in ("Unknown", "Everyone", "MA15+", "R18+", "Adults Only 18+", "全年龄", "R15", "R18"):
                     note += f" 原分级 {previous['age_rating']} 无法准确对应，已留待确认。"
                 db.execute("UPDATE comics SET metadata=?, status='draft', warning=?, updated_at=? WHERE id=?", (
                     json.dumps(metadata.to_dict(), ensure_ascii=False), "；".join(filter(None, [warning, note])), now(), comic_id))
                 self._event(db, comic_id, "metadata_rules_migration", json.dumps({"backup": str(backup), "previous": previous}, ensure_ascii=False))
-            db.execute("INSERT INTO settings VALUES ('metadata_rules', '1.1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            db.execute("INSERT INTO settings VALUES ('metadata_rules', '1.1-K') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
 
     @contextmanager
     def connect(self):
@@ -188,7 +189,7 @@ class Repository:
                     if "pencillers" in unselected:
                         raise ValueError("作者和已有绘画者重名，请同时勾选并调整独立绘画者。")
                     if "localized_series" in unselected:
-                        raise ValueError("新系列名和已有本地化系列名相同，请同时勾选并调整本地化系列名。")
+                        raise ValueError("新系列名和已有系列别名相同，请同时勾选并调整系列别名。")
                     if unselected:
                         raise ValueError("本次填写会影响未勾选的字段，请检查批量编辑内容。")
                     if changes.get("uncensored") and metadata.age_rating != "R18+":
@@ -211,25 +212,11 @@ class Repository:
                 json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
             self._event(db, comic_id, "edit", "人工修改元数据")
 
-    def conflicts(self, comic_id: str, metadata: Metadata) -> list[Comic]:
-        if metadata.series.strip():
-            # An explicit series is a deliberate grouping choice. Writers may change between volumes.
-            return []
-        titles = {title_key(t) for t in (metadata.series or metadata.display_title, metadata.localized_series) if t.strip()}
-        authors = {title_key(a) for a in metadata.authors}
-        return [c for c in self.all() if c.id != comic_id and c.status in ("approved", "packaged")
-                and authors != {title_key(a) for a in c.metadata.authors}
-                and titles.intersection(title_key(t) for t in (c.metadata.series or c.metadata.display_title, c.metadata.localized_series) if t.strip())]
-
     def approve(self, comic_id: str, snapshot: Snapshot) -> None:
         comic = self.get(comic_id)
         if str(snapshot.path) != comic.source or snapshot.fingerprint != comic.fingerprint:
             raise ValueError("源文件已变化，请重新扫描、检查并审核。")
         comic.metadata.validate(len(snapshot.pages))
-        conflicts = self.conflicts(comic_id, comic.metadata)
-        if conflicts:
-            raise ValueError("发现其他作者的同名作品，Kavita 可能错误合并。请调整作品标题或分开管理书库：\n"
-                             + "\n".join(c.source for c in conflicts))
         with self.connect() as db:
             db.execute("UPDATE comics SET status='approved', warning='', updated_at=? WHERE id=?", (now(), comic_id))
             self._event(db, comic_id, "approve", snapshot.fingerprint)

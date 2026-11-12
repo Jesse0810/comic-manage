@@ -26,17 +26,18 @@ class MetadataRulesTests(unittest.TestCase):
         root = parse_xml(to_comicinfo(metadata, 3))
         self.assertEqual(root.findtext("Title"), "作品 & 名称")
         self.assertEqual(root.findtext("Series"), "系列")
-        self.assertEqual(root.findtext("LocalizedSeries"), "系列译名")
+        self.assertIsNone(root.find("LocalizedSeries"))
+        self.assertIsNone(root.find("Volume"))
         self.assertEqual(root.findtext("Penciller"), "画师")
         restored = from_comicinfo(to_comicinfo(metadata, 3), "fallback")
-        for field in ("title", "series", "localized_series", "number", "count", "volume", "summary", "year", "month", "day", "pencillers", "authors", "publisher", "translator", "genre", "tags", "web", "black_and_white", "manga"):
+        for field in ("title", "series", "number", "count", "summary", "year", "month", "day", "pencillers", "authors", "publisher", "translator", "genre", "tags", "web", "black_and_white", "manga"):
             self.assertEqual(getattr(restored, field), getattr(metadata, field), field)
         self.assertEqual(root.findtext("PageCount"), "3")
 
-    def test_independent_works_use_own_title_and_never_original_work_as_series(self):
+    def test_independent_works_have_no_xml_series_or_series_numbering(self):
         metadata = self.valid(original_works=["东方Project"])
         root = parse_xml(to_comicinfo(metadata, 1))
-        self.assertEqual(root.findtext("Series"), metadata.title)
+        self.assertIsNone(root.find("Series"))
         self.assertIsNone(root.find("LocalizedSeries"))
         self.assertIsNone(root.find("Number"))
         self.assertIsNone(root.find("Volume"))
@@ -50,8 +51,9 @@ class MetadataRulesTests(unittest.TestCase):
                             genre="同人志", tags=["汉化", "全彩", "无修正", "年龄等级:R18", "纯爱", "日常"])
         root = parse_xml(to_comicinfo(metadata, 1))
         self.assertEqual(root.findtext("Tags"), "原作:东方Project, 原作:Fate, 角色:博丽灵梦, 角色:雾雨魔理沙, 发行性质:同人, 出版形态:独立短篇, 修正状态:无修正, 纯爱, 日常")
-        for nonstandard in ("OriginalWorks", "Characters", "ReleaseType", "PublicationFormat", "Uncensored"):
+        for nonstandard in ("OriginalWorks", "ReleaseType", "PublicationFormat", "Uncensored"):
             self.assertIsNone(root.find(nonstandard))
+        self.assertEqual(root.findtext("Characters"), "博丽灵梦, 雾雨魔理沙")
         restored = from_comicinfo(to_comicinfo(metadata, 1), "fallback")
         self.assertEqual(restored.characters, metadata.characters)
         self.assertEqual(restored.original_works, metadata.original_works)
@@ -122,7 +124,7 @@ class MetadataRulesTests(unittest.TestCase):
         self.assertEqual(restored.characters, metadata.characters)
 
     def test_day_and_integer_ranges_and_partial_dates(self):
-        for fields in ({"year": "2023", "month": "2", "day": "29"}, {"month": "4", "day": "31"}, {"day": "3"}, {"count": "0"}, {"volume": "-1"}, {"count": "2147483648"}, {"volume": "1.5"}):
+        for fields in ({"year": "2023", "month": "2", "day": "29"}, {"month": "4", "day": "31"}, {"day": "3"}, {"count": "0", "series": "系列", "number": "1"}, {"count": "2147483648", "series": "系列", "number": "1"}):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 to_comicinfo(self.valid(**fields), 1)
         for fields in ({"year": "2024"}, {"month": "2", "day": "29"}, {"number": "1-5"}, {"number": "TPB1"}, {"volume": "0"}):
@@ -144,7 +146,7 @@ class MetadataRulesTests(unittest.TestCase):
 
     def test_series_sort_removed_unknown_fields_and_valid_page_attributes_preserved(self):
         old = '<ComicInfo><Title>Old title</Title><Series>Old series</Series><SeriesSort>Stale override</SeriesSort><Notes>Keep</Notes><GTIN>123456</GTIN><Characters>A, B</Characters><Pages><Page Image="0" Type="FrontCover" DoublePage="True"/><Page Image="1" Bookmark="Chapter"/><Page Image="100" Type="FrontCover"/></Pages></ComicInfo>'
-        metadata = self.valid(series="New series", original_xml=old, cover_index=1)
+        metadata = self.valid(series="New series", number="1", original_xml=old, cover_index=1)
         root = parse_xml(to_comicinfo(metadata, 2))
         self.assertEqual(root.findtext("Series"), "New series")
         self.assertIsNone(root.find("SeriesSort"))
@@ -186,8 +188,8 @@ class MetadataRulesTests(unittest.TestCase):
         self.assertEqual(self.valid(genre="商业志").release_type, "商业")
         self.assertEqual(self.valid(genre="单行本").publication_format, "单行本")
         self.assertEqual(self.valid(pencillers=["作者", "画师", "画师"]).pencillers, ["画师"])
-        with self.assertRaisesRegex(ValueError, "本地化"):
-            to_comicinfo(self.valid(localized_series="Alias without real series"), 1)
+        root = parse_xml(to_comicinfo(self.valid(localized_series="Ignored One-Shot alias"), 1))
+        self.assertIsNone(root.find("LocalizedSeries"))
 
 
 class RulesCatalogTests(unittest.TestCase):
@@ -253,17 +255,17 @@ class RulesCatalogTests(unittest.TestCase):
         self.assertEqual(len(list(path.parent.glob('*.before-metadata-v1_1-*.sqlite3'))), 1)
         self.assertEqual((self.book / '1.jpg').read_bytes(), b'page')
 
-    def test_explicit_series_allows_writer_changes_while_independent_titles_keep_guard(self):
-        self.service.call('approve', {'id': self.identity, 'metadata': {'title': '卷一', 'series': '共同系列', 'authors': ['作者甲'], 'age_rating': 'Everyone'}})
+    def test_explicit_series_allows_writer_changes_and_oneshots_stay_independent(self):
+        self.service.call('approve', {'id': self.identity, 'metadata': {'title': '卷一', 'series': '共同系列', 'number': '1', 'collection_mode': 'series', 'authors': ['作者甲'], 'age_rating': 'Everyone'}})
         another = self.root / '第二卷'
         another.mkdir()
         (another / '1.jpg').write_bytes(b'second')
         identity = self.service.repo.upsert_scan(inspect_source(another))
-        result = self.service.call('approve', {'id': identity, 'metadata': {'title': '卷二', 'series': '共同系列', 'authors': ['作者乙'], 'age_rating': 'Everyone'}})
+        result = self.service.call('approve', {'id': identity, 'metadata': {'title': '卷二', 'series': '共同系列', 'number': '2', 'collection_mode': 'series', 'authors': ['作者乙'], 'age_rating': 'Everyone'}})
         self.assertEqual(result['status'], 'approved')
-        self.service.call('approve', {'id': self.identity, 'metadata': {'title': '独立同名', 'series': '', 'authors': ['作者甲'], 'age_rating': 'Everyone'}})
-        with self.assertRaisesRegex(ValueError, '同名作品'):
-            self.service.call('approve', {'id': identity, 'metadata': {'title': '独立同名', 'series': '', 'authors': ['作者乙'], 'age_rating': 'Everyone'}})
+        self.service.call('approve', {'id': self.identity, 'metadata': {'title': '独立同名', 'collection_mode': 'oneshot', 'authors': ['作者甲'], 'age_rating': 'Everyone'}})
+        result = self.service.call('approve', {'id': identity, 'metadata': {'title': '独立同名', 'collection_mode': 'oneshot', 'authors': ['作者乙'], 'age_rating': 'Everyone'}})
+        self.assertEqual(result['status'], 'approved')
 
 
 if __name__ == '__main__':

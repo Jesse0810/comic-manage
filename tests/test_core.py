@@ -42,7 +42,7 @@ class CoreTests(unittest.TestCase):
 
     def test_title_series_and_namespaced_tags_with_xml_escaping(self):
         root = parse_xml(to_comicinfo(self.metadata, 3))
-        self.assertEqual(root.findtext("Series"), "完整中文名")
+        self.assertIsNone(root.find("Series"))
         self.assertIsNone(root.find("LocalizedSeries"))
         self.assertEqual(root.findtext("Title"), "完整中文名")
         self.assertEqual(root.findtext("BlackAndWhite"), "No")
@@ -57,7 +57,7 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(root.find("LocalizedSeries"))
         self.assertIsNone(root.find("Translator"))
         self.assertEqual(root.findtext("Tags"), "校园")
-        self.assertEqual(root.findtext("Series"), self.metadata.original_title)
+        self.assertIsNone(root.find("Series"))
 
     def test_import_preserves_unknown_fields_and_cover(self):
         data = b'<ComicInfo><Series>Chinese</Series><LocalizedSeries>Japanese</LocalizedSeries><LanguageISO>zh-Hans</LanguageISO><Writer>A, B</Writer><Translator>Group</Translator><AgeRating>Everyone</AgeRating><Number>7</Number><Web>https://example.org</Web><Pages><Page Image="2" Type="FrontCover"/></Pages></ComicInfo>'
@@ -105,7 +105,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_plan(self.repo.get(self.comic_id), self.output)
 
-    def test_same_title_different_authors_requires_resolution(self):
+    def test_same_title_different_authors_remain_independent_oneshots(self):
         self.approve()
         other = self.library / "另一本"
         other.mkdir()
@@ -113,8 +113,12 @@ class CoreTests(unittest.TestCase):
         snapshot = inspect_source(other)
         identity = self.repo.upsert_scan(snapshot)
         self.repo.save(identity, replace(self.metadata, authors=["其他作者"]))
-        with self.assertRaisesRegex(ValueError, "同名作品"):
-            self.repo.approve(identity, snapshot)
+        self.repo.approve(identity, snapshot)
+        first = make_plan(self.repo.get(self.comic_id), self.output)
+        second = make_plan(self.repo.get(identity), self.output)
+        self.assertEqual(first.destination.parent.name, "_oneshots")
+        self.assertEqual(first.destination.parent, second.destination.parent)
+        self.assertNotEqual(first.destination, second.destination)
 
     def test_successful_package_is_byte_exact_and_source_untouched(self):
         original = {p.name: p.read_bytes() for p in self.book.iterdir()}

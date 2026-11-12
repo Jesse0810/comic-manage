@@ -6,6 +6,7 @@ interface ComicDesktop {
   chooseDirectories(): Promise<string[]>
   chooseCbz(): Promise<string[]>
   chooseBackup(): Promise<string | null>
+  chooseKomgaManifest(): Promise<string | null>
   openLocation(kind: 'source' | 'output', id: string): Promise<void>
   setWindowState(state: { dirty: boolean; busy: boolean }): void
   closeWindow(): Promise<void>

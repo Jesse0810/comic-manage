@@ -1,6 +1,8 @@
 export type ComicStatus = 'draft' | 'approved' | 'packaged'
+export type CollectionMode = 'oneshot' | 'series'
 export interface Metadata {
-  title: string; series: string; localized_series: string; number: string; count: string; volume: string
+  title: string; series: string; localized_series: string; localized_series_label: string; collection_mode: CollectionMode
+  number: string; count: string; volume: string
   pencillers: string[]; web: string[]; day: string; black_and_white: 'Unknown' | 'Yes' | 'No'
   manga: 'Unknown' | 'Yes' | 'No' | 'YesAndRightToLeft'
   original_works: string[]; characters: string[]; release_type: string; publication_format: string
@@ -21,8 +23,13 @@ export interface ImportPreview { token: string; items: ImportCandidate[]; errors
 export interface ImportResult { count: number; skipped: number; errors: string[]; cancelled: boolean; ids: string[] }
 export const comicGenres = ['同人志', 'CG集', '画集', '设定集', '漫画', '插画集']
 export const publicationFormats = ['独立短篇', '单行本', '合集', '总集篇', '再版', '分卷']
-export const ageRatings = [{ label: '未确认', value: 'Unknown' }, { label: '全年龄', value: 'Everyone' }, { label: 'R15', value: 'MA15+' }, { label: 'R18', value: 'R18+' }]
+export const ageRatings = [{ label: '未确认', value: 'Unknown' }, { label: '全年龄', value: 'Everyone' }, { label: 'MA15+', value: 'MA15+' }, { label: 'R18', value: 'R18+' }]
 export const colorLabels: Record<string, string> = { Unknown: '色彩未确认', Yes: '黑白', No: '彩色 / 非黑白' }
+export const collectionModes = [{ label: '独立作品 · One-Shot', value: 'oneshot' }, { label: '多卷系列 · Series', value: 'series' }]
+export const aliasLanguages = [{ label: '简体中文 · zh-Hans', value: 'zh-Hans' }, { label: '繁体中文 · zh-Hant', value: 'zh-Hant' }, { label: '日文 · ja', value: 'ja' }, { label: '英文 · en', value: 'en' }]
+export function collectionMode(metadata: Metadata): CollectionMode {
+  return metadata.collection_mode ?? (metadata.series.trim() ? 'series' : 'oneshot')
+}
 export function classificationValues(values: string[]): string[] {
   const seen = new Set<string>()
   return values.flatMap(value => value.split(/[、,，;；\n]/)).map(value => value.trim()).filter(value => {
@@ -41,7 +48,7 @@ export function customTags(metadata: Metadata): string[] {
 }
 export interface ExportPlan {
   token: string; totalBytes: number
-  items: { id: string; title: string; source: string; destination: string; pageCount: number; attachmentCount: number }[]
+  items: { id: string; title: string; source: string; destination: string; pageCount: number; attachmentCount: number; warnings: string[] }[]
 }
 export const statusLabels: Record<ComicStatus, string> = { draft: '待审核', approved: '已审核', packaged: '已生成' }
 export function displayTitle(metadata: Metadata): string {

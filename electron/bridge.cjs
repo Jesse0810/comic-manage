@@ -6,15 +6,16 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export'])
 const BATCH_TEXT_FIELDS = new Set([
-  'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator',
+  'genre', 'series', 'localized_series', 'number', 'count', 'translator',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
-  'age_rating', 'black_and_white', 'manga',
+  'age_rating', 'black_and_white', 'manga', 'collection_mode', 'localized_series_label',
 ])
 const BATCH_LIST_FIELDS = new Set(['authors', 'pencillers', 'original_works', 'characters', 'web'])
 const BATCH_ENUMS = {
+  collection_mode: ['oneshot', 'series'],
   release_type: ['', '同人', '商业'],
   age_rating: ['Unknown', 'Everyone', 'MA15+', 'R18+'],
   black_and_white: ['Unknown', 'Yes', 'No'],
@@ -67,7 +68,7 @@ function validateCall(method, params) {
   if (['import', 'prepare_import'].includes(method)) strings('paths')
   if (method === 'browse_folders') string('path')
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
-  if (['remove', 'batch_edit', 'commit_import'].includes(method)) strings('ids')
+  if (['remove', 'batch_edit', 'commit_import', 'export_komga'].includes(method)) strings('ids')
   if (method === 'commit_import') {
     string('token')
     if (params.overwriteExisting !== undefined && typeof params.overwriteExisting !== 'boolean') throw new Error('覆盖选项无效。')
@@ -82,7 +83,7 @@ function validateCall(method, params) {
   if (method === 'batch_edit') validateBatchEdit(params.changes)
   if (method === 'plan') { strings('ids'); string('outputRoot') }
   if (method === 'export') string('token')
-  if (['set_output', 'backup'].includes(method)) string('path')
+  if (['set_output', 'backup', 'export_komga'].includes(method)) string('path')
 }
 
 function pythonCommand(root) {

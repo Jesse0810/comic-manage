@@ -15,6 +15,8 @@ import time
 from typing import Callable, TextIO
 
 from .metadata import AGE_RATINGS, Metadata, to_comicinfo
+from .komga import komga_book_payload, komga_series_payload, komga_warnings
+from .komga_manifest import export_manifest
 from .packaging import ExportPlan, export_cbz, make_plan
 from .repository import Comic, Repository
 from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, inspect_source,
@@ -24,11 +26,12 @@ MAX_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_CHARS = 8 * 1024 * 1024
 PLAN_TTL_SECONDS = 15 * 60
 BATCH_TEXT_FIELDS = frozenset({
-    "series", "localized_series", "number", "count", "volume", "translator", "genre",
-    "publication_format", "year", "month", "day", "language",
+    "series", "localized_series", "number", "count", "translator", "genre",
+    "publication_format", "year", "month", "day", "language", "localized_series_label",
 })
 BATCH_LIST_FIELDS = frozenset({"pencillers", "original_works", "characters", "web"})
 BATCH_CHOICES = {
+    "collection_mode": ("oneshot", "series"),
     "release_type": ("", "同人", "商业"),
     "age_rating": AGE_RATINGS,
     "black_and_white": ("Unknown", "Yes", "No"),
@@ -168,7 +171,7 @@ def _folder_link(path: Path) -> bool:
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
-                         "prepare_import", "commit_import", "remove", "batch_edit"})
+                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
@@ -217,6 +220,9 @@ class ComicService:
             if count:
                 self.plans.clear()
             return {"count": count, "comics": [self.serialize(self.repo.get(i)) for i in identities]}
+        if method == "export_komga":
+            identities = _strings(params.get("ids"), "作品 id")
+            return export_manifest(self.repo, identities, _path(params.get("path"), "清单位置"))
         if method in ("save", "approve"):
             return self.save(params, approve=method == "approve", cancel=cancel)
         if method == "page":
@@ -227,7 +233,11 @@ class ComicService:
             page_count = params.get("pageCount", comic.page_count if comic else None)
             if type(page_count) is not int or page_count < 1:
                 raise ServiceError("pageCount 必须是正整数。")
-            return {"xml": to_comicinfo(metadata, page_count).decode("utf-8")}
+            return {
+                "xml": to_comicinfo(metadata, page_count).decode("utf-8"),
+                "komga": {"book": komga_book_payload(metadata), "series": komga_series_payload(metadata)},
+                "warnings": komga_warnings(metadata),
+            }
         if method == "plan":
             return self.prepare(params, cancel)
         if method == "export":
@@ -520,7 +530,7 @@ class ComicService:
             plans.append(plan)
             items.append({"id": identity, "title": comic.metadata.display_title, "source": comic.source,
                           "destination": str(plan.destination), "pageCount": len(plan.snapshot.pages),
-                          "attachmentCount": len(plan.snapshot.extras)})
+                          "attachmentCount": len(plan.snapshot.extras), "warnings": plan.warnings})
         check_cancel(cancel)
         now = time.monotonic()
         self.plans = OrderedDict((token, p) for token, p in self.plans.items()

@@ -62,7 +62,7 @@ async function run() {
   await app.whenReady()
   let picking = sourceRoot
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: Array.isArray(picking) ? picking : [picking] })
-  dialog.showSaveDialog = async () => ({ canceled: false, filePath: path.join(fixture, 'backup.sqlite3') })
+  dialog.showSaveDialog = async (_window, options) => ({ canceled: false, filePath: path.join(fixture, options.title.includes('Komga') ? 'komga_notable_entities_manifest.json' : 'backup.sqlite3') })
   desktop = await createApplication({ dataDir, show: process.env.COMIC_MANAGE_TEST_SHOW === '1' })
   const window = desktop.window
   window.webContents.setBackgroundThrottling(false)
@@ -94,7 +94,7 @@ async function run() {
     await click('知道了')
     await waitFor("![...document.querySelectorAll('.el-overlay')].some(e => e.getClientRects().length && getComputedStyle(e).display !== 'none' && getComputedStyle(e).visibility !== 'hidden')", 'result dialog dismissed')
   }
-  const metadata = { title: '春日旅途', series: '春の旅シリーズ', localized_series: '春日旅途系列', number: '1.5', count: '3', volume: '1', authors: ['森野'], pencillers: ['独立画师'], publisher: 'pink-noise', translator: '示例汉化组', genre: '同人志', tags: ['日常'], original_works: ['东方Project'], characters: ['博丽灵梦', '雾雨魔理沙'], release_type: '同人', publication_format: '独立短篇', uncensored: true, black_and_white: 'No', manga: 'YesAndRightToLeft', language: 'zh-Hans', age_rating: 'R18+', summary: '用于验证新界面的合成样本。', year: '2024', month: '2', day: '29', web: ['https://example.com/comic/A,B', 'https://example.org/book'], cover_index: 0, original_xml: '' }
+  const metadata = { collection_mode: 'series', localized_series_label: 'zh-Hans', title: '春日旅途', series: '春の旅シリーズ', localized_series: '春日旅途系列', number: '1.5', count: '3', volume: '1', authors: ['森野'], pencillers: ['独立画师'], publisher: 'pink-noise', translator: '示例汉化组', genre: '同人志', tags: ['日常'], original_works: ['东方Project'], characters: ['博丽灵梦', '雾雨魔理沙'], release_type: '同人', publication_format: '独立短篇', uncensored: true, black_and_white: 'No', manga: 'YesAndRightToLeft', language: 'zh-Hans', age_rating: 'R18+', summary: '用于验证新界面的合成样本。', year: '2024', month: '2', day: '29', web: ['https://example.com/comic/A,B', 'https://example.org/book'], cover_index: 0, original_xml: '' }
   const call = (method, params = {}) => evaluate(`window.comic.invoke(${JSON.stringify(method)}, ${JSON.stringify(params)})`)
   const setInput = (placeholder, value) => evaluate(`(() => { const item = [...document.querySelectorAll('input')].find(x=>x.placeholder === ${JSON.stringify(placeholder)}); if(!item) throw new Error('Input missing'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(item,${JSON.stringify(value)}); item.dispatchEvent(new Event('input',{bubbles:true})); })()`)
   const toggle = testId => evaluate(`document.querySelector('[data-testid="'+${JSON.stringify(testId)}+'"]').click()`)
@@ -168,7 +168,6 @@ async function run() {
   await setField('localized-series', '春日旅途系列校订')
   await setField('number', '2.5')
   await setField('count', '4')
-  await setField('volume', '2')
   await chooseOption('day', '28 日')
   await setField('web', 'https://example.com/comic/A,B\nhttps://example.org/book')
   await chooseOption('age-rating', '全年龄')
@@ -207,9 +206,9 @@ async function run() {
   await evaluate("[...document.querySelectorAll('.el-tabs__item')].find(x=>x.textContent === 'ComicInfo.xml').click()")
   await waitFor("document.querySelector('.xml-tab pre')?.textContent.includes('Image=\"1\"')", 'ComicInfo cover index')
   const exportedXml = await evaluate("document.querySelector('.xml-tab pre').textContent")
-  for (const fragment of ['<Title>春日旅途·封面校订</Title>', '<Series>春の旅シリーズ改訂</Series>', '<LocalizedSeries>春日旅途系列校订</LocalizedSeries>', '<Number>2.5</Number>', '<Volume>2</Volume>', '<Count>4</Count>', '<Day>28</Day>', '<Penciller>独立画师</Penciller>', '<AgeRating>R18+</AgeRating>', '<BlackAndWhite>No</BlackAndWhite>', '<Manga>YesAndRightToLeft</Manga>', '<PageCount>3</PageCount>', '角色:博丽灵梦', '角色:雾雨魔理沙', '原作:东方Project', '发行性质:同人', '出版形态:独立短篇', '修正状态:无修正', '<Web>https://example.com/comic/A,B https://example.org/book</Web>']) assert.ok(exportedXml.includes(fragment), fragment)
+  for (const fragment of ['<Title>春日旅途·封面校订</Title>', '<Series>春の旅シリーズ改訂</Series>', '<Number>2.5</Number>', '<Characters>博丽灵梦, 雾雨魔理沙</Characters>', '<Count>4</Count>', '<Day>28</Day>', '<Penciller>独立画师</Penciller>', '<AgeRating>R18+</AgeRating>', '<BlackAndWhite>No</BlackAndWhite>', '<Manga>YesAndRightToLeft</Manga>', '<PageCount>3</PageCount>', '角色:博丽灵梦', '角色:雾雨魔理沙', '原作:东方Project', '发行性质:同人', '出版形态:独立短篇', '修正状态:无修正', '<Web>https://example.com/comic/A,B https://example.org/book</Web>']) assert.ok(exportedXml.includes(fragment), fragment)
   assert.equal(/<Tags>[^<]*(?:^|, )(?:汉化|全彩|无修正)(?:,|<)/.test(exportedXml), false)
-  assert.equal(exportedXml.includes('<原作>') || exportedXml.includes('<Characters>'), false)
+  assert.equal(exportedXml.includes('<Volume>') || exportedXml.includes('<LocalizedSeries>') || exportedXml.includes('<原作>'), false)
   picking = output
   await click('选择')
   await click('生成 CBZ')
@@ -223,6 +222,24 @@ async function run() {
   assert.equal(packaged.metadata.cover_index, 1)
   assert.equal((await fs.readFile(path.join(source, '1.png'))).equals(page), true)
   assert.equal((await fs.stat(packaged.output)).isFile(), true)
+  await evaluate("[...document.querySelectorAll('.el-tabs__item')].find(x=>x.textContent === 'Komga 补充资料').click()")
+  await waitFor("document.querySelector('[data-testid=komga-payload]')?.textContent.includes('春日旅途系列校订')", 'Komga supplementary preview')
+  assert.equal(await evaluate("document.querySelector('[data-testid=komga-payload]').textContent.includes('notableEntities')"), true)
+  await click('Komga 同步清单')
+  await waitFor("document.body.innerText.includes('清单已导出')", 'Komga manifest export')
+  await dismissResult()
+  const manifest = JSON.parse(await fs.readFile(path.join(fixture, 'komga_notable_entities_manifest.json'), 'utf8'))
+  assert.equal(manifest.books.length, 1)
+  assert.equal(manifest.series[0].alternateTitles[0].title, '春日旅途系列校订')
+  assert.ok(manifest.books[0].notableEntities.some(entity => entity.kind === '原作' && entity.name === '东方Project'))
+  await call('approve', { id: secondId, metadata: { age_rating: 'Everyone', collection_mode: 'oneshot', series: '本地旧系列', number: '8', count: '9', volume: '3' } })
+  const oneShotPlan = await call('plan', { ids: [secondId], outputRoot: output })
+  assert.equal(path.basename(path.dirname(oneShotPlan.items[0].destination)), '_oneshots')
+  const oneShotResult = await call('export', { token: oneShotPlan.token })
+  assert.deepEqual(oneShotResult.errors, [])
+  const oneShotXml = (await call('xml', { id: secondId, metadata: {}, pageCount: 1 })).xml
+  for (const tag of ['Series','Number','Count','Volume','LocalizedSeries']) assert.equal(oneShotXml.includes('<'+tag+'>'), false, tag)
+  catalog = await call('bootstrap')
 
   await evaluate("[...document.querySelectorAll('.table-area .el-table__header .el-checkbox')].find(item=>item.getClientRects().length).click()")
   await waitFor("document.querySelector('.selected-count')?.textContent.includes('2')", 'two comics checked')
@@ -232,6 +249,7 @@ async function run() {
   await waitFor("document.querySelectorAll('.table-area .el-table__body .el-checkbox input:checked').length === 2", 'checkboxes restored after empty filter')
   const beforeBatch = new Map(catalog.comics.map(book => [book.id, book.metadata]))
   const batchChanges = {
+    collection_mode: 'series',
     series: '旅途系列',
     release_type: '商业',
     publication_format: '分卷',
@@ -240,6 +258,8 @@ async function run() {
   window.setSize(1180, 800)
   await click('批量编辑')
   assert.equal(await evaluate("[...document.querySelectorAll('.batch-edit-dialog .el-dialog__footer button')].find(b => b.textContent.trim() === '保存 2 本作品')?.disabled"), true)
+  await toggle('batch-enable-collection-mode')
+  await chooseOption('batch-collection-mode', '多卷系列 · Series')
   await toggle('batch-enable-series')
   await setField('batch-series', batchChanges.series)
   await toggle('batch-enable-release-type')
@@ -247,7 +267,7 @@ async function run() {
   await toggle('batch-enable-publication-format')
   await chooseOption('batch-publication-format', batchChanges.publication_format)
   await toggle('batch-enable-age-rating')
-  await chooseOption('batch-age-rating', 'R15')
+  await chooseOption('batch-age-rating', 'MA15+')
   assert.equal(await evaluate("document.querySelector('.batch-edit-dialog .el-dialog__footer').getBoundingClientRect().bottom <= window.innerHeight"), true)
   await capture('ComicManage-Electron-batch.png')
   await click('保存 2 本作品')
@@ -297,7 +317,7 @@ async function run() {
   assert.equal(javascriptErrors.filter(x => /Uncaught|TypeError|ReferenceError/.test(x)).length, 0, javascriptErrors.join('\n'))
   window.destroy()
   await desktop.bridge.stop()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, standard XML, review, preview, cover, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

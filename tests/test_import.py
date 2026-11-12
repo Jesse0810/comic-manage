@@ -168,7 +168,7 @@ class ImportTests(unittest.TestCase):
         before = {}
         for index, identity in enumerate(identities, start=1):
             self.service.call("save", {"id": identity, "metadata": {
-                "title": f"第 {index} 册", "number": str(index), "series": "旧系列",
+                "title": f"第 {index} 册", "number": str(index), "series": "旧系列", "collection_mode": "series",
                 "authors": [f"作者 {index}"], "age_rating": "R18+", "uncensored": True,
                 "localized_series": "已有译名", "original_works": ["保留原作"],
             }})
@@ -193,11 +193,11 @@ class ImportTests(unittest.TestCase):
         self.commit(self.preview())
         identities = [source_id(self.first), source_id(self.second)]
         self.service.call("save", {"id": identities[1], "metadata": {
-            "series": "原系列", "localized_series": "已有译名", "authors": ["原作者"],
+            "series": "原系列", "localized_series": "已有译名", "collection_mode": "series", "authors": ["原作者"],
             "pencillers": ["绘画者"], "year": "2024", "month": "2", "day": "29",
         }})
         before = [self.service.repo.get(identity) for identity in identities]
-        for changes, error in [({"series": "已有译名"}, "本地化系列名"), ({"series": ""}, "本地化系列名"),
+        for changes, error in [({"series": "已有译名"}, "系列别名"), ({"series": ""}, "系列别名"),
                                ({"authors": ["绘画者"]}, "已有绘画者"), ({"year": "2025"}, "日历日期")]:
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, error):
                 self.service.call("batch_edit", {"ids": identities, "changes": {"release_type": "商业", **changes}})
@@ -205,10 +205,10 @@ class ImportTests(unittest.TestCase):
 
     def test_unchanged_batch_keeps_review_and_prepared_export(self):
         identity = self.imported()
-        metadata = {"authors": ["作者"], "series": "系列", "age_rating": "Everyone"}
+        metadata = {"authors": ["作者"], "series": "系列", "number": "1", "collection_mode": "series", "age_rating": "Everyone"}
         self.service.call("approve", {"id": identity, "metadata": metadata})
         plan = self.service.call("plan", {"ids": [identity], "outputRoot": str(self.root / "output")})
-        result = self.service.call("batch_edit", {"ids": [identity], "changes": metadata})
+        result = self.service.call("batch_edit", {"ids": [identity], "changes": {key: value for key, value in metadata.items() if key != "collection_mode"}})
         self.assertEqual(result["count"], 0)
         self.assertEqual(result["comics"][0]["status"], "approved")
         self.assertIn(plan["token"], self.service.plans)

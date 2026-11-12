@@ -157,7 +157,8 @@ test('staged import and batch actions cross the same restricted bridge', async t
     ['commit_import', {token:'prepared',ids:['one','two'],defaults:{authors:['みずいろめがね'],genre:'同人志'},overwriteExisting:false}],
     ['batch_edit', {ids:['one','two'],changes:{genre:'商业志'}}],
     ['batch_edit', {ids:['one','two'],changes:{
-      series:'原作系列', localized_series:'系列译名', number:'2.5', count:'12', volume:'3',
+      collection_mode:'series', series:'原作系列', localized_series:'系列译名',
+      localized_series_label:'zh-Hans', number:'2.5', count:'12',
       authors:['みずいろめがね'], pencillers:['森野'], translator:'译者',
       original_works:['东方Project'], characters:['灵梦'], release_type:'同人',
       publication_format:'单行本', year:'2024', month:'2', day:'29',
@@ -165,13 +166,60 @@ test('staged import and batch actions cross the same restricted bridge', async t
       manga:'YesAndRightToLeft', uncensored:true, web:['https://example.org/comic'],
     }}],
     ['batch_edit', {ids:['one','two'],changes:{
-      genre:'', series:'', localized_series:'', translator:'', pencillers:[],
+      collection_mode:'oneshot', genre:'', series:'', localized_series:'',
+      localized_series_label:'', translator:'', pencillers:[],
       original_works:[], characters:[], release_type:'', publication_format:'',
       web:[], uncensored:false,
     }}],
     ['remove', {ids:['one']}],
   ]
   for (const [method, params] of operations) assert.deepEqual(await bridge.call(method, params), params)
+})
+
+test('collection patches reject unknown modes, malformed labels and retired Volume fields', () => {
+  const invalidChanges = [
+    {collection_mode:'collection'},
+    {collection_mode:'Series'},
+    {collection_mode:''},
+    {collection_mode:null},
+    {collection_mode:true},
+    {localized_series_label:['zh-Hans']},
+    {localized_series_label:' '},
+    {volume:'3'},
+    {Volume:'3'},
+  ]
+  for (const changes of invalidChanges) {
+    assert.throws(() => validateCall('batch_edit', {ids:['book'], changes}), undefined, JSON.stringify(changes))
+  }
+  for (const collection_mode of ['oneshot', 'series']) {
+    assert.doesNotThrow(() => validateCall('batch_edit', {
+      ids:['book'], changes:{collection_mode, localized_series_label:'zh-Hant'},
+    }))
+  }
+  assert.throws(() => validateCall('commit_import', {
+    token:'prepared', ids:['book'], defaults:{collection_mode:'series'},
+  }), /批量字段/)
+})
+
+test('Komga export validates its selected IDs and destination before sending a request', async t => {
+  const bridge = await fixture(t)
+  const invalid = [
+    {},
+    {path:'C:\\成品\\Komga.json'},
+    {ids:'book', path:'C:\\成品\\Komga.json'},
+    {ids:['book',42], path:'C:\\成品\\Komga.json'},
+    {ids:['book']},
+    {ids:['book'], path:''},
+    {ids:['book'], path:42},
+  ]
+  for (const params of invalid) {
+    await assert.rejects(bridge.call('export_komga', params), undefined, JSON.stringify(params))
+  }
+  assert.equal(bridge.sequence, 0)
+  assert.equal(bridge.pending.size, 0)
+  await assert.rejects(bridge.call('export_arbitrary_file', {ids:['book'],path:'C:\\anything'}), /不支持/)
+  const params = {ids:['one','two'], path:'C:\\成品\\漫画系列-komga.json'}
+  assert.deepEqual(await bridge.call('export_komga', params), params)
 })
 
 test('invalid calls fail before data is sent to the service', async t => {

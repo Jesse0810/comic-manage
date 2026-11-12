@@ -96,6 +96,14 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       filters: [{ name: 'SQLite 资料库', extensions: ['sqlite3'] }] })
     return result.canceled ? null : result.filePath
   })
+  handle('comic:choose-komga-manifest', async () => {
+    const result = await dialog.showSaveDialog(window, {
+      title: '导出 Komga 同步清单',
+      defaultPath: 'komga_notable_entities_manifest.json',
+      filters: [{ name: 'Komga 同步清单', extensions: ['json'] }],
+    })
+    return result.canceled ? null : result.filePath
+  })
   handle('comic:open-location', async (kind, id) => {
     if (!['source', 'output'].includes(kind) || typeof id !== 'string') throw new Error('打开位置参数无效。')
     const catalog = await callService('bootstrap')

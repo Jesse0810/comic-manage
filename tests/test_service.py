@@ -130,7 +130,8 @@ class ServiceTests(unittest.TestCase):
     def test_xml_preview_does_not_change_saved_metadata(self):
         self.service.call("save", {"id": self.identity, "metadata": self.metadata.to_dict()})
         result = self.service.call("xml", {"id": self.identity, "metadata": {"chinese_title": "预览中的名称"}})
-        self.assertIn("<Series>预览中的名称</Series>", result["xml"])
+        self.assertIn("<Title>预览中的名称</Title>", result["xml"])
+        self.assertNotIn("<Series>", result["xml"])
         self.assertEqual(self.service.repo.get(self.identity).metadata.chinese_title, "春日旅途")
 
     def test_review_plan_export_preserves_source_and_marks_verified(self):

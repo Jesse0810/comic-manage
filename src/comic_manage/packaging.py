@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -12,7 +12,8 @@ from threading import Event
 from typing import Callable
 import zipfile
 
-from .metadata import parse_xml, to_comicinfo
+from .komga import komga_warnings
+from .metadata import parse_xml, title_key, to_comicinfo
 from .repository import Comic, now
 from .sources import Snapshot, check_cancel, inspect_source, is_inside
 
@@ -34,6 +35,7 @@ class ExportPlan:
     destination: Path
     snapshot: Snapshot
     xml: bytes
+    warnings: list[str] = field(default_factory=list)
 
 
 def make_plan(comic: Comic, output_root: Path) -> ExportPlan:
@@ -47,9 +49,18 @@ def make_plan(comic: Comic, output_root: Path) -> ExportPlan:
         raise ValueError("成品目录不能位于原始图片文件夹内。请选择独立目录。")
     metadata = comic.metadata
     xml = to_comicinfo(metadata, len(snapshot.pages))
-    author = safe_segment(" & ".join(metadata.authors), 60)
     name = safe_segment(metadata.display_title)
-    destination = root / author / f"{name} [{comic.id[:8]}].cbz"
+    if metadata.collection_mode == "oneshot":
+        directory = "_oneshots"
+    else:
+        # Keep real series together across writers while separating sanitized-name collisions.
+        normalized_series = title_key(metadata.series)
+        series_key = hashlib.sha256(normalized_series.encode("utf-8")).hexdigest()[:10]
+        prefix = safe_segment(normalized_series, 60)
+        if prefix.startswith("_oneshots"):
+            prefix = "series-" + prefix
+        directory = f"{prefix} [{series_key}]"
+    destination = root / directory / f"{name} [{comic.id[:8]}].cbz"
     if destination.exists():
         raise FileExistsError(f"目标已存在，v1 不覆盖文件：{destination}")
     if destination.resolve() == snapshot.path:
@@ -57,7 +68,7 @@ def make_plan(comic: Comic, output_root: Path) -> ExportPlan:
     # Reserve headroom for temporary names and Windows installations without long paths.
     if os.name == "nt" and len(str(destination).encode("utf-16-le")) // 2 > 235:
         raise ValueError("输出完整路径过长，请选择层级更浅的成品目录。完整标题仍保存在 XML 中。")
-    return ExportPlan(comic, destination, snapshot, xml)
+    return ExportPlan(comic, destination, snapshot, xml, komga_warnings(metadata))
 
 
 def verify_archive(path: Path, expected: dict[str, str], xml: bytes,

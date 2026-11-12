@@ -6,7 +6,7 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 ## Windows 便携版
 
-解压 `ComicManage-Electron-1.4.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
+解压 `ComicManage-Electron-1.5.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
 
 1. 添加一个或多个本地 / NAS 位置，在目录树中勾选需要的文件夹，或多选已有 CBZ。
 2. 预览识别结果，勾选需要入库的作品，可统一填写作者和类型，再确认导入。
@@ -17,7 +17,9 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 图片不转码，逐图片与附件验证 ZIP CRC 和 SHA-256，校验成功后才发布正式 CBZ。不会覆盖已有目标，不会删除原始图片。修改元数据或扫描到源变化后需要重新审核。
 
-1.3.0 使用 [NAS 元数据规则](docs/NAS_METADATA.md)，提供 27 项元数据的编辑或展示。作品名 Title 与 Series 分开；独立作品未填系列时，导出以其作品名称作为 Kavita 的独立系列。LocalizedSeries 只保存真实系列的另一语言名称。旧版双标题和普通“汉化 / 全彩 / 无修正”标签规则已由新规则替代。
+1.5.0 使用 [Komga 元数据规则 v1.1-K](docs/NAS_METADATA.md)，按 Komga 1.30.1 适配。独立作品导出到 _oneshots，需在 Komga 书库设置 One-Shots directory 为 /_oneshots。同一系列的成品放在同一目录，以 Number 标识本册或章节。Volume 保留本机旧值供核对，XML 省略。Characters 和角色标签同时写入。系列别名、色彩及其他结构化分类使用 API 补充清单。
+
+生成成品并完成 Komga 扫描后，选中作品点击“Komga 同步清单”。在 PowerShell 运行 `.\resources\scripts\sync-komga.ps1 -ManifestPath "D:\成品\komga_notable_entities_manifest.json" -WhatIf` 预览，移除 -WhatIf 后确认写入。在本机输入 Komga 地址和管理员 API Key。脚本替换清单管理的实体类别，并保留已有角色和其他类别。新增系列别名可以同步，既有同标签别名的改名或删除需在 Komga 核对处理。详见包内 resources/KOMGA_METADATA.md。
 
 ## 选择导入、批量编辑与移除
 
@@ -115,4 +117,4 @@ npm run dist:win
 
 继续使用人工审核、计划预览与校验发布流程，不含网络刮削、内容去重、自动删除或覆盖替换。大于 32 MiB 的单张图片暂不能预览，仍可原字节打包。TIFF 等格式能否预览由 Chromium 解码支持决定。NAS 取消需等待系统文件读取返回。
 
-实际 NAS、Kavita 入库与海量文件性能仍需用户环境验收。字段映射参考 [Kavita 官方元数据说明](https://wiki.kavitareader.com/guides/metadata/comics/)。
+实际 NAS、Komga 入库与海量文件性能需在用户环境验收。字段映射参考 [Komga 官方元数据说明](https://komga.org/docs/guides/scan-analysis-refresh/)。

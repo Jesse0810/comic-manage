@@ -189,7 +189,7 @@ class InitialMetadataTests(unittest.TestCase):
 class MonthMappingTests(unittest.TestCase):
     def test_month_round_trip_preserves_other_xml_fields(self):
         metadata = from_comicinfo(
-            b"<ComicInfo><Series>Title</Series><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month><Month>2</Month><CustomField>Keep me</CustomField></ComicInfo>", "fallback"
+            b"<ComicInfo><Series>Title</Series><Number>1</Number><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month><Month>2</Month><CustomField>Keep me</CustomField></ComicInfo>", "fallback"
         )
         self.assertEqual(metadata.month, "1")
         metadata.month = "10"
@@ -200,7 +200,7 @@ class MonthMappingTests(unittest.TestCase):
         self.assertEqual(from_comicinfo(xml, "fallback").month, "10")
 
     def test_empty_month_removes_existing_month(self):
-        metadata = from_comicinfo(b"<ComicInfo><Series>Title</Series><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month></ComicInfo>", "fallback")
+        metadata = from_comicinfo(b"<ComicInfo><Series>Title</Series><Number>1</Number><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month></ComicInfo>", "fallback")
         metadata.month = ""
         self.assertIsNone(ET.fromstring(to_comicinfo(metadata, 1)).find("Month"))
 
