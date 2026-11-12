@@ -4,8 +4,9 @@ const { app, BrowserWindow, ipcMain, dialog, shell, protocol, safeStorage } = re
 const { readFile, realpath, stat } = require('node:fs/promises')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
+const { createHash } = require('node:crypto')
 const { ServiceBridge, validateCall } = require('./bridge.cjs')
-const { KomgaConfigStore } = require('./komga-config.cjs')
+const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
@@ -80,8 +81,36 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args) })
   }
   handle('comic:call', async (method, params = {}) => {
-    if (method === 'komga_test') throw new Error('请通过 Komga 连接设置测试服务器。')
+    if (['komga_test', 'source_context'].includes(method)) throw new Error('此操作只允许主进程调用。')
     validateCall(method, params)
+    if (method === 'bootstrap') {
+      const result = await callService(method, params)
+      try {
+        const config = await komgaConfig.get()
+        const scope = config.url && config.libraryId
+          ? createHash('sha256').update(normalizeKomgaUrl(config.url) + '\n' + config.libraryId).digest('hex').slice(0, 20)
+          : ''
+        return { ...result, komgaScope: scope, komgaLibraryName: config.libraryName }
+      } catch {
+        return { ...result, komgaScope: '', komgaLibraryName: '' }
+      }
+    }
+    if (method === 'komga_pull') {
+      if (Object.keys(params).length) throw new Error('请使用当前配置的 Komga 书库。')
+      return callService(method, await komgaConfig.connection())
+    }
+    if (method === 'komga_resolve') {
+      if (Object.keys(params).some(key => !['id', 'resolution'].includes(key))) throw new Error('冲突处理参数无效。')
+      return callService(method, { ...params, ...await komgaConfig.connection() })
+    }
+    if (['approve', 'page'].includes(method)) {
+      const allowed = method === 'approve' ? ['id', 'metadata'] : ['id', 'index']
+      if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('作品请求参数无效。')
+      const context = await callService('source_context', { id: params.id })
+      if (context.kind === 'komga') {
+        return callService(method, { ...params, ...await komgaConfig.connection() })
+      }
+    }
     if (method === 'komga_sync') {
       if (Object.keys(params).some(key => key !== 'ids')) throw new Error('同步只接受选中的作品。')
       return callService(method, { ...params, ...await komgaConfig.connection() })
@@ -91,6 +120,17 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   handle('comic:komga-config', () => komgaConfig.get())
   handle('comic:save-komga-config', input => komgaConfig.save(input))
   handle('comic:test-komga-config', async input => callService('komga_test', await komgaConfig.credentials(input)))
+  handle('comic:open-komga-book', async id => {
+    if (typeof id !== 'string' || !id || id.length > 32767) throw new Error('作品 ID 无效。')
+    const context = await callService('source_context', { id })
+    const config = await komgaConfig.get()
+    const remote = context.remote
+    if (context.kind !== 'komga' || !remote || !config.url || !config.libraryId
+        || remote.serverUrl !== normalizeKomgaUrl(config.url) || remote.libraryId !== config.libraryId) {
+      throw new Error('请先切换到这本漫画所属的 Komga 服务器和书库。')
+    }
+    await shell.openExternal(normalizeKomgaUrl(config.url) + '/book/' + encodeURIComponent(remote.bookId))
+  })
   handle('comic:version', () => app.getVersion())
   handle('comic:choose-directory', async () => {
     const result = await dialog.showOpenDialog(window, { title: '选择本地或 NAS 目录', properties: ['openDirectory', 'createDirectory'] })
@@ -122,6 +162,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     const catalog = await callService('bootstrap')
     const comic = catalog.comics.find(item => item.id === id)
     if (!comic) throw new Error('作品记录不存在。')
+    if (comic.kind === 'komga') throw new Error('远端作品请使用“在 Komga 中查看”。')
     const location = kind === 'source' ? comic.source : comic.output
     if (!location) throw new Error('此作品尚未生成成品。')
     const info = await stat(location)

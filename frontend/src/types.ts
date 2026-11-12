@@ -11,10 +11,11 @@ export interface Metadata {
   language: string; age_rating: string; summary: string; year: string; month: string; cover_index: number; original_xml: string
 }
 export interface Comic {
-  id: string; source: string; kind: 'folder' | 'cbz'; fingerprint: string; page_count: number
+  id: string; source: string; kind: 'folder' | 'cbz' | 'komga'; fingerprint: string; page_count: number
   metadata: Metadata; status: ComicStatus; output: string; warning: string; updated_at: string
+  remote?: { serverUrl: string; libraryId: string; libraryName: string; bookId: string; seriesId: string; scope: string; hasLocalChanges: boolean; conflict: boolean; syncedAt?: string; unavailable?: boolean; pendingSync?: boolean; dirtyFields?: string[]; sharedMetadata?: { ageRating?: number | null; genres?: string[]; readingDirection?: string; alternateTitles?: { label: string; title: string }[]; [key: string]: unknown } }
 }
-export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string }
+export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string }
 export interface ImportCandidate {
   id: string; source: string; kind: 'folder' | 'cbz'; page_count: number; metadata: Metadata
   import_status: 'new' | 'existing' | 'removed'; warning: string
@@ -22,13 +23,14 @@ export interface ImportCandidate {
 export interface ImportPreview { token: string; items: ImportCandidate[]; errors: string[]; cancelled?: boolean }
 export interface ImportResult { count: number; skipped: number; errors: string[]; cancelled: boolean; ids: string[] }
 export interface KomgaConfig { url: string; libraryId: string; libraryName: string; hasApiKey: boolean }
+export interface KomgaPullResult { total: number; added: number; updated: number; kept: number; skipped: number; cancelled: boolean; errors: string[]; ids: string[]; scope: string }
 export interface KomgaLibrary { id: string; name: string; root?: string }
 export interface KomgaConnectionInput { url: string; apiKey?: string; clearKey?: boolean }
 export interface KomgaConfigInput extends KomgaConnectionInput { libraryId: string; libraryName: string }
 export type KomgaSyncStatus = 'success' | 'skipped' | 'failed'
-export interface KomgaSyncItem { id: string; title: string; status: KomgaSyncStatus; message: string; bookId?: string; warnings?: string[] }
+export interface KomgaSyncItem { id: string; title: string; status: KomgaSyncStatus; message: string; bookId?: string; changed?: boolean; warnings?: string[] }
 export interface KomgaSyncResult {
-  total: number; updated: number; skipped: number; failed: number; seriesUpdated: number; cancelled: boolean
+  total: number; updated: number; unchanged?: number; skipped: number; failed: number; seriesUpdated: number; cancelled: boolean
   books: KomgaSyncItem[]; series: KomgaSyncItem[]
 }
 export const comicGenres = ['同人志', 'CG集', '画集', '设定集', '漫画', '插画集']

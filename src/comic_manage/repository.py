@@ -29,6 +29,7 @@ class Comic:
     output: str = ""
     warning: str = ""
     updated_at: str = ""
+    remote: dict | None = None
 
 
 class Repository:
@@ -60,6 +61,16 @@ class Repository:
                     book_id TEXT NOT NULL, series_id TEXT NOT NULL, remote_path TEXT NOT NULL,
                     synced_at TEXT NOT NULL,
                     PRIMARY KEY (server_url, library_id, comic_id)
+                );
+                CREATE TABLE IF NOT EXISTS komga_sources (
+                    comic_id TEXT PRIMARY KEY, server_url TEXT NOT NULL, library_id TEXT NOT NULL,
+                    library_name TEXT NOT NULL, book_id TEXT NOT NULL, series_id TEXT NOT NULL,
+                    remote_path TEXT NOT NULL, scope TEXT NOT NULL,
+                    base_metadata TEXT NOT NULL, snapshot TEXT NOT NULL,
+                    observed_snapshot TEXT NOT NULL DEFAULT '{}', dirty_fields TEXT NOT NULL DEFAULT '[]',
+                    conflict INTEGER NOT NULL DEFAULT 0, unavailable INTEGER NOT NULL DEFAULT 0,
+                    pending_sync INTEGER NOT NULL DEFAULT 0, synced_at TEXT NOT NULL DEFAULT '',
+                    UNIQUE (server_url, library_id, book_id)
                 );
                 PRAGMA user_version = 1;
             """)
@@ -107,8 +118,13 @@ class Repository:
     def all(self, *, include_removed: bool = False) -> list[Comic]:
         with self.connect() as db:
             condition = "" if include_removed else " WHERE id NOT IN (SELECT comic_id FROM removed_comics)"
-            return [self._decode(row) for row in db.execute(
+            comics = [self._decode(row) for row in db.execute(
                 "SELECT * FROM comics" + condition + " ORDER BY updated_at DESC, id")]
+            sources = {row["comic_id"]: self._source_decode(row) for row in db.execute("SELECT * FROM komga_sources")}
+        for comic in comics:
+            if comic.id in sources:
+                comic.remote = self._source_public(sources[comic.id])
+        return comics
 
     def get(self, comic_id: str, *, include_removed: bool = False) -> Comic:
         with self.connect() as db:
@@ -116,7 +132,108 @@ class Repository:
             row = db.execute("SELECT * FROM comics WHERE id=?" + condition, (comic_id,)).fetchone()
         if not row:
             raise ValueError("作品记录不存在。")
-        return self._decode(row)
+        comic = self._decode(row)
+        if comic.kind == "komga":
+            source = self.get_komga_source(comic_id)
+            if source:
+                comic.remote = self._source_public(source)
+        return comic
+
+    @staticmethod
+    def _source_decode(row) -> dict:
+        source = dict(row)
+        for field in ("base_metadata", "snapshot", "observed_snapshot", "dirty_fields"):
+            source[field] = json.loads(source[field])
+        for field in ("conflict", "unavailable", "pending_sync"):
+            source[field] = bool(source[field])
+        return source
+
+    @staticmethod
+    def _source_public(source: dict) -> dict:
+        snapshot = source["observed_snapshot"] or source["snapshot"]
+        shared = (snapshot.get("series") or {}).get("metadata") or {}
+        return {"serverUrl": source["server_url"], "libraryId": source["library_id"],
+                "libraryName": source["library_name"], "bookId": source["book_id"],
+                "seriesId": source["series_id"], "scope": source["scope"],
+                "hasLocalChanges": bool(source["dirty_fields"]), "conflict": source["conflict"],
+                "unavailable": source["unavailable"], "pendingSync": source["pending_sync"],
+                "syncedAt": source["synced_at"], "dirtyFields": source["dirty_fields"],
+                "sharedMetadata": {key: shared.get(key) for key in ("title", "ageRating", "genres", "publisher", "language", "readingDirection", "totalBookCount", "alternateTitles")}}
+
+    def get_komga_source(self, comic_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM komga_sources WHERE comic_id=?", (comic_id,)).fetchone()
+        return self._source_decode(row) if row else None
+
+    def upsert_komga(self, identity: str, source: dict, metadata: Metadata, snapshot: dict,
+                     fingerprint: str, page_count: int, warning: str) -> str:
+        encoded = json.dumps(snapshot, ensure_ascii=False)
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (identity,)).fetchone():
+                return "skipped"
+            previous = db.execute("SELECT * FROM comics WHERE id=?", (identity,)).fetchone()
+            remote_row = db.execute("SELECT * FROM komga_sources WHERE comic_id=?", (identity,)).fetchone()
+            if previous and remote_row:
+                remote = self._source_decode(remote_row)
+                changed = previous["fingerprint"] != fingerprint
+                protected = bool(remote["dirty_fields"] or remote["pending_sync"] or remote["conflict"])
+                if protected:
+                    conflict = changed or remote["conflict"]
+                    db.execute("UPDATE komga_sources SET observed_snapshot=?,conflict=?,unavailable=0,library_name=? WHERE comic_id=?",
+                               (encoded if changed else "{}", int(conflict), source["library_name"], identity))
+                    if conflict:
+                        db.execute("UPDATE comics SET status='draft',warning=?,updated_at=? WHERE id=?",
+                                   ("远端资料已变化。本机未同步的编辑已保留，请处理冲突后重新审核。", now(), identity))
+                    return "kept"
+                if not changed and not remote["unavailable"]:
+                    return "kept"
+                db.execute("UPDATE comics SET metadata=?,fingerprint=?,page_count=?,status='draft',warning=?,updated_at=? WHERE id=?",
+                           (json.dumps(metadata.to_dict(), ensure_ascii=False), fingerprint, page_count, warning, now(), identity))
+                db.execute("UPDATE komga_sources SET series_id=?,remote_path=?,library_name=?,base_metadata=?,snapshot=?,observed_snapshot='{}',conflict=0,unavailable=0,pending_sync=0 WHERE comic_id=?",
+                           (source["series_id"], source["remote_path"], source["library_name"], json.dumps(metadata.to_dict(), ensure_ascii=False), encoded, identity))
+                self._event(db, identity, "komga_refresh", "读取远端最新资料。")
+                return "updated"
+            db.execute("INSERT INTO comics (id,source,kind,fingerprint,page_count,metadata,warning,updated_at) VALUES (?,?,'komga',?,?,?,?,?)",
+                       (identity, source["source"], fingerprint, page_count, json.dumps(metadata.to_dict(), ensure_ascii=False), warning, now()))
+            db.execute("INSERT INTO komga_sources (comic_id,server_url,library_id,library_name,book_id,series_id,remote_path,scope,base_metadata,snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (identity, source["server_url"], source["library_id"], source["library_name"], source["book_id"], source["series_id"], source["remote_path"], source["scope"], json.dumps(metadata.to_dict(), ensure_ascii=False), encoded))
+            self._event(db, identity, "komga_pull", "从 Komga 书库读取资料。")
+            return "added"
+
+    def mark_komga_missing(self, scope: str, seen: set[str]) -> int:
+        count = 0
+        with self.connect() as db:
+            for row in db.execute("SELECT comic_id,book_id FROM komga_sources WHERE scope=?", (scope,)).fetchall():
+                if row["book_id"] not in seen:
+                    db.execute("UPDATE komga_sources SET unavailable=1 WHERE comic_id=?", (row["comic_id"],))
+                    db.execute("UPDATE comics SET status='draft',warning=?,updated_at=? WHERE id=?",
+                               ("远端漫画已移除或不可访问，本机资料和编辑仍保留。", now(), row["comic_id"]))
+                    count += 1
+        return count
+
+    def note_komga_conflict(self, comic_id: str, snapshot: dict) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE komga_sources SET observed_snapshot=?,conflict=1,pending_sync=0 WHERE comic_id=?",
+                       (json.dumps(snapshot, ensure_ascii=False), comic_id))
+            db.execute("UPDATE comics SET status='draft',warning=?,updated_at=? WHERE id=?",
+                       ("远端资料在读取后发生变化，请处理冲突后重新审核。", now(), comic_id))
+
+    def rebase_komga(self, comic_id: str, metadata: Metadata, base: Metadata, snapshot: dict,
+                    fingerprint: str, dirty_fields: list[str], *, action: str, synced: bool = False) -> None:
+        with self.connect() as db:
+            previous = db.execute("SELECT metadata,status FROM comics WHERE id=?", (comic_id,)).fetchone()
+            self._event(db, comic_id, action, previous["metadata"])
+            book = snapshot["book"]
+            db.execute("UPDATE comics SET metadata=?,fingerprint=?,page_count=?,status=?,warning='',updated_at=? WHERE id=?",
+                       (json.dumps(metadata.to_dict(), ensure_ascii=False), fingerprint, book["media"]["pagesCount"], previous["status"] if synced else "draft", now(), comic_id))
+            db.execute("UPDATE komga_sources SET base_metadata=?,snapshot=?,observed_snapshot='{}',dirty_fields=?,conflict=0,unavailable=0,pending_sync=0,series_id=?,remote_path=?,synced_at=CASE WHEN ? THEN ? ELSE synced_at END WHERE comic_id=?",
+                       (json.dumps(base.to_dict(), ensure_ascii=False), json.dumps(snapshot, ensure_ascii=False), json.dumps(dirty_fields), book["seriesId"], book["url"], int(synced), now(), comic_id))
+
+    def approve_komga(self, comic_id: str) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE comics SET status='approved',updated_at=? WHERE id=?", (now(), comic_id))
+            db.execute("UPDATE komga_sources SET pending_sync=1 WHERE comic_id=?", (comic_id,))
+            self._event(db, comic_id, "komga_approve", "已在线核对远端快照并审核本机修改。")
 
     def is_removed(self, comic_id: str) -> bool:
         with self.connect() as db:
@@ -165,6 +282,8 @@ class Repository:
         """Hide catalog entries only. Source images and exported files are untouched."""
         with self.connect() as db:
             self._require_visible(db, comic_ids)
+            if any(db.execute("SELECT kind FROM comics WHERE id=?", (identity,)).fetchone()[0] == "komga" for identity in comic_ids):
+                raise ValueError("Komga 远端记录请保留在远端工作区中管理。")
             for comic_id in comic_ids:
                 db.execute("INSERT INTO removed_comics (comic_id, removed_at) VALUES (?, ?)", (comic_id, now()))
                 self._event(db, comic_id, "remove", "从漫画库移除，保留源文件、成品和人工资料")
@@ -205,15 +324,38 @@ class Repository:
                     raise ValueError(f"《{before['title']}》{error}") from error
                 if not actual:
                     continue
+                self._record_komga_edit(db, comic_id, before, metadata.to_dict(), fields)
                 db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
                     json.dumps({**stored, **actual}, ensure_ascii=False), now(), comic_id))
                 self._event(db, comic_id, "batch_edit", f"批量修改 {', '.join(actual)}。需要重新审核。")
                 count += 1
         return count
 
-    def save(self, comic_id: str, metadata: Metadata) -> None:
+    @staticmethod
+    def _record_komga_edit(db, comic_id: str, before: dict, after: dict, fields: set[str]) -> None:
+        row = db.execute("SELECT base_metadata,dirty_fields FROM komga_sources WHERE comic_id=?", (comic_id,)).fetchone()
+        if row is None:
+            return
+        if before["collection_mode"] != after["collection_mode"]:
+            raise ValueError("远端作品方式由 Komga 文件目录决定，元数据编辑不能移动系列归属。")
+        if before["cover_index"] != after["cover_index"]:
+            raise ValueError("远端封面由 Komga 管理，当前只支持元数据编辑。")
+        applicable = {field for field in fields if before.get(field) != after.get(field)}
+        if after["collection_mode"] == "oneshot" and applicable & {"series", "number", "count", "localized_series", "localized_series_label"}:
+            raise ValueError("One-Shot 的系列归属、编号和别名不能通过此编辑修改。")
+        base = json.loads(row["base_metadata"])
+        dirty = set(json.loads(row["dirty_fields"])) | fields
+        dirty = sorted(field for field in dirty if after.get(field) != base.get(field))
+        db.execute("UPDATE komga_sources SET dirty_fields=?,pending_sync=0 WHERE comic_id=?", (json.dumps(dirty), comic_id))
+
+    def save(self, comic_id: str, metadata: Metadata, *, fields: set[str] | None = None) -> None:
         # Drafts may be incomplete. Every edit invalidates previous approval/export status.
         with self.connect() as db:
+            row = db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()
+            before = Metadata.from_dict(json.loads(row["metadata"])).to_dict()
+            after = metadata.to_dict()
+            explicit = fields if fields is not None else {key for key, value in after.items() if before.get(key) != value}
+            self._record_komga_edit(db, comic_id, before, after, explicit)
             db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
                 json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
             self._event(db, comic_id, "edit", "人工修改元数据")

@@ -61,18 +61,35 @@ class KomgaClient:
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
     def request(self, method: str, path: str, body: dict | None = None):
+        raw, _ = self._request(method, path, body, max_bytes=MAX_RESPONSE_BYTES)
+        if not raw and method == "PATCH":
+            return {}
+        try:
+            return json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeError, json.JSONDecodeError):
+            raise KomgaError("Komga 返回的内容不是有效 JSON，请检查地址和部署前缀。", "KOMGA_RESPONSE") from None
+
+    def request_bytes(self, path: str, max_bytes: int) -> tuple[bytes, str]:
+        if type(max_bytes) is not int or max_bytes < 1:
+            raise ValueError("响应大小上限必须是正整数。")
+        result = self._request("GET", path, max_bytes=max_bytes,
+                               accept="image/jpeg, image/png, image/webp, image/gif")
+        check_cancel(self.cancel)
+        return result
+
+    def _request(self, method: str, path: str, body: dict | None = None, *,
+                 max_bytes: int, accept: str = "application/json") -> tuple[bytes, str]:
         check_cancel(self.cancel)
         data = None if body is None else json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
         request = Request(self.url + "/" + path.lstrip("/"), data=data, method=method,
-                          headers={"X-API-Key": self._api_key, "Accept": "application/json", "Content-Type": "application/json; charset=utf-8"})
+                          headers={"X-API-Key": self._api_key, "Accept": accept, "Content-Type": "application/json; charset=utf-8"})
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-                if len(raw) > MAX_RESPONSE_BYTES:
+                raw = response.read(max_bytes + 1)
+                if len(raw) > max_bytes:
                     raise KomgaError("Komga 响应过大，请缩小书库范围后重试。", "KOMGA_RESPONSE")
-                if not raw and method == "PATCH":
-                    return {}
-                return json.loads(raw.decode("utf-8-sig"))
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                return raw, content_type
         except HTTPError as error:
             error.close()
             if error.code == 401:
@@ -88,8 +105,6 @@ class KomgaClient:
             raise KomgaError("连接 Komga 超时，请检查地址和网络后重试。", "KOMGA_NETWORK") from None
         except (URLError, OSError, HTTPException):
             raise KomgaError("无法连接 Komga，请检查地址、网络及 HTTPS 证书。", "KOMGA_NETWORK") from None
-        except (UnicodeError, json.JSONDecodeError):
-            raise KomgaError("Komga 返回的内容不是有效 JSON，请检查地址和部署前缀。", "KOMGA_RESPONSE") from None
 
     def libraries(self) -> list[dict]:
         response = self.request("GET", "api/v1/libraries")

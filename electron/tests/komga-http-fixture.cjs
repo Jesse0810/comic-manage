@@ -6,6 +6,7 @@ async function createKomgaFixture(apiKey) {
   const books = new Map()
   const series = new Map()
   const patches = []
+  let page
   const server = http.createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json')
     if (request.headers['x-api-key'] !== apiKey) {
@@ -14,6 +15,12 @@ async function createKomgaFixture(apiKey) {
     }
     const url = new URL(request.url, 'http://localhost')
     const route = url.pathname.replace(/^\/komga\//, '/')
+    const pageMatch = route.match(/^\/api\/v1\/books\/([^/]+)\/pages\/(\d+)$/)
+    if (request.method === 'GET' && pageMatch && books.has(decodeURIComponent(pageMatch[1])) && page) {
+      response.setHeader('Content-Type', 'image/png')
+      response.end(page)
+      return
+    }
     let text = ''
     for await (const chunk of request) text += chunk
     const body = text ? JSON.parse(text) : undefined
@@ -41,6 +48,7 @@ async function createKomgaFixture(apiKey) {
   return {
     url: `http://127.0.0.1:${server.address().port}/komga`,
     books, series, patches,
+    setPage: value => { page = value },
     close: () => new Promise(resolve => server.close(resolve)),
   }
 }

@@ -376,6 +376,119 @@ async function run() {
   await waitFor("document.body.innerText.includes('已备份目录索引')", 'catalog backup')
   await dismissResult()
   assert.ok((await fs.stat(path.join(fixture, 'backup.sqlite3'))).size > 0)
+
+  // Remote-only books use the real renderer, credential vault and HTTP backend.
+  komgaFixture.setPage(page)
+  for (const [bookId, title, number] of [['cloud-a', '云端卷一', '1'], ['cloud-b', '云端卷二', '2']]) {
+    komgaFixture.books.set(bookId, {
+      id: bookId, libraryId: 'test-library', seriesId: 'cloud-series', oneshot: false,
+      name: title + '.cbz', url: '/remote/cloud/' + title + '.cbz', media: { pagesCount: 1 },
+      metadata: { title, number, numberSort: 42, summary: '云端原始简介', isbn: '9780000000000',
+        titleLock: false, tags: ['保留自定义标签'],
+        authors: [{ name: '云端作者', role: 'writer' }, { name: '保留墨线人员', role: 'inker' }],
+        notableEntities: [{ kind: 'team', name: '保留远端队伍' }],
+        links: [{ label: '作者主页', url: 'https://example.org/cloud' }] },
+    })
+  }
+  komgaFixture.series.set('cloud-series', {
+    id: 'cloud-series', libraryId: 'test-library', oneshot: false, booksCount: 2, url: '/remote/cloud',
+    metadata: { title: '云端系列', titleSort: 'Cloud manual sort', publisher: '原出版方', language: 'ja',
+      ageRating: 17, genres: ['奇幻'], readingDirection: 'WEBTOON',
+      alternateTitles: [{ label: 'custom-label', title: '保留服务器别名' }] },
+  })
+  const selectRemote = async title => {
+    await evaluate(`[...document.querySelectorAll('.table-area .el-table__row')].find(row=>row.textContent.includes(${JSON.stringify(title)})).querySelector('.comic-titles').click()`)
+    await waitFor(`document.querySelector('.selected-summary h2')?.textContent === ${JSON.stringify(title)}`, 'selected remote book ' + title)
+  }
+  const approveRemote = async () => {
+    await evaluate("document.querySelector('.review-checkbox').click()")
+    await click('审核通过')
+    await waitFor("document.querySelector('.details-panel .status-pill')?.textContent === '已审核'", 'remote review')
+  }
+  const syncRemote = async () => {
+    await click('同步到 Komga')
+    await waitFor("document.querySelector('[data-testid=komga-sync-summary]')", 'remote sync result')
+    assert.equal(await evaluate("document.querySelector('[data-testid=komga-sync-results]').textContent.includes('失败')"), false)
+    await click('完成')
+    await waitFor("!document.querySelector('.komga-sync-result-dialog')", 'remote sync result closed')
+  }
+  await toggle('komga-pull')
+  await waitFor("document.querySelector('.table-area')?.textContent.includes('云端卷一') && !document.querySelector('.table-disabled')", 'remote library without import')
+  catalog = await call('bootstrap')
+  const cloudA = catalog.comics.find(book => book.remote?.bookId === 'cloud-a')
+  const cloudB = catalog.comics.find(book => book.remote?.bookId === 'cloud-b')
+  assert.ok(cloudA && cloudB)
+  assert.equal(cloudA.kind, 'komga')
+  assert.equal(cloudA.metadata.age_rating, 'Unknown')
+  assert.equal(cloudA.metadata.genre, '')
+  assert.equal(cloudA.remote.sharedMetadata.ageRating, 17)
+  assert.equal(catalog.comics.filter(book => book.kind === 'komga').length, 3)
+  await selectRemote('云端卷一')
+  await waitFor("document.querySelector('.selected-summary img')?.src.startsWith('data:image/png;base64,')", 'authenticated remote page')
+  const beforeNoop = komgaFixture.patches.length
+  const rawCloud = structuredClone(komgaFixture.books.get('cloud-a').metadata)
+  const rawShared = structuredClone(komgaFixture.series.get('cloud-series').metadata)
+  await approveRemote()
+  await syncRemote()
+  assert.equal(komgaFixture.patches.length, beforeNoop, 'Unchanged remote review sends no PATCH or lock changes')
+  assert.deepEqual(komgaFixture.books.get('cloud-a').metadata, rawCloud)
+  assert.deepEqual(komgaFixture.series.get('cloud-series').metadata, rawShared)
+  await setField('title', '云端卷一·校订')
+  await click('保存草稿')
+  await waitFor("document.querySelector('[data-testid=komga-local-changes]')", 'saved remote draft')
+  komgaFixture.books.get('cloud-a').metadata.summary = '服务器上的新简介'
+  await toggle('komga-pull')
+  await waitFor("!document.querySelector('.table-disabled')", 'refreshed remote library')
+  await selectRemote('云端卷一·校订')
+  await waitFor("document.querySelector('[data-testid=komga-conflict-actions]')", 'remote conflict keeps draft')
+  await toggle('komga-keep-local')
+  await waitFor("!document.querySelector('[data-testid=komga-conflict-actions]') && document.querySelector('[data-testid=komga-local-changes]')", 'remote conflict rebased')
+  catalog = await call('bootstrap')
+  assert.equal(catalog.comics.find(book => book.id === cloudA.id).metadata.summary, '服务器上的新简介')
+  assert.equal(catalog.comics.find(book => book.id === cloudA.id).metadata.title, '云端卷一·校订')
+  await approveRemote()
+  const beforeTitle = komgaFixture.patches.length
+  await syncRemote()
+  assert.deepEqual(komgaFixture.patches.slice(beforeTitle).map(item => [item.kind, item.id, Object.keys(item.body).sort()]), [['books', 'cloud-a', ['title', 'titleLock']]])
+  assert.equal(komgaFixture.books.get('cloud-a').metadata.summary, '服务器上的新简介')
+  assert.equal(komgaFixture.books.get('cloud-a').metadata.numberSort, 42)
+  await capture('ComicManage-Komga-library.png')
+  for (const title of ['云端卷一·校订', '云端卷二']) {
+    await evaluate(`[...document.querySelectorAll('.table-area .el-table__row')].find(row=>row.textContent.includes(${JSON.stringify(title)})).querySelector('.el-checkbox').click()`)
+  }
+  await waitFor("document.querySelector('.selected-count')?.textContent.includes('2')", 'two remote books selected')
+  await click('批量编辑')
+  assert.equal(await evaluate("document.querySelector('[data-testid=batch-enable-collection-mode] input').disabled"), true)
+  await evaluate("[...document.querySelectorAll('.batch-edit-dialog button')].find(item=>item.textContent.trim()==='展开全部').click()")
+  await waitFor("document.querySelector('[data-testid=batch-enable-publisher]')", 'expanded remote batch fields')
+  await toggle('batch-enable-publisher')
+  await setField('batch-publisher', '云端批量出版方')
+  await toggle('batch-enable-publication-format')
+  await chooseOption('batch-publication-format', '分卷')
+  await click('保存 2 本作品')
+  await waitFor("!document.querySelector('.batch-edit-dialog') && !document.querySelector('.table-disabled')", 'remote batch saved')
+  catalog = await call('bootstrap')
+  for (const identity of [cloudA.id, cloudB.id]) {
+    const edited = catalog.comics.find(book => book.id === identity)
+    assert.equal(edited.status, 'draft')
+    assert.equal(edited.metadata.publisher, '云端批量出版方')
+    assert.equal(edited.metadata.publication_format, '分卷')
+    assert.equal(edited.metadata.age_rating, 'Unknown')
+    assert.equal(edited.metadata.genre, '')
+  }
+  for (const title of ['云端卷一·校订', '云端卷二']) { await selectRemote(title); await approveRemote() }
+  const beforeBatchSync = komgaFixture.patches.length
+  await syncRemote()
+  const batchPatches = komgaFixture.patches.slice(beforeBatchSync)
+  assert.equal(batchPatches.filter(item => item.kind === 'books').length, 2)
+  assert.equal(batchPatches.filter(item => item.kind === 'series').length, 1)
+  assert.equal(komgaFixture.series.get('cloud-series').metadata.publisher, '云端批量出版方')
+  assert.equal(komgaFixture.series.get('cloud-series').metadata.ageRating, 17)
+  assert.equal(komgaFixture.series.get('cloud-series').metadata.readingDirection, 'WEBTOON')
+  assert.deepEqual(komgaFixture.series.get('cloud-series').metadata.genres, ['奇幻'])
+  assert.equal(komgaFixture.books.get('cloud-a').metadata.links[0].label, '作者主页')
+  assert.ok(komgaFixture.books.get('cloud-b').metadata.notableEntities.some(entity => entity.kind === 'team' && entity.name === '保留远端队伍'))
+  await capture('ComicManage-Komga-library-batch.png')
   window.setSize(1180, 800)
   await delay(200)
   assert.equal(await evaluate("document.querySelector('.review-footer').getBoundingClientRect().bottom <= window.innerHeight"), true)
@@ -384,7 +497,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

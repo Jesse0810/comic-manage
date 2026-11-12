@@ -1,6 +1,6 @@
 'use strict'
 const { contextBridge, ipcRenderer } = require('electron')
-const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_sync']
+const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_sync', 'komga_pull', 'komga_resolve']
 
 contextBridge.exposeInMainWorld('comic', {
   invoke: (method, params = {}) => methods.includes(method)
@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('comic', {
   komgaConfig: () => ipcRenderer.invoke('comic:komga-config'),
   saveKomgaConfig: input => ipcRenderer.invoke('comic:save-komga-config', input),
   testKomgaConfig: input => ipcRenderer.invoke('comic:test-komga-config', input),
+  openKomgaBook: id => ipcRenderer.invoke('comic:open-komga-book', id),
   openLocation: (kind, id) => ipcRenderer.invoke('comic:open-location', kind, id),
   getVersion: () => ipcRenderer.invoke('comic:version'),
   setWindowState: state => ipcRenderer.send('comic:window-state', { dirty: state?.dirty === true, busy: state?.busy === true }),

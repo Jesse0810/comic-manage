@@ -6,7 +6,7 @@ import type { CollectionMode, Metadata } from '../types'
 import { ageRatings, aliasLanguages, classificationValues, collectionModes, comicGenres, errorMessage, publicationFormats } from '../types'
 import { invoke } from '../api'
 
-const props = defineProps<{ modelValue: boolean; ids: string[]; authors: string[]; modes?: CollectionMode[] }>()
+const props = defineProps<{ modelValue: boolean; ids: string[]; authors: string[]; modes?: CollectionMode[]; hasRemote?: boolean }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'state', value: { busy: boolean; title: string }): void
@@ -14,7 +14,7 @@ const emit = defineEmits<{
 }>()
 
 type BatchKey = 'authors' | 'genre' | 'collection_mode' | 'series' | 'localized_series' | 'localized_series_label' | 'number' | 'count'
-  | 'pencillers' | 'translator' | 'original_works' | 'characters' | 'release_type' | 'publication_format'
+  | 'pencillers' | 'translator' | 'publisher' | 'original_works' | 'characters' | 'release_type' | 'publication_format'
   | 'age_rating' | 'year' | 'month' | 'day' | 'language' | 'black_and_white' | 'manga' | 'web' | 'uncensored'
 type BatchValues = Pick<Metadata, BatchKey>
 type MultiKey = 'authors' | 'pencillers' | 'original_works' | 'characters'
@@ -43,6 +43,7 @@ const groups: { id: string; label: string; fields: Field[] }[] = [
     { key: 'localized_series', label: '系列别名', kind: 'text', clearable: true, placeholder: '仅填写系列的另一种名称', hint: '仅多卷系列使用；保存在本机，需通过 API 写入 alternateTitles，不写入 XML。' },
     { key: 'localized_series_label', label: '别名标签', kind: 'select', options: aliasLanguages, allowCreate: true, clearable: true, placeholder: 'zh-Hans、zh-Hant 或原名', hint: '别名非空时须有标签；与当前卷册语言独立。' },
     { key: 'pencillers', label: '绘画者', kind: 'multi', clearable: true, placeholder: '输入姓名后按 Enter', hint: '仅填写与作者不同的绘画者；留空可清空。' },
+    { key: 'publisher', label: '出版方 / 发行方', kind: 'text', clearable: true, placeholder: '保留出版方原始名称', hint: 'Komga 中为系列共享字段；远端同步需选全系列。' },
     { key: 'translator', label: '译者 / 汉化组', kind: 'text', clearable: true, placeholder: '去除外层中括号，直接填写名称', hint: '原创可留空；“未知汉化”等占位仍需核对后才能审核。', wide: true },
   ] },
   { id: 'classification', label: '原作与角色', fields: [
@@ -67,7 +68,7 @@ const groups: { id: string; label: string; fields: Field[] }[] = [
 const fields = groups.flatMap(group => group.fields)
 function initialValues(): BatchValues {
   return {
-    authors: [], genre: '', collection_mode: 'oneshot', series: '', localized_series: '', localized_series_label: 'zh-Hans', number: '', count: '', pencillers: [], translator: '',
+    authors: [], genre: '', collection_mode: 'oneshot', series: '', localized_series: '', localized_series_label: 'zh-Hans', number: '', count: '', pencillers: [], translator: '', publisher: '',
     original_works: [], characters: [], release_type: '', publication_format: '', age_rating: 'Unknown',
     year: '', month: '', day: '', language: '', black_and_white: 'Unknown', manga: 'Unknown', web: [], uncensored: false,
   }
@@ -88,7 +89,7 @@ const correctionConflict = computed(() => enabled.uncensored && values.uncensore
 const seriesKeys: BatchKey[] = ['series', 'number', 'count', 'localized_series', 'localized_series_label']
 const changingToOneShot = computed(() => enabled.collection_mode && values.collection_mode === 'oneshot')
 const seriesFieldsDisabled = computed(() => enabled.collection_mode ? values.collection_mode === 'oneshot' : !!props.modes?.includes('oneshot'))
-function disabledField(key: BatchKey) { return busy.value || (seriesFieldsDisabled.value && seriesKeys.includes(key)) }
+function disabledField(key: BatchKey) { return busy.value || (!!props.hasRemote && key === 'collection_mode') || (seriesFieldsDisabled.value && seriesKeys.includes(key)) }
 watch(seriesFieldsDisabled, value => { if (value) seriesKeys.forEach(key => { enabled[key] = false }) }, { flush: 'sync' })
 function testId(key: BatchKey) { return key.replaceAll('_', '-') }
 function isClearing(field: Field) {
@@ -154,6 +155,7 @@ async function save() {
       <el-button data-testid="batch-expand-all" link :disabled="busy" @click="toggleAll">{{ allExpanded ? '收起分组' : '展开全部' }}</el-button>
     </div>
     <div class="bulk-scroll" data-testid="batch-fields-scroll">
+      <p v-if="hasRemote" class="bulk-field-hint">包含 Komga 作品：组织方式由远端目录决定，不能在此修改。批量编辑只保存本机草稿，审核后再同步到 Komga。</p>
       <p v-if="changingToOneShot" class="bulk-field-hint">已选择 One-Shot：系列、编号、总数和别名的批量选项已停用；原有本地资料保留，导出时省略。</p>
       <p v-else-if="seriesFieldsDisabled" class="bulk-field-hint">选中的作品包含 One-Shot。如需统一填写系列、编号或别名，请先勾选“修改作品组织方式”并选择“多卷系列”。</p>
       <el-collapse v-model="expanded" class="bulk-groups">

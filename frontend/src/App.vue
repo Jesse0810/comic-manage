@@ -8,11 +8,12 @@ import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult } from './types'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult } from './types'
 import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
+type SourceFilter = 'all' | 'local' | 'komga'
 const comics = ref<Comic[]>([])
 const roots = ref<string[]>([])
 const outputRoot = ref('')
@@ -25,6 +26,9 @@ const reviewed = ref(false)
 const selectedIds = ref<string[]>([])
 const libraryTable = ref<TableInstance>()
 const section = ref<Section>('all')
+const sourceFilter = ref<SourceFilter>('all')
+const komgaScope = ref('')
+const komgaLibraryName = ref('')
 const search = ref('')
 const author = ref('')
 const loading = ref(true)
@@ -46,6 +50,7 @@ const komgaSettingsVisible = ref(false)
 const komgaResultVisible = ref(false)
 const komgaResult = ref<KomgaSyncResult | null>(null)
 const pendingSyncIds = ref<string[]>([])
+const pendingPull = ref(false)
 const importVisible = ref(false)
 const importMode = ref<'folder' | 'cbz'>('folder')
 const batchVisible = ref(false)
@@ -54,18 +59,19 @@ let unsubscribe: (() => void) | undefined
 
 const current = computed(() => comics.value.find(c => c.id === selectedId.value) || null)
 const dirty = computed(() => !!form.value && JSON.stringify(form.value) !== savedMetadata.value)
+const sourceComics = computed(() => comics.value.filter(comic => sourceFilter.value === 'all' || (sourceFilter.value === 'local' ? comic.kind !== 'komga' : comic.kind === 'komga' && comic.remote?.scope === komgaScope.value)))
 const counts = computed(() => ({
-  all: comics.value.length,
-  draft: comics.value.filter(c => c.status === 'draft').length,
-  approved: comics.value.filter(c => c.status === 'approved').length,
-  packaged: comics.value.filter(c => c.status === 'packaged').length,
+  all: sourceComics.value.length,
+  draft: sourceComics.value.filter(c => c.status === 'draft').length,
+  approved: sourceComics.value.filter(c => c.status === 'approved').length,
+  packaged: sourceComics.value.filter(c => c.status === 'packaged').length,
 }))
-const authors = computed(() => [...new Set(comics.value.flatMap(c => c.metadata.authors))].sort((a, b) => a.localeCompare(b, 'zh-CN')))
+const authors = computed(() => [...new Set(sourceComics.value.flatMap(c => c.metadata.authors))].sort((a, b) => a.localeCompare(b, 'zh-CN')))
 const filtered = computed(() => {
   const term = search.value.trim().normalize('NFKC').toLocaleLowerCase()
-  return comics.value.filter(c => {
+  return sourceComics.value.filter(c => {
     const m = c.metadata
-    const searchable = [m.title, m.series, m.localized_series, m.localized_series_label, m.collection_mode, m.original_title, m.chinese_title, ...m.authors, ...m.pencillers, m.publisher, m.translator, m.genre, ...m.tags, ...customTags(m), m.summary, ...m.web, m.number, m.volume, m.year].join(' ').normalize('NFKC').toLocaleLowerCase()
+    const searchable = [m.title, m.series, m.localized_series, m.localized_series_label, m.collection_mode, m.original_title, m.chinese_title, ...m.authors, ...m.pencillers, m.publisher, m.translator, m.genre, ...m.tags, ...customTags(m), m.summary, ...m.web, m.number, m.volume, m.year, c.remote?.libraryName].join(' ').normalize('NFKC').toLocaleLowerCase()
     return (section.value === 'all' || c.status === section.value)
       && (!author.value || m.authors.includes(author.value)) && (!term || searchable.includes(term))
   })
@@ -73,6 +79,20 @@ const filtered = computed(() => {
 const sectionTitle = computed(() => ({ all: '我的漫画库', draft: '待审核作品', approved: '已审核作品', packaged: '已生成作品' })[section.value])
 const exportIds = computed(() => selectedIds.value.length ? selectedIds.value : (selectedId.value ? [selectedId.value] : []))
 const disabled = computed(() => busy.value || loading.value || !available.value)
+const selectedComics = computed(() => comics.value.filter(comic => exportIds.value.includes(comic.id)))
+const selectionHasRemote = computed(() => selectedComics.value.some(comic => comic.kind === 'komga'))
+const selectionHasInactive = computed(() => selectedComics.value.some(comic => !canEditComic(comic)))
+const currentReadOnly = computed(() => !!current.value && !canEditComic(current.value))
+function canEditComic(comic: Comic) { return comic.kind !== 'komga' || (!!komgaScope.value && comic.remote?.scope === komgaScope.value && comic.remote?.unavailable !== true) }
+async function changeSource(value: SourceFilter) {
+  if (disabled.value || value === sourceFilter.value || !await resolveEdits()) return
+  sourceFilter.value = value
+  selectedIds.value = []
+  libraryTable.value?.clearSelection()
+  selectData(null)
+  author.value = ''
+}
+
 const navigation = [
   { key: 'all' as Section, title: '全部漫画', icon: Collection },
   { key: 'draft' as Section, title: '待审核', icon: Clock },
@@ -95,11 +115,13 @@ function replaceComic(comic: Comic) {
 
 async function refresh(preferId = selectedId.value) {
   const data = await invoke<Bootstrap>('bootstrap')
+  komgaScope.value = data.komgaScope || ''
+  komgaLibraryName.value = data.komgaLibraryName || ''
   comics.value = data.comics
   roots.value = data.roots
   outputRoot.value = data.outputRoot
   dataDir.value = data.dataDir
-  selectedIds.value = selectedIds.value.filter(id => comics.value.some(c => c.id === id))
+  selectedIds.value = selectedIds.value.filter(id => comics.value.some(c => c.id === id && canEditComic(c)))
   selectData(comics.value.find(c => c.id === preferId) || null)
 }
 
@@ -115,7 +137,7 @@ function showError(message: string) {
 }
 
 async function saveCurrent(): Promise<boolean> {
-  if (!current.value || !form.value || !available.value) return false
+  if (!current.value || !form.value || !available.value || !canEditComic(current.value)) return false
   busy.value = true
   taskTitle.value = '保存资料'
   taskMessage.value = '正在保存到本机资料库…'
@@ -197,6 +219,7 @@ async function imported(result: ImportResult) {
 async function openBatchEditor() {
   if (disabled.value || !await resolveEdits()) return
   if (!exportIds.value.length) { ElMessage.info('请勾选或选择要编辑的作品'); return }
+  if (selectionHasInactive.value) { ElMessage.warning('请切回作品所属的 Komga 连接后再批量编辑'); return }
   batchIds.value = [...exportIds.value]
   batchVisible.value = true
 }
@@ -213,7 +236,7 @@ async function batchSaved(count: number) {
 }
 
 async function removeComics() {
-  if (disabled.value || !await resolveEdits()) return
+  if (disabled.value || selectionHasRemote.value || !await resolveEdits()) return
   const ids = [...exportIds.value]
   if (!ids.length) return
   try {
@@ -248,26 +271,29 @@ async function chooseOutput() {
 }
 
 async function approveCurrent() {
-  if (!current.value || !form.value || disabled.value) return
+  if (!current.value || !form.value || disabled.value || !canEditComic(current.value)) return
   if (!reviewed.value) { ElMessage.warning('请先核对作品，并勾选审核确认'); return }
-  const m = form.value
-  if (!m.title.trim()) { ElMessage.warning('请填写作品名称'); return }
-  if (!['Everyone', 'MA15+', 'R18+'].includes(m.age_rating)) { ElMessage.warning('请在“内容与分类”中确认年龄分级：全年龄、MA15+ 或 R18'); return }
-  const translators = m.translator.split(/[,，;；\n]/).map(value => value.trim()).filter(Boolean)
-  if (translators.some(value => ['未知汉化', '未知漢化', '中国翻訳', '中国翻译', '中國翻譯', '未知翻译'].includes(value))) { ElMessage.warning('请在“创作与出版”中补充已知翻译版本的实际译者或汉化组'); return }
-  if (collectionMode(m) === 'series') {
-    if (!m.series.trim()) { ElMessage.warning('多卷系列请填写系列名称；独立作品请选择 One-Shot 模式'); return }
-    if (!m.number.trim()) { ElMessage.warning('请填写册编号 Number，完整一卷也使用 Number 排序'); return }
-    if (m.localized_series.trim() && !m.localized_series_label.trim()) { ElMessage.warning('系列别名需要填写标签，例如 zh-Hans 或原名'); return }
+  const remote = current.value.kind === 'komga'
+  if (!remote) {
+    const m = form.value
+    if (!m.title.trim()) { ElMessage.warning('请填写作品名称'); return }
+    if (!['Everyone', 'MA15+', 'R18+'].includes(m.age_rating)) { ElMessage.warning('请在“内容与分类”中确认年龄分级：全年龄、MA15+ 或 R18'); return }
+    const translators = m.translator.split(/[,，;；\n]/).map(value => value.trim()).filter(Boolean)
+    if (translators.some(value => ['未知汉化', '未知漢化', '中国翻訳', '中国翻译', '中國翻譯', '未知翻译'].includes(value))) { ElMessage.warning('请在“创作与出版”中补充已知翻译版本的实际译者或汉化组'); return }
+    if (collectionMode(m) === 'series') {
+      if (!m.series.trim()) { ElMessage.warning('多卷系列请填写系列名称；独立作品请选择 One-Shot 模式'); return }
+      if (!m.number.trim()) { ElMessage.warning('请填写册编号 Number，完整一卷也使用 Number 排序'); return }
+      if (m.localized_series.trim() && !m.localized_series_label.trim()) { ElMessage.warning('系列别名需要填写标签，例如 zh-Hans 或原名'); return }
+    }
+    if (!m.authors.some(a => a.trim())) { ElMessage.warning('请填写至少一位作者'); return }
   }
-  if (!m.authors.some(a => a.trim())) { ElMessage.warning('请填写至少一位作者'); return }
   await runTask('审核作品', () => invoke('approve', { id: current.value!.id, metadata: clone(form.value) }), () => {
-    ElMessage.success('审核通过，可以生成 CBZ')
+    ElMessage.success(remote ? '审核通过，可以同步到 Komga' : '审核通过，可以生成 CBZ')
   })
 }
 
 async function prepareExport() {
-  if (disabled.value || !await resolveEdits()) return
+  if (disabled.value || selectionHasRemote.value || !await resolveEdits()) return
   const ids = [...exportIds.value]
   if (!ids.length) { ElMessage.info('请选择一本或多本已审核作品'); return }
   if (!outputRoot.value && !await chooseOutput()) return
@@ -310,14 +336,16 @@ async function backup() {
   } catch (error) { showError(errorMessage(error)) }
 }
 
-function openKomgaSettings() {
-  if (disabled.value) return
+async function openKomgaSettings() {
+  if (disabled.value || !await resolveEdits()) return
   pendingSyncIds.value = []
+  pendingPull.value = true
   komgaSettingsVisible.value = true
 }
 
 async function executeKomgaSync(ids: string[]) {
   if (disabled.value || !ids.length) return
+  if (ids.some(id => { const comic = comics.value.find(item => item.id === id); return comic && !canEditComic(comic) })) { ElMessage.warning('所选作品不属于当前可用的 Komga 书库，请切回对应连接'); return }
   busy.value = true
   cancelling.value = false
   komgaResultVisible.value = false
@@ -332,7 +360,7 @@ async function executeKomgaSync(ids: string[]) {
 }
 
 async function syncKomga() {
-  if (disabled.value || !await resolveEdits()) return
+  if (disabled.value || selectionHasInactive.value || !await resolveEdits()) return
   const ids = [...exportIds.value]
   if (!ids.length) return
   let config: KomgaConfig | undefined
@@ -345,21 +373,85 @@ async function syncKomga() {
   if (!config) return
   if (!config.url || !config.libraryId || !config.hasApiKey) {
     pendingSyncIds.value = ids
+    pendingPull.value = false
     komgaSettingsVisible.value = true
     return
   }
   await executeKomgaSync(ids)
 }
 
-function komgaConfigured(config: KomgaConfig) {
+async function executeKomgaPull() {
+  if (disabled.value) return
+  busy.value = true
+  cancelling.value = false
+  taskTitle.value = '读取 Komga 书库'
+  taskMessage.value = '正在读取书库作品与远端元数据…'
+  try {
+    const result = await invoke<KomgaPullResult>('komga_pull', {})
+    await refresh()
+    sourceFilter.value = 'komga'
+    section.value = 'all'
+    author.value = ''; search.value = ''; selectedIds.value = []
+    libraryTable.value?.clearSelection()
+    selectData(comics.value.find(comic => result.ids.includes(comic.id) && canEditComic(comic)) || sourceComics.value[0] || null)
+    const summary = `读取 ${result.total} 本：新增 ${result.added} 本，更新 ${result.updated} 本，保留现有资料 ${result.kept} 本。`
+    if (result.errors.length) showResult(result.cancelled ? '书库读取已取消' : '书库读取完成', summary, result.errors)
+    else if (result.cancelled) ElMessage.info(`读取已取消。${summary}`)
+    else ElMessage.success(summary)
+  } catch (reason) { showError(errorMessage(reason)) }
+  finally { busy.value = false; cancelling.value = false; taskMessage.value = '' }
+}
+
+async function pullKomga() {
+  if (disabled.value || !await resolveEdits()) return
+  let config: KomgaConfig | undefined
+  busy.value = true
+  taskTitle.value = '准备读取 Komga 书库'
+  taskMessage.value = '正在读取连接配置…'
+  try { config = await window.comic.komgaConfig() }
+  catch (reason) { showError(errorMessage(reason)) }
+  finally { busy.value = false; taskMessage.value = '' }
+  if (!config) return
+  if (!config.url || !config.libraryId || !config.hasApiKey) {
+    pendingSyncIds.value = []
+    pendingPull.value = true
+    komgaSettingsVisible.value = true
+    return
+  }
+  await executeKomgaPull()
+}
+
+async function komgaConfigured(config: KomgaConfig) {
   const ids = [...pendingSyncIds.value]
-  pendingSyncIds.value = []
-  if (ids.length && config.url && config.libraryId && config.hasApiKey) void executeKomgaSync(ids)
-  else ElMessage.success(config.hasApiKey ? 'Komga 配置已保存' : 'API Key 已清除')
+  const shouldPull = pendingPull.value
+  pendingSyncIds.value = []; pendingPull.value = false
+  loading.value = true
+  try { await refresh() }
+  catch (reason) { showError(errorMessage(reason)); return }
+  finally { loading.value = false }
+  if (config.url && config.libraryId && config.hasApiKey) {
+    if (ids.length) await executeKomgaSync(ids)
+    else if (shouldPull) await executeKomgaPull()
+    else ElMessage.success('Komga 配置已保存')
+  } else ElMessage.success('API Key 已清除')
+}
+
+async function resolveRemoteConflict(resolution: 'keep_local' | 'use_remote') {
+  if (disabled.value || !current.value?.remote?.conflict || !canEditComic(current.value)) return
+  const id = current.value.id
+  if (resolution === 'keep_local') {
+    if (!await resolveEdits()) return
+  } else {
+    try { await ElMessageBox.confirm('采用远端资料会放弃这本作品尚未同步的本机修改，包括当前未保存的输入。确认后将重新以远端资料建立草稿。', '采用远端资料', { confirmButtonText: '采用远端资料', cancelButtonText: '保留本机修改', type: 'warning', closeOnClickModal: false }) }
+    catch { return }
+  }
+  await runTask('处理远端资料冲突', () => invoke('komga_resolve', { id, resolution }), () => {
+    ElMessage.success(resolution === 'keep_local' ? '已保留本机修改并更新远端基准，请重新核对审核' : '已采用远端资料，请重新核对审核')
+  })
 }
 
 async function exportKomga() {
-  if (disabled.value || !await resolveEdits()) return
+  if (disabled.value || selectionHasRemote.value || !await resolveEdits()) return
   const ids = [...exportIds.value]
   if (!ids.length) return
   try {
@@ -423,38 +515,50 @@ onBeforeUnmount(() => unsubscribe?.())
 
       <div class="work-area">
         <section class="library-panel">
+          <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span><el-button data-testid="komga-pull" :icon="Connection" :disabled="disabled" @click="pullKomga">读取 Komga 书库</el-button></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
-          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
+          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
             <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
-              <el-table-column type="selection" width="43" :reserve-selection="true" :selectable="() => !disabled" />
-              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span></div></div></template></el-table-column>
+              <el-table-column type="selection" width="43" :reserve-selection="true" :selectable="(comic: Comic) => !disabled && canEditComic(comic)" />
+              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'komga' ? Connection : scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else-if="scope.row.kind !== 'komga'" class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span><span v-if="scope.row.kind === 'komga'" class="comic-source remote-source-label" :title="scope.row.remote?.serverUrl">Komga · {{ scope.row.remote?.libraryName || '远端书库' }}{{ !canEditComic(scope.row) ? ' · 只读缓存' : scope.row.remote?.conflict ? ' · 存在冲突' : (scope.row.remote?.hasLocalChanges || scope.row.remote?.pendingSync) ? ' · 待同步' : '' }}</span></div></div></template></el-table-column>
               <el-table-column label="作者" min-width="105" show-overflow-tooltip><template #default="scope"><span :class="{ 'muted-text': !scope.row.metadata.authors.length }">{{ scope.row.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
               <el-table-column label="页数" width="60" align="center"><template #default="scope"><span class="page-count">{{ scope.row.page_count }}</span></template></el-table-column>
               <el-table-column label="状态" width="92"><template #default="scope"><span class="status-pill" :class="scope.row.status">{{ statusLabels[scope.row.status as ComicStatus] }}</span></template></el-table-column>
             </el-table>
-            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'">清除筛选</el-button></template><template v-else><span class="empty-eyebrow">让你的漫画库井然有序</span><h2>从第一本漫画开始</h2><p>勾选多个本地或 NAS 文件夹，也可以导入已有 CBZ。<br />先预览解析资料，再确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button><button class="empty-import-link" :disabled="disabled" @click="importCbz">或导入已有 CBZ<el-icon><ArrowRight /></el-icon></button></template></div>
+            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><el-button type="primary" :disabled="disabled" @click="pullKomga">读取 Komga 书库</el-button></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><span class="empty-eyebrow">让你的漫画库井然有序</span><h2>从第一本漫画开始</h2><p>勾选多个本地或 NAS 文件夹，也可以导入已有 CBZ。<br />先预览解析资料，再确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button><button class="empty-import-link" :disabled="disabled" @click="importCbz">或导入已有 CBZ<el-icon><ArrowRight /></el-icon></button></template></div>
           </div>
 
-          <footer class="library-footer"><div class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
+          <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
         </section>
 
-        <DetailsPanel :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @error="showError" />
+        <DetailsPanel :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @resolve="resolveRemoteConflict" @error="showError" />
       </div>
 
       <div v-if="busy && !importVisible && !batchVisible && !komgaSettingsVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>
       <footer class="workspace-footnote"><span class="connection-dot" :class="{ offline: !available }"></span><span>{{ available ? '本机资料库已连接' : '本机服务不可用' }}</span><span class="footnote-divider">/</span><span>原图保留 · 人工审核 · 无损打包</span><span v-if="dirty" class="unsaved-note">当前作品有未保存修改</span></footer>
     </main>
 
-    <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-sync="pendingSyncIds.length > 0" @state="dialogTask" @saved="komgaConfigured" />
+    <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-sync="pendingSyncIds.length > 0" :continue-pull="pendingPull" @state="dialogTask" @saved="komgaConfigured" />
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <ImportDialog v-model="importVisible" :mode="importMode" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
-    <BatchEditDialog v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" @state="dialogTask" @completed="batchSaved" />
+    <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" @state="dialogTask" @completed="batchSaved" />
 
     <el-dialog v-model="planVisible" title="确认生成计划" width="min(940px, 90vw)" :close-on-click-modal="false" destroy-on-close class="plan-dialog"><template v-if="plan"><div class="dialog-intro"><div class="dialog-icon"><el-icon :size="24"><Box /></el-icon></div><div><h3>即将生成 {{ plan.items.length }} 本漫画</h3><p>先检查成品路径，确认后将逐本打包并校验。</p></div></div><el-alert title="只新增文件，不覆盖已有成品；所有源文件保留。" type="info" :closable="false" show-icon /><el-alert v-for="warning in planWarnings" :key="warning" :title="warning" type="warning" :closable="false" show-icon /><el-table :data="plan.items" max-height="330" class="plan-table"><el-table-column label="作品" prop="title" min-width="160" /><el-table-column label="成品路径" min-width="320"><template #default="scope"><span class="plan-path" :title="scope.row.source">{{ scope.row.destination }}</span><div class="plan-source">源：{{ scope.row.source }}</div></template></el-table-column><el-table-column label="页数" prop="pageCount" width="60" align="center" /><el-table-column label="附件" prop="attachmentCount" width="60" align="center" /></el-table><p class="plan-note">图片不转码，完成后检查 CRC、SHA-256、页数和 ComicInfo.xml。原始内容约 {{ sizeText(plan.totalBytes) }}，请保留足够空间。</p></template><template #footer><el-button @click="planVisible = false">返回检查</el-button><el-button type="primary" :icon="Check" @click="confirmExport">确认生成并校验</el-button></template></el-dialog>
 
     <el-dialog v-model="resultVisible" :title="resultTitle" width="min(700px, 90vw)" destroy-on-close><p class="result-summary">{{ resultSummary }}</p><el-input v-if="resultDetail" :model-value="resultDetail" readonly type="textarea" :rows="10" resize="none" class="result-details" /><template #footer><el-button type="primary" @click="resultVisible = false">知道了</el-button></template></el-dialog>
-    <el-dialog v-model="settingsVisible" title="工作区信息" width="min(640px, 90vw)"><div class="workspace-info"><label>本机资料库</label><p>{{ dataDir || '尚未连接' }}</p><label>已添加的目录</label><p v-for="root in roots" :key="root">{{ root }}</p><p v-if="!roots.length" class="muted-text">还没有添加目录</p><label>成品目录</label><p>{{ outputRoot || '尚未设置' }}</p></div><p class="muted-text">高级用法：勾选作品后可导出 Komga 同步清单，用于独立脚本处理。</p><template #footer><el-button data-testid="komga-export-manifest" :disabled="disabled || !exportIds.length" @click="settingsVisible = false; exportKomga()">导出 Komga 同步清单</el-button><el-button type="primary" @click="settingsVisible = false">关闭</el-button></template></el-dialog>
+    <el-dialog v-model="settingsVisible" title="工作区信息" width="min(640px, 90vw)"><div class="workspace-info"><label>本机资料库</label><p>{{ dataDir || '尚未连接' }}</p><label>已添加的目录</label><p v-for="root in roots" :key="root">{{ root }}</p><p v-if="!roots.length" class="muted-text">还没有添加目录</p><label>成品目录</label><p>{{ outputRoot || '尚未设置' }}</p></div><p class="muted-text">高级用法：勾选作品后可导出 Komga 同步清单，用于独立脚本处理。</p><template #footer><el-button data-testid="komga-export-manifest" :disabled="disabled || !exportIds.length || selectionHasRemote" @click="settingsVisible = false; exportKomga()">导出 Komga 同步清单</el-button><el-button type="primary" @click="settingsVisible = false">关闭</el-button></template></el-dialog>
   </div>
 </template>
+
+<style scoped>
+.library-source-bar { display: flex; align-items: center; gap: 10px; padding: 13px 19px 0; }
+.library-source-bar > .el-select { width: 165px; flex-shrink: 0; }
+.library-source-bar > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b9b83; font-size: 11px; }
+.library-source-bar > .el-button { font-size: 12px; }
+.remote-source-label { color: #5f8c86 !important; }
+.remote-output-info .output-copy > span:last-child { color: #6c8676; font-size: 11px; }
+.comic-file-icon.komga { color: #5b8d87; background: #edf6f3; }
+@media (max-width: 1300px) { .library-source-bar { gap: 8px; padding: 12px 14px 0; }.library-source-bar > span { display: none; }.library-source-bar > .el-select { flex: 1; }.library-source-bar > .el-button { flex-shrink: 0; } }
+</style>

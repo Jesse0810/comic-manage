@@ -6,10 +6,10 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync'])
-const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull'])
 const BATCH_TEXT_FIELDS = new Set([
-  'genre', 'series', 'localized_series', 'number', 'count', 'translator',
+  'genre', 'series', 'localized_series', 'number', 'count', 'translator', 'publisher',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
   'age_rating', 'black_and_white', 'manga', 'collection_mode', 'localized_series_label',
 ])
@@ -60,17 +60,23 @@ function validateCall(method, params) {
     if (!required && params[key] === undefined) return
     if (!Array.isArray(params[key]) || params[key].length > 10000 || params[key].some(v => typeof v !== 'string' || !v || v.length > 32767)) throw new Error(`参数 ${key} 无效。`)
   }
-  if (['save', 'approve', 'page'].includes(method)) string('id')
+  if (['save', 'approve', 'page', 'komga_resolve', 'source_context'].includes(method)) string('id')
   if (['save', 'approve', 'xml'].includes(method) && (!params.metadata || typeof params.metadata !== 'object' || Array.isArray(params.metadata))) throw new Error('元数据无效。')
   if (method === 'page' && (!Number.isSafeInteger(params.index) || params.index < 0)) throw new Error('页码无效。')
-  if (method === 'xml' && (!Number.isSafeInteger(params.pageCount) || params.pageCount < 1)) throw new Error('页数无效。')
+  if (method === 'xml' && (!Number.isSafeInteger(params.pageCount) || params.pageCount < 0
+      || (params.pageCount === 0 && (typeof params.id !== 'string' || !params.id)))) throw new Error('页数无效。')
   if (method === 'scan') strings('roots', false)
   if (['import', 'prepare_import'].includes(method)) strings('paths')
   if (method === 'browse_folders') string('path')
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
   if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync'].includes(method)) strings('ids')
-  if (['komga_test', 'komga_sync'].includes(method)) {
-    const allowed = method === 'komga_test' ? ['url', 'apiKey'] : ['ids', 'url', 'apiKey', 'libraryId']
+  if (method === 'source_context' && Object.keys(params).some(key => key !== 'id')) throw new Error('作品来源参数无效。')
+  if (method === 'komga_resolve' && !['keep_local', 'use_remote'].includes(params.resolution)) throw new Error('冲突处理方式无效。')
+  if (['komga_test', 'komga_sync', 'komga_pull', 'komga_resolve'].includes(method)) {
+    const allowed = method === 'komga_test' ? ['url', 'apiKey']
+      : method === 'komga_sync' ? ['ids', 'url', 'apiKey', 'libraryId']
+      : method === 'komga_resolve' ? ['id', 'resolution', 'url', 'apiKey', 'libraryId']
+      : ['url', 'apiKey', 'libraryId']
     if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('Komga 请求参数无效。')
     for (const key of ['url', 'apiKey', 'libraryId']) {
       if (params[key] !== undefined && (typeof params[key] !== 'string' || !params[key].trim()

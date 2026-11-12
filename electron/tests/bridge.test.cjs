@@ -7,8 +7,10 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
+const { createHash } = require('node:crypto')
 const vm = require('node:vm')
 const { ServiceBridge, validateCall } = require(process.env.COMIC_MANAGE_BRIDGE_MODULE || '../bridge.cjs')
+const { normalizeKomgaUrl } = require(process.env.COMIC_MANAGE_KOMGA_CONFIG_MODULE || '../komga-config.cjs')
 
 const FAKE_SERVICE = String.raw`
 import json, os, sys, threading, time
@@ -40,8 +42,8 @@ def handle(request):
         emit({'event':'task-progress','data':{'message':'扫描中：春の旅'}})
         cancel.wait(10)
         emit({'id':identity, 'result':{'count':1, 'errors':[], 'cancelled':cancel.is_set()}})
-    elif method == 'komga_sync':
-        emit({'event':'task-progress','data':{'message':'同步中：春の旅'}})
+    elif method in ('komga_sync', 'komga_pull'):
+        emit({'event':'task-progress','data':{'message':'拉取中：春の旅' if method == 'komga_pull' else '同步中：春の旅'}})
         cancel.wait(10)
         emit({'id':identity, 'result':{'synced':0, 'cancelled':cancel.is_set()}})
     elif method == 'cancel':
@@ -116,20 +118,37 @@ function eventOf(bridge, expectedName) {
   })
 }
 
-async function mainProcessFixture() {
+async function mainProcessFixture(options = {}) {
   const handlers = new Map()
   const calls = []
   const credentials = {url:'http://127.0.0.1:25600', apiKey:'fixture-private-key', libraryId:'fixture-library'}
+  const config = {url:credentials.url, libraryId:credentials.libraryId, libraryName:'漫画书库', ...options.config}
+  const externalUrls = []
+  const localPaths = []
+  const statPaths = []
   let connectionCalls = 0
   const ipcMain = new EventEmitter()
   ipcMain.removeHandler = channel => handlers.delete(channel)
   ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
 
   class FakeBridge extends EventEmitter {
-    async call(method, params) { calls.push({method, params}); return {accepted:true} }
+    async call(method, params) {
+      calls.push({method, params})
+      if (method === 'bootstrap') return {comics:options.comics || [], roots:[], outputRoot:'', dataDir:'fixture-data'}
+      if (method === 'source_context') return options.contexts?.[params.id] || {kind:'folder'}
+      return {accepted:true}
+    }
   }
   class FakeConfigStore {
-    async connection() { connectionCalls += 1; return credentials }
+    async get() {
+      if (options.configError) throw new Error('fixture invalid config')
+      return {...config}
+    }
+    async connection() {
+      connectionCalls += 1
+      if (options.connectionError) throw new Error('fixture missing connection')
+      return credentials
+    }
     async credentials() { return {url:credentials.url, apiKey:credentials.apiKey} }
   }
   class FakeWindow extends EventEmitter {
@@ -147,13 +166,20 @@ async function mainProcessFixture() {
   }
 
   const fakeElectron = {
-    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:{}, shell:{}, safeStorage:{},
+    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:{}, safeStorage:{},
+    shell: {
+      async openExternal(url) { externalUrls.push(url) },
+      async openPath(directory) { localPaths.push(directory); return '' },
+    },
     protocol: {registerSchemesAsPrivileged() {}, async isProtocolHandled() { return true }},
   }
   const fakeRequire = name => {
     if (name === 'electron') return fakeElectron
     if (name === './bridge.cjs') return {ServiceBridge:FakeBridge, validateCall}
-    if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore}
+    if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore, normalizeKomgaUrl}
+    if (name === 'node:fs/promises') return {
+      ...require(name), stat: async location => { statPaths.push(location); return {isDirectory:() => true} },
+    }
     return require(name)
   }
   const module = {exports:{}}
@@ -165,7 +191,7 @@ async function mainProcessFixture() {
   const desktop = await module.exports.createApplication({dataDir:'fixture-data', show:false})
   const event = {sender:desktop.window.webContents, senderFrame:desktop.window.webContents.mainFrame}
   return {
-    calls, credentials, connectionCalls:() => connectionCalls,
+    calls, credentials, config, externalUrls, localPaths, statPaths, connectionCalls:() => connectionCalls,
     invoke: (channel, ...args) => handlers.get(channel)(event, ...args),
   }
 }
@@ -178,6 +204,7 @@ test('request boundary rejects arbitrary methods, malformed records and unsafe n
     ['page', {id:'book',index:Number.MAX_SAFE_INTEGER + 1}],
     ['save', {id:'book',metadata:[]}],
     ['approve', {id:'',metadata:{}}],
+    ['xml', {metadata:{},pageCount:-1}],
     ['xml', {metadata:{},pageCount:0}],
     ['plan', {ids:['book',null],outputRoot:'C:\\Comics'}],
     ['import', {paths:[42]}],
@@ -324,12 +351,19 @@ test('preload exposes synchronization and settings testing through separate allo
     },
   }, {filename:'preload.cjs'})
   await assert.rejects(api.invoke('komga_test', {url:'http://localhost', apiKey:'fixture-key'}), /不支持/)
+  await assert.rejects(api.invoke('source_context', {id:'remote'}), /不支持/)
   await assert.rejects(api.invoke('arbitrary_method', {}), /不支持/)
   assert.equal(calls.length, 0)
   await api.invoke('komga_sync', {ids:['book']})
+  await api.invoke('komga_pull', {})
+  await api.invoke('komga_resolve', {id:'remote',resolution:'keep_local'})
+  await api.openKomgaBook('remote')
   await api.testKomgaConfig({url:'http://localhost', apiKey:'fixture-key'})
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ['comic:call', 'komga_sync', {ids:['book']}],
+    ['comic:call', 'komga_pull', {}],
+    ['comic:call', 'komga_resolve', {id:'remote',resolution:'keep_local'}],
+    ['comic:open-komga-book', 'remote'],
     ['comic:test-komga-config', {url:'http://localhost', apiKey:'fixture-key'}],
   ])
 })
@@ -339,7 +373,7 @@ test('renderer sync accepts only IDs and the main process injects stored credent
   for (const extra of [{url:'http://elsewhere.invalid'}, {apiKey:'renderer-key'}, {libraryId:'renderer-library'}, {unexpected:true}]) {
     await assert.rejects(main.invoke('comic:call', 'komga_sync', {ids:['book'], ...extra}), /同步只接受|参数无效/)
   }
-  await assert.rejects(main.invoke('comic:call', 'komga_test', {url:'http://localhost', apiKey:'renderer-key'}), /连接设置/)
+  await assert.rejects(main.invoke('comic:call', 'komga_test', {url:'http://localhost', apiKey:'renderer-key'}), /主进程/)
   assert.equal(main.calls.length, 0)
   assert.equal(main.connectionCalls(), 0)
 
@@ -354,25 +388,155 @@ test('renderer sync accepts only IDs and the main process injects stored credent
   })
 })
 
-test('Komga synchronization has no ordinary 120-second response deadline and remains cancellable', async t => {
-  const bridge = await fixture(t)
-  const scheduledDelays = []
-  const realSetTimeout = global.setTimeout
-  t.mock.method(global, 'setTimeout', (callback, delay, ...args) => {
-    scheduledDelays.push(delay)
-    return realSetTimeout(callback, delay, ...args)
-  })
-  const progress = eventOf(bridge, 'task-progress')
-  const sync = bridge.call('komga_sync', {
-    ids:['book'], url:'http://127.0.0.1:25600', apiKey:'fixture-key', libraryId:'library',
-  })
-  assert.equal((await progress).message, '同步中：春の旅')
-  assert.equal(scheduledDelays.includes(120000), false)
-  assert.deepEqual(await bridge.call('cancel'), {cancelled:true})
-  assert.equal(scheduledDelays.includes(120000), true)
-  assert.deepEqual(await sync, {synced:0,cancelled:true})
-  assert.equal(bridge.pending.size, 0)
+test('remote library and conflict requests validate their private service parameters', () => {
+  const connection = {url:'http://127.0.0.1:25600', apiKey:'fixture-key', libraryId:'library'}
+  for (const params of [{}, connection]) assert.doesNotThrow(() => validateCall('komga_pull', params))
+  for (const resolution of ['keep_local', 'use_remote']) {
+    assert.doesNotThrow(() => validateCall('komga_resolve', {id:'remote',resolution}))
+    assert.doesNotThrow(() => validateCall('komga_resolve', {id:'remote',resolution,...connection}))
+  }
+  assert.doesNotThrow(() => validateCall('source_context', {id:'remote'}))
+  assert.doesNotThrow(() => validateCall('xml', {id:'remote',metadata:{title:'远端作品'},pageCount:0}))
+  const invalid = [
+    ['komga_pull', {ids:['remote']}],
+    ['komga_pull', {...connection, libraryId:42}],
+    ['komga_pull', {...connection, apiKey:'bad\nkey'}],
+    ['komga_resolve', {resolution:'keep_local'}],
+    ['komga_resolve', {id:'remote'}],
+    ['komga_resolve', {id:'remote',resolution:'overwrite'}],
+    ['komga_resolve', {id:'remote',resolution:'use_remote',untrusted:true}],
+    ['source_context', {}],
+    ['source_context', {id:'remote',url:connection.url}],
+  ]
+  for (const [method, params] of invalid) assert.throws(() => validateCall(method, params), undefined, method)
 })
+
+test('public library pull and conflict resolution use the current saved connection', async () => {
+  const main = await mainProcessFixture()
+  for (const params of [{url:'http://other.invalid'}, {libraryId:'other'}, {apiKey:'renderer-key'}, {ids:['book']}]) {
+    await assert.rejects(main.invoke('comic:call', 'komga_pull', params), /当前配置|参数无效/)
+  }
+  for (const extra of [{url:'http://other.invalid'}, {libraryId:'other'}, {apiKey:'renderer-key'}, {untrusted:true}]) {
+    await assert.rejects(main.invoke('comic:call', 'komga_resolve', {id:'remote',resolution:'keep_local',...extra}), /参数无效/)
+  }
+  await assert.rejects(main.invoke('comic:call', 'source_context', {id:'remote'}), /主进程/)
+  assert.equal(main.calls.length, 0)
+  assert.equal(main.connectionCalls(), 0)
+
+  await main.invoke('comic:call', 'komga_pull', {})
+  await main.invoke('comic:call', 'komga_resolve', {id:'remote',resolution:'use_remote'})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls)), [
+    {method:'komga_pull',params:main.credentials},
+    {method:'komga_resolve',params:{id:'remote',resolution:'use_remote',...main.credentials}},
+  ])
+  assert.equal(main.connectionCalls(), 2)
+})
+
+test('approve and page inject credentials only for a remotely sourced work', async () => {
+  const local = await mainProcessFixture({connectionError:true})
+  const metadata = {title:'local draft'}
+  await local.invoke('comic:call', 'approve', {id:'local',metadata})
+  await local.invoke('comic:call', 'page', {id:'local',index:0})
+  assert.equal(local.connectionCalls(), 0)
+  assert.deepEqual(JSON.parse(JSON.stringify(local.calls)), [
+    {method:'source_context',params:{id:'local'}},
+    {method:'approve',params:{id:'local',metadata}},
+    {method:'source_context',params:{id:'local'}},
+    {method:'page',params:{id:'local',index:0}},
+  ])
+
+  const remote = await mainProcessFixture({contexts:{remote:{kind:'komga'}}})
+  await remote.invoke('comic:call', 'approve', {id:'remote',metadata})
+  await remote.invoke('comic:call', 'page', {id:'remote',index:0})
+  assert.equal(remote.connectionCalls(), 2)
+  assert.deepEqual(JSON.parse(JSON.stringify(remote.calls)), [
+    {method:'source_context',params:{id:'remote'}},
+    {method:'approve',params:{id:'remote',metadata,...remote.credentials}},
+    {method:'source_context',params:{id:'remote'}},
+    {method:'page',params:{id:'remote',index:0,...remote.credentials}},
+  ])
+  for (const method of ['approve', 'page']) {
+    const params = method === 'approve' ? {id:'remote',metadata} : {id:'remote',index:0}
+    await assert.rejects(remote.invoke('comic:call', method, {...params,apiKey:'renderer-key'}), /请求参数无效/)
+  }
+})
+
+test('bootstrap labels the active Komga scope without exposing credentials', async () => {
+  const main = await mainProcessFixture({config:{url:'  http://127.0.0.1:25600///  '}})
+  const result = await main.invoke('comic:call', 'bootstrap')
+  const expectedScope = createHash('sha256').update('http://127.0.0.1:25600\nfixture-library').digest('hex').slice(0, 20)
+  assert.equal(result.komgaScope, expectedScope)
+  assert.equal(result.komgaLibraryName, '漫画书库')
+  assert.equal(JSON.stringify(result).includes(main.credentials.apiKey), false)
+  assert.equal(main.connectionCalls(), 0)
+  main.config.libraryId = 'another-library'
+  assert.notEqual((await main.invoke('comic:call', 'bootstrap')).komgaScope, result.komgaScope)
+  main.config.libraryId = ''
+  assert.equal((await main.invoke('comic:call', 'bootstrap')).komgaScope, '')
+  const invalidConfig = await mainProcessFixture({configError:true})
+  const fallback = await invalidConfig.invoke('comic:call', 'bootstrap')
+  assert.equal(fallback.komgaScope, '')
+  assert.equal(fallback.komgaLibraryName, '')
+  assert.deepEqual(JSON.parse(JSON.stringify(fallback.comics)), [])
+})
+
+test('remote book links are confined to the current scope and use fixed credential-free URLs', async () => {
+  const serverUrl = 'http://127.0.0.1:25600'
+  const remote = {serverUrl,libraryId:'fixture-library',bookId:'book/id?apiKey=not-a-secret'}
+  const main = await mainProcessFixture({contexts:{remote:{kind:'komga',remote}}})
+  await main.invoke('comic:open-komga-book', 'remote')
+  assert.deepEqual(main.externalUrls, [serverUrl + '/book/' + encodeURIComponent(remote.bookId)])
+  const opened = new URL(main.externalUrls[0])
+  assert.equal(opened.origin, serverUrl)
+  assert.equal(opened.search, '')
+  assert.equal(opened.hash, '')
+  assert.equal(main.externalUrls[0].includes(main.credentials.apiKey), false)
+  assert.deepEqual(main.localPaths, [])
+
+  for (const context of [
+    {kind:'folder'},
+    {kind:'komga',remote:{...remote,serverUrl:'http://other.invalid'}},
+    {kind:'komga',remote:{...remote,libraryId:'other-library'}},
+  ]) {
+    const outside = await mainProcessFixture({contexts:{remote:context}})
+    await assert.rejects(outside.invoke('comic:open-komga-book', 'remote'), /所属的 Komga/)
+    assert.deepEqual(outside.externalUrls, [])
+  }
+})
+
+test('remote works cannot be passed to filesystem location handlers', async () => {
+  const main = await mainProcessFixture({comics:[{id:'remote',kind:'komga',source:'komga://fixture/book',output:'C:\\must-not-open'}]})
+  for (const kind of ['source','output']) {
+    await assert.rejects(main.invoke('comic:open-location', kind, 'remote'), /远端作品/)
+  }
+  assert.deepEqual(main.statPaths, [])
+  assert.deepEqual(main.localPaths, [])
+  const local = await mainProcessFixture({comics:[{id:'local',kind:'folder',source:'C:\\Comics\\Local'}]})
+  await local.invoke('comic:open-location', 'source', 'local')
+  assert.deepEqual(local.statPaths, ['C:\\Comics\\Local'])
+  assert.deepEqual(local.localPaths, ['C:\\Comics\\Local'])
+})
+
+for (const method of ['komga_sync', 'komga_pull']) {
+  test(`${method} has no ordinary 120-second response deadline and remains cancellable`, async t => {
+    const bridge = await fixture(t)
+    const scheduledDelays = []
+    const realSetTimeout = global.setTimeout
+    t.mock.method(global, 'setTimeout', (callback, delay, ...args) => {
+      scheduledDelays.push(delay)
+      return realSetTimeout(callback, delay, ...args)
+    })
+    const progress = eventOf(bridge, 'task-progress')
+    const request = {url:'http://127.0.0.1:25600', apiKey:'fixture-key', libraryId:'library'}
+    const task = bridge.call(method, method === 'komga_sync' ? {...request,ids:['book']} : request)
+    assert.equal((await progress).message, method === 'komga_pull' ? '拉取中：春の旅' : '同步中：春の旅')
+    assert.equal(scheduledDelays.includes(120000), false)
+    assert.deepEqual(await bridge.call('cancel'), {cancelled:true})
+    assert.equal(scheduledDelays.includes(120000), true)
+    assert.equal((await task).cancelled, true)
+    assert.equal(bridge.pending.size, 0)
+  })
+}
 
 test('invalid calls fail before data is sent to the service', async t => {
   const bridge = await fixture(t)

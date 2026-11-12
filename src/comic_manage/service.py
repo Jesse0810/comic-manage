@@ -19,6 +19,7 @@ from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
 from .komga_sync import synchronize
+from .komga_remote import approve_remote, preview_changes, pull_library, resolve_remote
 from .packaging import ExportPlan, export_cbz, make_plan
 from .repository import Comic, Repository
 from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, inspect_source,
@@ -29,7 +30,7 @@ MAX_REQUEST_CHARS = 8 * 1024 * 1024
 PLAN_TTL_SECONDS = 15 * 60
 BATCH_TEXT_FIELDS = frozenset({
     "series", "localized_series", "number", "count", "translator", "genre",
-    "publication_format", "year", "month", "day", "language", "localized_series_label",
+    "publication_format", "year", "month", "day", "language", "localized_series_label", "publisher",
 })
 BATCH_LIST_FIELDS = frozenset({"pencillers", "original_works", "characters", "web"})
 BATCH_CHOICES = {
@@ -173,7 +174,7 @@ def _folder_link(path: Path) -> bool:
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
-                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync"})
+                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
@@ -194,12 +195,15 @@ class ComicService:
         if not isinstance(params, dict):
             raise ServiceError("params 必须是对象。")
         cancel = cancel if cancel is not None else Event()
-        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync"):
+        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync", "komga_pull"):
             check_cancel(cancel)
         if method == "bootstrap":
             return {"comics": [self.serialize(c) for c in self.repo.all()],
                     "roots": self.repo.setting("roots").splitlines(),
                     "outputRoot": self.repo.setting("output_root"), "dataDir": str(self.data_dir)}
+        if method == "source_context":
+            comic = self.repo.get(_string(params.get("id"), "id"))
+            return {"kind": comic.kind, "remote": comic.remote}
         if method == "scan":
             return self.scan(params, cancel)
         if method == "import":
@@ -231,6 +235,17 @@ class ComicService:
             return synchronize(self.repo, _strings(params.get("ids"), "作品 id"),
                                _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
                                _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)
+        if method == "komga_pull":
+            return pull_library(self.repo, _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
+                                _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)
+        if method == "komga_resolve":
+            identity = _string(params.get("id"), "id")
+            if self.repo.get(identity).kind != "komga":
+                raise ServiceError("此操作仅适用于 Komga 远端记录。")
+            resolve_remote(self.repo, identity, _string(params.get("resolution"), "冲突处理方式"),
+                           _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
+                           _string(params.get("libraryId"), "Komga 书库"), cancel)
+            return self.serialize(self.repo.get(identity))
         if method in ("save", "approve"):
             return self.save(params, approve=method == "approve", cancel=cancel)
         if method == "page":
@@ -238,6 +253,10 @@ class ComicService:
         if method == "xml":
             comic = self.repo.get(_string(params["id"], "id")) if params.get("id") else None
             metadata = _metadata(params.get("metadata", {}), comic.metadata if comic else None)
+            if comic and comic.kind == "komga":
+                before = comic.metadata.to_dict()
+                explicit = {key for key, value in params.get("metadata", {}).items() if key in before and before[key] != value}
+                return preview_changes(self.repo, comic, metadata, explicit)
             page_count = params.get("pageCount", comic.page_count if comic else None)
             if type(page_count) is not int or page_count < 1:
                 raise ServiceError("pageCount 必须是正整数。")
@@ -489,9 +508,18 @@ class ComicService:
         comic = self.repo.get(identity)
         metadata = _metadata(params.get("metadata"), comic.metadata)
         self.plans.clear()
-        self.repo.save(identity, metadata)
+        before = comic.metadata.to_dict()
+        explicit = {key for key, value in params.get("metadata", {}).items() if key in before and before[key] != value}
+        if comic.kind == "komga" and "genre" in explicit and Metadata(genre=params["metadata"]["genre"]).tags:
+            raise ServiceError("普通题材请在标签中编辑，内容类型使用同人志、漫画等分类。")
+        self.repo.save(identity, metadata, fields=explicit)
         if approve:
             check_cancel(cancel)
+            if comic.kind == "komga":
+                self.progress("正在在线核对 Komga 远端快照…")
+                approve_remote(self.repo, identity, _string(params.get("url"), "Komga 地址"),
+                               _string(params.get("apiKey"), "API Key"), _string(params.get("libraryId"), "Komga 书库"), cancel)
+                return self.serialize(self.repo.get(identity))
             self.progress("正在确认源文件与作品资料…")
             snapshot = inspect_source(Path(comic.source))
             check_cancel(cancel)
@@ -503,6 +531,10 @@ class ComicService:
         index = params.get("index", 0)
         if type(index) is not int or index < 0:
             raise ServiceError("页码必须是非负整数。")
+        if comic.kind == "komga":
+            from .komga_media import remote_page
+            return remote_page(self.repo, comic.id, index, _string(params.get("url"), "Komga 地址"),
+                               _string(params.get("apiKey"), "API Key"), _string(params.get("libraryId"), "Komga 书库"), cancel)
         snapshot = inspect_source(Path(comic.source))
         if snapshot.fingerprint != comic.fingerprint:
             raise ServiceError("源文件已变化，请重新扫描后预览。", "SOURCE_CHANGED")
@@ -529,6 +561,8 @@ class ComicService:
         for identity in identities:
             check_cancel(cancel)
             comic = self.repo.get(identity)
+            if comic.kind == "komga":
+                raise ServiceError("Komga 远端记录请直接同步元数据，不能作为本机图片来源生成 CBZ。")
             self.progress(f"检查生成计划 · {comic.metadata.display_title}")
             plan = make_plan(comic, output_root)
             destination = os.path.normcase(str(plan.destination))

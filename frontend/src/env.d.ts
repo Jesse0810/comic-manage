@@ -11,6 +11,7 @@ interface ComicDesktop {
   saveKomgaConfig(config: import('./types').KomgaConfigInput): Promise<import('./types').KomgaConfig>
   testKomgaConfig(config: import('./types').KomgaConnectionInput): Promise<{ libraries: import('./types').KomgaLibrary[] }>
   openLocation(kind: 'source' | 'output', id: string): Promise<void>
+  openKomgaBook(id: string): Promise<void>
   setWindowState(state: { dirty: boolean; busy: boolean }): void
   closeWindow(): Promise<void>
   getVersion(): Promise<string>
