@@ -1,10 +1,11 @@
 'use strict'
 
-const { app, BrowserWindow, ipcMain, dialog, shell, protocol } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, safeStorage } = require('electron')
 const { readFile, realpath, stat } = require('node:fs/promises')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
 const { ServiceBridge, validateCall } = require('./bridge.cjs')
+const { KomgaConfigStore } = require('./komga-config.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
@@ -48,6 +49,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   }
 
   const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
+  const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
   let requestQueue = Promise.resolve()
   const callService = (method, params = {}) => {
     if (method === 'cancel') return bridge.call(method, params)
@@ -77,7 +79,18 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     ipcMain.removeHandler(channel)
     ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args) })
   }
-  handle('comic:call', async (method, params = {}) => { validateCall(method, params); return callService(method, params) })
+  handle('comic:call', async (method, params = {}) => {
+    if (method === 'komga_test') throw new Error('请通过 Komga 连接设置测试服务器。')
+    validateCall(method, params)
+    if (method === 'komga_sync') {
+      if (Object.keys(params).some(key => key !== 'ids')) throw new Error('同步只接受选中的作品。')
+      return callService(method, { ...params, ...await komgaConfig.connection() })
+    }
+    return callService(method, params)
+  })
+  handle('comic:komga-config', () => komgaConfig.get())
+  handle('comic:save-komga-config', input => komgaConfig.save(input))
+  handle('comic:test-komga-config', async input => callService('komga_test', await komgaConfig.credentials(input)))
   handle('comic:version', () => app.getVersion())
   handle('comic:choose-directory', async () => {
     const result = await dialog.showOpenDialog(window, { title: '选择本地或 NAS 目录', properties: ['openDirectory', 'createDirectory'] })

@@ -7,6 +7,9 @@ interface ComicDesktop {
   chooseCbz(): Promise<string[]>
   chooseBackup(): Promise<string | null>
   chooseKomgaManifest(): Promise<string | null>
+  komgaConfig(): Promise<import('./types').KomgaConfig>
+  saveKomgaConfig(config: import('./types').KomgaConfigInput): Promise<import('./types').KomgaConfig>
+  testKomgaConfig(config: import('./types').KomgaConnectionInput): Promise<{ libraries: import('./types').KomgaLibrary[] }>
   openLocation(kind: 'source' | 'output', id: string): Promise<void>
   setWindowState(state: { dirty: boolean; busy: boolean }): void
   closeWindow(): Promise<void>

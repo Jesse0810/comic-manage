@@ -55,6 +55,12 @@ class Repository:
                 CREATE TABLE IF NOT EXISTS removed_comics (
                     comic_id TEXT PRIMARY KEY, removed_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS komga_mappings (
+                    server_url TEXT NOT NULL, library_id TEXT NOT NULL, comic_id TEXT NOT NULL,
+                    book_id TEXT NOT NULL, series_id TEXT NOT NULL, remote_path TEXT NOT NULL,
+                    synced_at TEXT NOT NULL,
+                    PRIMARY KEY (server_url, library_id, comic_id)
+                );
                 PRAGMA user_version = 1;
             """)
         self._migrate_metadata()
@@ -239,6 +245,21 @@ class Repository:
     def set_setting(self, key: str, value: str):
         with self.connect() as db:
             db.execute("INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def komga_mapping(self, server_url: str, library_id: str, comic_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM komga_mappings WHERE server_url=? AND library_id=? AND comic_id=?",
+                             (server_url, library_id, comic_id)).fetchone()
+        return dict(row) if row else None
+
+    def save_komga_mapping(self, server_url: str, library_id: str, comic_id: str,
+                          book_id: str, series_id: str, remote_path: str) -> None:
+        with self.connect() as db:
+            db.execute("""INSERT INTO komga_mappings VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_url, library_id, comic_id) DO UPDATE SET
+                book_id=excluded.book_id, series_id=excluded.series_id,
+                remote_path=excluded.remote_path, synced_at=excluded.synced_at""",
+                (server_url, library_id, comic_id, book_id, series_id, remote_path, now()))
 
     def backup(self, destination: Path):
         # SQLite backup API gives a consistent catalog even while other connections exist.

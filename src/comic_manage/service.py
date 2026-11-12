@@ -17,6 +17,8 @@ from typing import Callable, TextIO
 from .metadata import AGE_RATINGS, Metadata, to_comicinfo
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
+from .komga_client import KomgaError, test_connection
+from .komga_sync import synchronize
 from .packaging import ExportPlan, export_cbz, make_plan
 from .repository import Comic, Repository
 from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, inspect_source,
@@ -171,7 +173,7 @@ def _folder_link(path: Path) -> bool:
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
-                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga"})
+                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
@@ -192,7 +194,7 @@ class ComicService:
         if not isinstance(params, dict):
             raise ServiceError("params 必须是对象。")
         cancel = cancel if cancel is not None else Event()
-        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel"):
+        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync"):
             check_cancel(cancel)
         if method == "bootstrap":
             return {"comics": [self.serialize(c) for c in self.repo.all()],
@@ -223,6 +225,12 @@ class ComicService:
         if method == "export_komga":
             identities = _strings(params.get("ids"), "作品 id")
             return export_manifest(self.repo, identities, _path(params.get("path"), "清单位置"))
+        if method == "komga_test":
+            return test_connection(_string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"), cancel)
+        if method == "komga_sync":
+            return synchronize(self.repo, _strings(params.get("ids"), "作品 id"),
+                               _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
+                               _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)
         if method in ("save", "approve"):
             return self.save(params, approve=method == "approve", cancel=cancel)
         if method == "page":
@@ -573,7 +581,7 @@ class ComicService:
 
 
 def error_payload(exc: Exception) -> dict:
-    if isinstance(exc, ServiceError):
+    if isinstance(exc, (ServiceError, KomgaError)):
         code = exc.code
     elif isinstance(exc, Cancelled):
         code = "CANCELLED"

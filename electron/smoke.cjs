@@ -8,10 +8,12 @@ app.on('window-all-closed', () => {}) // Keep the test alive until service shutd
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const assert = require('node:assert/strict')
+const { createKomgaFixture } = require('./tests/komga-http-fixture.cjs')
 const { deflateSync } = require('node:zlib')
 
 const root = path.resolve(__dirname, '..')
 let desktop
+let komgaFixture
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 function crc(buffer) {
   let value = 0xffffffff
@@ -60,6 +62,8 @@ async function run() {
   }
   app.setPath('userData', path.join(dataDir, 'electron'))
   await app.whenReady()
+  const syntheticKey = 'synthetic-komga-test-key'
+  komgaFixture = await createKomgaFixture(syntheticKey)
   let picking = sourceRoot
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: Array.isArray(picking) ? picking : [picking] })
   dialog.showSaveDialog = async (_window, options) => ({ canceled: false, filePath: path.join(fixture, options.title.includes('Komga') ? 'komga_notable_entities_manifest.json' : 'backup.sqlite3') })
@@ -225,13 +229,75 @@ async function run() {
   await evaluate("[...document.querySelectorAll('.el-tabs__item')].find(x=>x.textContent === 'Komga 补充资料').click()")
   await waitFor("document.querySelector('[data-testid=komga-payload]')?.textContent.includes('春日旅途系列校订')", 'Komga supplementary preview')
   assert.equal(await evaluate("document.querySelector('[data-testid=komga-payload]').textContent.includes('notableEntities')"), true)
-  await click('Komga 同步清单')
-  await waitFor("document.body.innerText.includes('清单已导出')", 'Komga manifest export')
-  await dismissResult()
+  await call('export_komga', { ids: [id], path: path.join(fixture, 'komga_notable_entities_manifest.json') })
   const manifest = JSON.parse(await fs.readFile(path.join(fixture, 'komga_notable_entities_manifest.json'), 'utf8'))
   assert.equal(manifest.books.length, 1)
   assert.equal(manifest.series[0].alternateTitles[0].title, '春日旅途系列校订')
   assert.ok(manifest.books[0].notableEntities.some(entity => entity.kind === '原作' && entity.name === '东方Project'))
+  const relativeOutput = path.basename(path.dirname(packaged.output)) + '/' + path.basename(packaged.output)
+  komgaFixture.books.set('remote-book', {
+    id: 'remote-book', libraryId: 'test-library', seriesId: 'remote-series',
+    name: path.basename(packaged.output), url: '/remote/library/' + relativeOutput,
+    metadata: {
+      title: '服务器旧标题', number: '1', numberSort: 1, summary: '旧简介', tags: ['旧标签'],
+      authors: [{ name: '保留墨线人员', role: 'inker' }, { name: '旧作者', role: 'writer' }],
+      notableEntities: [{ kind: 'team', name: '保留队伍' }, { kind: 'character', name: '旧角色' }],
+      links: [],
+    },
+  })
+  komgaFixture.series.set('remote-series', {
+    id: 'remote-series', libraryId: 'test-library', oneshot: false, booksCount: 1,
+    url: '/remote/library/' + path.basename(path.dirname(packaged.output)),
+    metadata: {
+      title: packaged.metadata.series, titleSort: '手工排序标题', publisher: '旧出版方',
+      language: 'ja', ageRating: 0, genres: ['旧类型'], readingDirection: 'LEFT_TO_RIGHT',
+      alternateTitles: [{ label: 'en', title: 'Existing alias' }, { label: 'zh-Hans', title: '旧译名' }],
+    },
+  })
+  await evaluate("[...document.querySelectorAll('.el-tabs__item')].find(x=>x.textContent === '基本资料').click()")
+  await setField('title', '春日旅途·同步校订')
+  await click('保存草稿')
+  await waitFor("document.querySelector('.details-panel .status-pill')?.textContent === '待审核'", 'sync title draft')
+  await evaluate("document.querySelector('.review-checkbox').click()")
+  await click('审核通过')
+  await waitFor("document.querySelector('.details-panel .status-pill')?.textContent === '已审核'", 'reviewed metadata ready without repackaging')
+  await click('同步到 Komga')
+  await waitFor("document.querySelector('[data-testid=komga-url]')", 'connection settings opened automatically')
+  await waitFor("document.querySelector('[data-testid=komga-test]')?.disabled === false", 'connection configuration loaded')
+  await setField('komga-url', komgaFixture.url)
+  await setField('komga-api-key', syntheticKey)
+  await click('测试连接并读取书库')
+  await waitFor("document.querySelector('[data-testid=komga-test-success]')", 'authenticated Komga connection')
+  await capture('ComicManage-Komga-connection.png')
+  await click('保存并同步')
+  await waitFor("document.querySelector('[data-testid=komga-sync-summary]')", 'direct Komga synchronization result')
+  assert.equal(await evaluate("document.querySelector('[data-testid=komga-sync-results]').textContent.includes('成功')"), true)
+  const remoteBook = komgaFixture.books.get('remote-book').metadata
+  assert.equal(remoteBook.title, '春日旅途·同步校订')
+  assert.equal(remoteBook.numberSort, 2.5)
+  assert.equal(remoteBook.releaseDate, '2024-02-28')
+  assert.ok(remoteBook.authors.some(author => author.name === '保留墨线人员' && author.role === 'inker'))
+  assert.ok(remoteBook.authors.some(author => author.name === '森野' && author.role === 'writer'))
+  assert.ok(remoteBook.notableEntities.some(entity => entity.kind === 'character' && entity.name === '博丽灵梦'))
+  assert.ok(remoteBook.notableEntities.some(entity => entity.kind === 'team' && entity.name === '保留队伍'))
+  assert.equal(remoteBook.notableEntities.some(entity => entity.name === '旧角色'), false)
+  const remoteSeries = komgaFixture.series.get('remote-series').metadata
+  assert.equal(remoteSeries.publisher, 'pink-noise')
+  assert.equal(remoteSeries.ageRating, 18)
+  assert.ok(remoteSeries.alternateTitles.some(alias => alias.label === 'zh-Hans' && alias.title === '春日旅途系列校订'))
+  assert.ok(remoteSeries.alternateTitles.some(alias => alias.label === 'en' && alias.title === 'Existing alias'))
+  assert.equal(remoteSeries.titleSort, '手工排序标题')
+  assert.equal((await fs.readFile(path.join(dataDir, 'komga-connection.json'), 'utf8')).includes(syntheticKey), false)
+  const savedConnection = await evaluate('window.comic.komgaConfig()')
+  assert.equal(savedConnection.hasApiKey, true)
+  assert.equal(JSON.stringify(savedConnection).includes(syntheticKey), false)
+  await capture('ComicManage-Komga-result.png')
+  await click('完成')
+  await waitFor("!document.querySelector('.komga-sync-result-dialog')", 'sync result closed')
+  await toggle('komga-settings')
+  await waitFor("document.querySelector('[data-testid=komga-url] input')?.value || document.querySelector('input[data-testid=komga-url]')?.value", 'saved connection reopened')
+  assert.equal(await evaluate("document.querySelector('input[data-testid=komga-api-key]')?.value || document.querySelector('[data-testid=komga-api-key] input')?.value || ''"), '')
+  await click('取消')
   await call('approve', { id: secondId, metadata: { age_rating: 'Everyone', collection_mode: 'oneshot', series: '本地旧系列', number: '8', count: '9', volume: '3' } })
   const oneShotPlan = await call('plan', { ids: [secondId], outputRoot: output })
   assert.equal(path.basename(path.dirname(oneShotPlan.items[0].destination)), '_oneshots')
@@ -317,7 +383,8 @@ async function run() {
   assert.equal(javascriptErrors.filter(x => /Uncaught|TypeError|ReferenceError/.test(x)).length, 0, javascriptErrors.join('\n'))
   window.destroy()
   await desktop.bridge.stop()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
+  await komgaFixture.close()
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

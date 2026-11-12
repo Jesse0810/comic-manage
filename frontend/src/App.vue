@@ -2,11 +2,13 @@
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
-import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, Files, ArrowRight, CopyDocument, Edit, Remove } from '@element-plus/icons-vue'
+import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, Files, ArrowRight, CopyDocument, Edit, Remove, Connection, Setting } from '@element-plus/icons-vue'
 import DetailsPanel from './components/DetailsPanel.vue'
 import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult } from './types'
+import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
+import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult } from './types'
 import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode } from './types'
 import { invoke } from './api'
 
@@ -40,6 +42,10 @@ const resultTitle = ref('')
 const resultSummary = ref('')
 const resultDetail = ref('')
 const settingsVisible = ref(false)
+const komgaSettingsVisible = ref(false)
+const komgaResultVisible = ref(false)
+const komgaResult = ref<KomgaSyncResult | null>(null)
+const pendingSyncIds = ref<string[]>([])
 const importVisible = ref(false)
 const importMode = ref<'folder' | 'cbz'>('folder')
 const batchVisible = ref(false)
@@ -288,7 +294,7 @@ async function confirmExport() {
 async function cancelTask() {
   if (!busy.value || cancelling.value) return
   cancelling.value = true
-  taskMessage.value = '正在取消，等待当前文件操作结束…'
+  taskMessage.value = '正在取消，等待当前操作结束…'
   try { await invoke('cancel') }
   catch (error) { ElMessage.warning(errorMessage(error)) }
 }
@@ -302,6 +308,54 @@ async function backup() {
       showResult('备份完成', '已备份目录索引、元数据和审核记录，不包含漫画图片。', path)
     })
   } catch (error) { showError(errorMessage(error)) }
+}
+
+function openKomgaSettings() {
+  if (disabled.value) return
+  pendingSyncIds.value = []
+  komgaSettingsVisible.value = true
+}
+
+async function executeKomgaSync(ids: string[]) {
+  if (disabled.value || !ids.length) return
+  busy.value = true
+  cancelling.value = false
+  komgaResultVisible.value = false
+  taskTitle.value = '同步到 Komga'
+  taskMessage.value = '正在匹配作品并读取服务器资料…'
+  try {
+    komgaResult.value = await invoke<KomgaSyncResult>('komga_sync', { ids })
+    try { await refresh() } catch (reason) { ElMessage.warning(`同步已返回结果，本机列表刷新失败：${errorMessage(reason)}`) }
+    komgaResultVisible.value = true
+  } catch (reason) { showError(errorMessage(reason)) }
+  finally { busy.value = false; cancelling.value = false; taskMessage.value = '' }
+}
+
+async function syncKomga() {
+  if (disabled.value || !await resolveEdits()) return
+  const ids = [...exportIds.value]
+  if (!ids.length) return
+  let config: KomgaConfig | undefined
+  busy.value = true
+  taskTitle.value = '准备 Komga 同步'
+  taskMessage.value = '正在读取连接配置…'
+  try { config = await window.comic.komgaConfig() }
+  catch (reason) { showError(errorMessage(reason)) }
+  finally { busy.value = false; taskMessage.value = '' }
+  if (!config) return
+  if (!config.url || !config.libraryId || !config.hasApiKey) {
+    pendingSyncIds.value = ids
+    komgaSettingsVisible.value = true
+    return
+  }
+  await executeKomgaSync(ids)
+}
+
+function komgaConfigured(config: KomgaConfig) {
+  const ids = [...pendingSyncIds.value]
+  pendingSyncIds.value = []
+  if (ids.length && config.url && config.libraryId && config.hasApiKey) void executeKomgaSync(ids)
+  else ElMessage.success(config.hasApiKey ? 'Komga 配置已保存' : 'API Key 已清除')
 }
 
 async function exportKomga() {
@@ -358,8 +412,8 @@ onBeforeUnmount(() => unsubscribe?.())
       <div class="brand"><div class="brand-icon"><el-icon :size="25"><Reading /></el-icon></div><div><strong>漫画整理</strong><span>COMIC MANAGE</span></div></div>
       <div class="workspace-label">我的工作区</div>
       <nav class="navigation"><button v-for="item in navigation" :key="item.key" :class="{ active: section === item.key }" @click="section = item.key"><el-icon :size="18"><component :is="item.icon" /></el-icon><span>{{ item.title }}</span><b>{{ counts[item.key] }}</b></button></nav>
-      <div class="sidebar-note"><div class="sidebar-note-icon"><el-icon><Lock /></el-icon></div><div><strong>你的漫画，只在本机</strong><p>先确认资料，再生成成品。<br />所有原始文件都会保留。</p></div></div>
-      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
+      <div class="sidebar-note"><div class="sidebar-note-icon"><el-icon><Lock /></el-icon></div><div><strong>原图保留，资料有序</strong><p>审核后生成成品，<br />可同步资料到你的 Komga。</p></div></div>
+      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
     </aside>
 
     <main class="workspace">
@@ -370,7 +424,7 @@ onBeforeUnmount(() => unsubscribe?.())
       <div class="work-area">
         <section class="library-panel">
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
-          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length" @click="openBatchEditor">批量编辑</el-button><el-button link :icon="Download" :disabled="disabled || !exportIds.length" @click="exportKomga">Komga 同步清单</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
+          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
             <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
@@ -389,16 +443,18 @@ onBeforeUnmount(() => unsubscribe?.())
         <DetailsPanel :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @error="showError" />
       </div>
 
-      <div v-if="busy && !importVisible && !batchVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>
+      <div v-if="busy && !importVisible && !batchVisible && !komgaSettingsVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>
       <footer class="workspace-footnote"><span class="connection-dot" :class="{ offline: !available }"></span><span>{{ available ? '本机资料库已连接' : '本机服务不可用' }}</span><span class="footnote-divider">/</span><span>原图保留 · 人工审核 · 无损打包</span><span v-if="dirty" class="unsaved-note">当前作品有未保存修改</span></footer>
     </main>
 
+    <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-sync="pendingSyncIds.length > 0" @state="dialogTask" @saved="komgaConfigured" />
+    <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <ImportDialog v-model="importVisible" :mode="importMode" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" @state="dialogTask" @completed="batchSaved" />
 
     <el-dialog v-model="planVisible" title="确认生成计划" width="min(940px, 90vw)" :close-on-click-modal="false" destroy-on-close class="plan-dialog"><template v-if="plan"><div class="dialog-intro"><div class="dialog-icon"><el-icon :size="24"><Box /></el-icon></div><div><h3>即将生成 {{ plan.items.length }} 本漫画</h3><p>先检查成品路径，确认后将逐本打包并校验。</p></div></div><el-alert title="只新增文件，不覆盖已有成品；所有源文件保留。" type="info" :closable="false" show-icon /><el-alert v-for="warning in planWarnings" :key="warning" :title="warning" type="warning" :closable="false" show-icon /><el-table :data="plan.items" max-height="330" class="plan-table"><el-table-column label="作品" prop="title" min-width="160" /><el-table-column label="成品路径" min-width="320"><template #default="scope"><span class="plan-path" :title="scope.row.source">{{ scope.row.destination }}</span><div class="plan-source">源：{{ scope.row.source }}</div></template></el-table-column><el-table-column label="页数" prop="pageCount" width="60" align="center" /><el-table-column label="附件" prop="attachmentCount" width="60" align="center" /></el-table><p class="plan-note">图片不转码，完成后检查 CRC、SHA-256、页数和 ComicInfo.xml。原始内容约 {{ sizeText(plan.totalBytes) }}，请保留足够空间。</p></template><template #footer><el-button @click="planVisible = false">返回检查</el-button><el-button type="primary" :icon="Check" @click="confirmExport">确认生成并校验</el-button></template></el-dialog>
 
     <el-dialog v-model="resultVisible" :title="resultTitle" width="min(700px, 90vw)" destroy-on-close><p class="result-summary">{{ resultSummary }}</p><el-input v-if="resultDetail" :model-value="resultDetail" readonly type="textarea" :rows="10" resize="none" class="result-details" /><template #footer><el-button type="primary" @click="resultVisible = false">知道了</el-button></template></el-dialog>
-    <el-dialog v-model="settingsVisible" title="工作区信息" width="min(640px, 90vw)"><div class="workspace-info"><label>本机资料库</label><p>{{ dataDir || '尚未连接' }}</p><label>已添加的目录</label><p v-for="root in roots" :key="root">{{ root }}</p><p v-if="!roots.length" class="muted-text">还没有添加目录</p><label>成品目录</label><p>{{ outputRoot || '尚未设置' }}</p></div><template #footer><el-button type="primary" @click="settingsVisible = false">关闭</el-button></template></el-dialog>
+    <el-dialog v-model="settingsVisible" title="工作区信息" width="min(640px, 90vw)"><div class="workspace-info"><label>本机资料库</label><p>{{ dataDir || '尚未连接' }}</p><label>已添加的目录</label><p v-for="root in roots" :key="root">{{ root }}</p><p v-if="!roots.length" class="muted-text">还没有添加目录</p><label>成品目录</label><p>{{ outputRoot || '尚未设置' }}</p></div><p class="muted-text">高级用法：勾选作品后可导出 Komga 同步清单，用于独立脚本处理。</p><template #footer><el-button data-testid="komga-export-manifest" :disabled="disabled || !exportIds.length" @click="settingsVisible = false; exportKomga()">导出 Komga 同步清单</el-button><el-button type="primary" @click="settingsVisible = false">关闭</el-button></template></el-dialog>
   </div>
 </template>

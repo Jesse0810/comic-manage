@@ -6,7 +6,7 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 ## Windows 便携版
 
-解压 `ComicManage-Electron-1.5.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
+解压 `ComicManage-Electron-1.6.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
 
 1. 添加一个或多个本地 / NAS 位置，在目录树中勾选需要的文件夹，或多选已有 CBZ。
 2. 预览识别结果，勾选需要入库的作品，可统一填写作者和类型，再确认导入。
@@ -17,9 +17,13 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 图片不转码，逐图片与附件验证 ZIP CRC 和 SHA-256，校验成功后才发布正式 CBZ。不会覆盖已有目标，不会删除原始图片。修改元数据或扫描到源变化后需要重新审核。
 
-1.5.0 使用 [Komga 元数据规则 v1.1-K](docs/NAS_METADATA.md)，按 Komga 1.30.1 适配。独立作品导出到 _oneshots，需在 Komga 书库设置 One-Shots directory 为 /_oneshots。同一系列的成品放在同一目录，以 Number 标识本册或章节。Volume 保留本机旧值供核对，XML 省略。Characters 和角色标签同时写入。系列别名、色彩及其他结构化分类使用 API 补充清单。
+当前采用 [Komga 元数据规则 v1.1-K](docs/NAS_METADATA.md)，按 Komga 1.30.1 适配。独立作品导出到 _oneshots，需在 Komga 书库设置 One-Shots directory 为 /_oneshots。同一系列的成品放在同一目录，以 Number 标识本册或章节。Volume 保留本机旧值供核对，XML 省略。Characters 和角色标签同时写入。系列别名、色彩及其他结构化分类通过 API 同步。
 
-生成成品并完成 Komga 扫描后，选中作品点击“Komga 同步清单”。在 PowerShell 运行 `.\resources\scripts\sync-komga.ps1 -ManifestPath "D:\成品\komga_notable_entities_manifest.json" -WhatIf` 预览，移除 -WhatIf 后确认写入。在本机输入 Komga 地址和管理员 API Key。脚本替换清单管理的实体类别，并保留已有角色和其他类别。新增系列别名可以同步，既有同标签别名的改名或删除需在 Komga 核对处理。详见包内 resources/KOMGA_METADATA.md。
+1.6.0 可在侧栏“Komga 连接设置”填写服务器地址和管理员 API Key，测试连接并选择书库。密钥使用系统加密保存在本机，再次打开设置只显示已保存状态。
+
+漫画被目标书库扫描后，在本机审核资料，选中作品点击“同步到 Komga”。标题、作者、简介、编号、完整日期、标签、来源链接及分类实体可直接更新。选全远端系列的所有已审核册后，还会更新系列名称、类型、年龄、语言、出版方、阅读方向、总册数和系列别名。本地修改后审核通过即可同步。结果逐本、逐系列列出成功、跳过、失败及无法表达的字段，可取消并重试。
+
+本地空的简介、标签、链接等按同步规则清空远端对应字段。仅已知部分的发行日期会保留在本机，结果提示远端日期未更新。同步字段会设置 Komga 元数据锁，避免旧 CBZ 自动刷新覆盖本次同步。工作区信息中仍可导出独立同步清单。详见包内 resources/KOMGA_METADATA.md。
 
 ## 选择导入、批量编辑与移除
 

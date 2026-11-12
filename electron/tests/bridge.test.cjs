@@ -2,11 +2,12 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { once } = require('node:events')
+const { EventEmitter, once } = require('node:events')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
+const vm = require('node:vm')
 const { ServiceBridge, validateCall } = require(process.env.COMIC_MANAGE_BRIDGE_MODULE || '../bridge.cjs')
 
 const FAKE_SERVICE = String.raw`
@@ -39,6 +40,10 @@ def handle(request):
         emit({'event':'task-progress','data':{'message':'扫描中：春の旅'}})
         cancel.wait(10)
         emit({'id':identity, 'result':{'count':1, 'errors':[], 'cancelled':cancel.is_set()}})
+    elif method == 'komga_sync':
+        emit({'event':'task-progress','data':{'message':'同步中：春の旅'}})
+        cancel.wait(10)
+        emit({'id':identity, 'result':{'synced':0, 'cancelled':cancel.is_set()}})
     elif method == 'cancel':
         cancel.set()
         emit({'id':identity, 'result':{'cancelled':True}})
@@ -109,6 +114,60 @@ function eventOf(bridge, expectedName) {
     }
     bridge.on('event', listener)
   })
+}
+
+async function mainProcessFixture() {
+  const handlers = new Map()
+  const calls = []
+  const credentials = {url:'http://127.0.0.1:25600', apiKey:'fixture-private-key', libraryId:'fixture-library'}
+  let connectionCalls = 0
+  const ipcMain = new EventEmitter()
+  ipcMain.removeHandler = channel => handlers.delete(channel)
+  ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+
+  class FakeBridge extends EventEmitter {
+    async call(method, params) { calls.push({method, params}); return {accepted:true} }
+  }
+  class FakeConfigStore {
+    async connection() { connectionCalls += 1; return credentials }
+    async credentials() { return {url:credentials.url, apiKey:credentials.apiKey} }
+  }
+  class FakeWindow extends EventEmitter {
+    constructor() {
+      super()
+      this.webContents = new EventEmitter()
+      this.webContents.mainFrame = {url:'comic://ui/index.html'}
+      this.webContents.session = {setPermissionRequestHandler() {}}
+      this.webContents.setWindowOpenHandler = () => {}
+      this.webContents.send = () => {}
+    }
+    isDestroyed() { return false }
+    async loadURL() {}
+    show() {}
+  }
+
+  const fakeElectron = {
+    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:{}, shell:{}, safeStorage:{},
+    protocol: {registerSchemesAsPrivileged() {}, async isProtocolHandled() { return true }},
+  }
+  const fakeRequire = name => {
+    if (name === 'electron') return fakeElectron
+    if (name === './bridge.cjs') return {ServiceBridge:FakeBridge, validateCall}
+    if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore}
+    return require(name)
+  }
+  const module = {exports:{}}
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main.cjs'), 'utf8')
+  vm.runInNewContext(source, {
+    module, require:fakeRequire, __dirname:path.resolve(__dirname, '..'),
+    process:{env:{}, resourcesPath:'fixture-resources'},
+  }, {filename:'main.cjs'})
+  const desktop = await module.exports.createApplication({dataDir:'fixture-data', show:false})
+  const event = {sender:desktop.window.webContents, senderFrame:desktop.window.webContents.mainFrame}
+  return {
+    calls, credentials, connectionCalls:() => connectionCalls,
+    invoke: (channel, ...args) => handlers.get(channel)(event, ...args),
+  }
 }
 
 test('request boundary rejects arbitrary methods, malformed records and unsafe numeric indexes', () => {
@@ -220,6 +279,99 @@ test('Komga export validates its selected IDs and destination before sending a r
   await assert.rejects(bridge.call('export_arbitrary_file', {ids:['book'],path:'C:\\anything'}), /不支持/)
   const params = {ids:['one','two'], path:'C:\\成品\\漫画系列-komga.json'}
   assert.deepEqual(await bridge.call('export_komga', params), params)
+})
+
+test('private Komga service calls validate connection text and reject unknown fields', () => {
+  const valid = {url:'http://127.0.0.1:25600', apiKey:'fixture-key'}
+  assert.doesNotThrow(() => validateCall('komga_test', valid))
+  assert.doesNotThrow(() => validateCall('komga_sync', {ids:['book']}))
+  assert.doesNotThrow(() => validateCall('komga_sync', {...valid, ids:['book'], libraryId:'library'}))
+  const invalid = [
+    ['komga_test', {}],
+    ['komga_test', {url:valid.url}],
+    ['komga_test', {apiKey:valid.apiKey}],
+    ['komga_test', {...valid, url:42}],
+    ['komga_test', {...valid, apiKey:' '}],
+    ['komga_test', {...valid, libraryId:'library'}],
+    ['komga_test', {...valid, timeout:1}],
+    ['komga_sync', {...valid, ids:'book'}],
+    ['komga_sync', {...valid, ids:['book'], libraryId:false}],
+    ['komga_sync', {...valid, ids:['book'], unexpected:'hidden'}],
+  ]
+  for (const method of ['komga_test', 'komga_sync']) {
+    const keys = method === 'komga_test' ? ['url', 'apiKey'] : ['url', 'apiKey', 'libraryId']
+    for (const key of keys) {
+      for (const value of ['', ' ', 'a\r\nb', 'a\0b', 'a'.repeat(8193)]) {
+        invalid.push([method, {...valid, ...(method === 'komga_sync' ? {ids:['book']} : {}), [key]:value}])
+      }
+    }
+  }
+  for (const [method, params] of invalid) {
+    assert.throws(() => validateCall(method, params), undefined, `${method}: ${Object.keys(params).join(',')}`)
+  }
+})
+
+test('preload exposes synchronization and settings testing through separate allowlisted channels', async () => {
+  let api
+  const calls = []
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'preload.cjs'), 'utf8'), {
+    require: name => {
+      assert.equal(name, 'electron')
+      return {
+        contextBridge: {exposeInMainWorld: (_name, value) => { api = value }},
+        ipcRenderer: {invoke: async (...args) => { calls.push(args); return {accepted:true} }},
+      }
+    },
+  }, {filename:'preload.cjs'})
+  await assert.rejects(api.invoke('komga_test', {url:'http://localhost', apiKey:'fixture-key'}), /不支持/)
+  await assert.rejects(api.invoke('arbitrary_method', {}), /不支持/)
+  assert.equal(calls.length, 0)
+  await api.invoke('komga_sync', {ids:['book']})
+  await api.testKomgaConfig({url:'http://localhost', apiKey:'fixture-key'})
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ['comic:call', 'komga_sync', {ids:['book']}],
+    ['comic:test-komga-config', {url:'http://localhost', apiKey:'fixture-key'}],
+  ])
+})
+
+test('renderer sync accepts only IDs and the main process injects stored credentials', async () => {
+  const main = await mainProcessFixture()
+  for (const extra of [{url:'http://elsewhere.invalid'}, {apiKey:'renderer-key'}, {libraryId:'renderer-library'}, {unexpected:true}]) {
+    await assert.rejects(main.invoke('comic:call', 'komga_sync', {ids:['book'], ...extra}), /同步只接受|参数无效/)
+  }
+  await assert.rejects(main.invoke('comic:call', 'komga_test', {url:'http://localhost', apiKey:'renderer-key'}), /连接设置/)
+  assert.equal(main.calls.length, 0)
+  assert.equal(main.connectionCalls(), 0)
+
+  await main.invoke('comic:call', 'komga_sync', {ids:['one','two']})
+  assert.equal(main.connectionCalls(), 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls)), [{
+    method:'komga_sync', params:{ids:['one','two'], ...main.credentials},
+  }])
+  await main.invoke('comic:test-komga-config', {url:main.credentials.url})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1])), {
+    method:'komga_test', params:{url:main.credentials.url, apiKey:main.credentials.apiKey},
+  })
+})
+
+test('Komga synchronization has no ordinary 120-second response deadline and remains cancellable', async t => {
+  const bridge = await fixture(t)
+  const scheduledDelays = []
+  const realSetTimeout = global.setTimeout
+  t.mock.method(global, 'setTimeout', (callback, delay, ...args) => {
+    scheduledDelays.push(delay)
+    return realSetTimeout(callback, delay, ...args)
+  })
+  const progress = eventOf(bridge, 'task-progress')
+  const sync = bridge.call('komga_sync', {
+    ids:['book'], url:'http://127.0.0.1:25600', apiKey:'fixture-key', libraryId:'library',
+  })
+  assert.equal((await progress).message, '同步中：春の旅')
+  assert.equal(scheduledDelays.includes(120000), false)
+  assert.deepEqual(await bridge.call('cancel'), {cancelled:true})
+  assert.equal(scheduledDelays.includes(120000), true)
+  assert.deepEqual(await sync, {synced:0,cancelled:true})
+  assert.equal(bridge.pending.size, 0)
 })
 
 test('invalid calls fail before data is sent to the service', async t => {

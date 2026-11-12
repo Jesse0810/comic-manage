@@ -6,8 +6,8 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga'])
-const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'translator',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
@@ -68,7 +68,16 @@ function validateCall(method, params) {
   if (['import', 'prepare_import'].includes(method)) strings('paths')
   if (method === 'browse_folders') string('path')
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
-  if (['remove', 'batch_edit', 'commit_import', 'export_komga'].includes(method)) strings('ids')
+  if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync'].includes(method)) strings('ids')
+  if (['komga_test', 'komga_sync'].includes(method)) {
+    const allowed = method === 'komga_test' ? ['url', 'apiKey'] : ['ids', 'url', 'apiKey', 'libraryId']
+    if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('Komga 请求参数无效。')
+    for (const key of ['url', 'apiKey', 'libraryId']) {
+      if (params[key] !== undefined && (typeof params[key] !== 'string' || !params[key].trim()
+          || params[key].length > 8192 || /[\r\n\0]/.test(params[key]))) throw new Error('Komga 连接参数无效。')
+    }
+    if (method === 'komga_test') { string('url'); string('apiKey') }
+  }
   if (method === 'commit_import') {
     string('token')
     if (params.overwriteExisting !== undefined && typeof params.overwriteExisting !== 'boolean') throw new Error('覆盖选项无效。')

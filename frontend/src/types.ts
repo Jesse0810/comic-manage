@@ -21,6 +21,16 @@ export interface ImportCandidate {
 }
 export interface ImportPreview { token: string; items: ImportCandidate[]; errors: string[]; cancelled?: boolean }
 export interface ImportResult { count: number; skipped: number; errors: string[]; cancelled: boolean; ids: string[] }
+export interface KomgaConfig { url: string; libraryId: string; libraryName: string; hasApiKey: boolean }
+export interface KomgaLibrary { id: string; name: string; root?: string }
+export interface KomgaConnectionInput { url: string; apiKey?: string; clearKey?: boolean }
+export interface KomgaConfigInput extends KomgaConnectionInput { libraryId: string; libraryName: string }
+export type KomgaSyncStatus = 'success' | 'skipped' | 'failed'
+export interface KomgaSyncItem { id: string; title: string; status: KomgaSyncStatus; message: string; bookId?: string; warnings?: string[] }
+export interface KomgaSyncResult {
+  total: number; updated: number; skipped: number; failed: number; seriesUpdated: number; cancelled: boolean
+  books: KomgaSyncItem[]; series: KomgaSyncItem[]
+}
 export const comicGenres = ['同人志', 'CG集', '画集', '设定集', '漫画', '插画集']
 export const publicationFormats = ['独立短篇', '单行本', '合集', '总集篇', '再版', '分卷']
 export const ageRatings = [{ label: '未确认', value: 'Unknown' }, { label: '全年龄', value: 'Everyone' }, { label: 'MA15+', value: 'MA15+' }, { label: 'R18', value: 'R18+' }]
