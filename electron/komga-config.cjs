@@ -23,11 +23,12 @@ function apiKey(value) {
 
 function validateInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)
-      || Object.keys(input).some(key => !['url', 'apiKey', 'clearKey', 'libraryId', 'libraryName'].includes(key))) {
+      || Object.keys(input).some(key => !['url', 'apiKey', 'clearKey', 'libraryId', 'libraryName', 'autoSyncEnabled'].includes(key))) {
     throw new Error('Komga 配置格式无效。')
   }
   if (input.apiKey !== undefined && typeof input.apiKey !== 'string') throw new Error('API Key 格式无效。')
   if (input.clearKey !== undefined && typeof input.clearKey !== 'boolean') throw new Error('清除密钥选项无效。')
+  if (input.autoSyncEnabled !== undefined && typeof input.autoSyncEnabled !== 'boolean') throw new Error('自动同步选项无效。')
   for (const key of ['libraryId', 'libraryName']) {
     if (input[key] !== undefined && (typeof input[key] !== 'string' || input[key].length > 4096 || /[\r\n\0]/.test(input[key]))) {
       throw new Error('Komga 书库信息无效。')
@@ -62,6 +63,7 @@ class KomgaConfigStore {
       libraryId: typeof value.libraryId === 'string' ? value.libraryId : '',
       libraryName: typeof value.libraryName === 'string' ? value.libraryName : '',
       hasApiKey: !!value.apiKeyEncrypted,
+      autoSyncEnabled: value.autoSyncEnabled !== false,
     }
   }
 
@@ -126,6 +128,7 @@ class KomgaConfigStore {
       version: 1, url,
       libraryId: input.libraryId ?? (url === previous.url ? previous.libraryId : ''),
       libraryName: input.libraryName ?? (url === previous.url ? previous.libraryName : ''),
+      autoSyncEnabled: input.autoSyncEnabled ?? (previous.autoSyncEnabled !== false),
       apiKeyEncrypted: encrypted,
     }
     await fs.mkdir(path.dirname(this.file), { recursive: true })

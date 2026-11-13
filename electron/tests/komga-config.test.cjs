@@ -37,7 +37,7 @@ async function fixture(t) {
 test('Komga secrets persist encrypted and only a saved-key flag returns to the renderer', async t => {
   const { folder, storage, store } = await fixture(t)
   const result = await store.save({ url: 'HTTP://localhost:25600/komga/', apiKey: 'private-key', libraryId: 'lib', libraryName: '书库' })
-  assert.deepEqual(result, { url: 'http://localhost:25600/komga', libraryId: 'lib', libraryName: '书库', hasApiKey: true })
+  assert.deepEqual(result, { url: 'http://localhost:25600/komga', libraryId: 'lib', libraryName: '书库', hasApiKey: true, autoSyncEnabled: true })
   const contents = await fs.readFile(store.file, 'utf8')
   assert.equal(contents.includes('private-key'), false)
   assert.equal(JSON.stringify(await store.get()).includes('private-key'), false)
@@ -80,4 +80,16 @@ test('configuration saves serialize and invalid URL or header inputs are rejecte
   }
   await assert.rejects(store.credentials({ url: 'http://localhost', apiKey: 'key\r\nOther: injected' }), /有效/)
   await assert.rejects(store.credentials({ url: 'http://localhost', clearKey: true }), /清除/)
+})
+
+test('automatic synchronization preference persists independently of encrypted credentials', async t => {
+  const { folder, storage, store } = await fixture(t)
+  await store.save({url:'http://localhost',apiKey:'secret',libraryId:'actual-id',autoSyncEnabled:false})
+  assert.equal((await new KomgaConfigStore(folder, storage).get()).autoSyncEnabled, false)
+  await store.save({url:'http://localhost',libraryName:'保留关闭'})
+  assert.equal((await store.get()).autoSyncEnabled, false)
+  await store.save({url:'http://localhost',autoSyncEnabled:true})
+  assert.equal((await store.get()).autoSyncEnabled, true)
+  assert.equal((await store.connection()).apiKey, 'secret')
+  for (const value of [null, 'yes', 1, {}]) await assert.rejects(store.save({url:'http://localhost',autoSyncEnabled:value}), /选项无效/)
 })

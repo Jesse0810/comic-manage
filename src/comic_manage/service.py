@@ -19,6 +19,7 @@ from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
 from .komga_sync import synchronize
+from .komga_jobs import KomgaJobs, list_jobs, record_approval, record_validated_export, enqueue_export, retry_jobs, run_due
 from .komga_remote import approve_remote, preview_changes, pull_library, resolve_remote
 from .batch_review import BatchReview
 from .packaging import ExportPlan, export_cbz, make_plan
@@ -174,7 +175,7 @@ def _folder_link(path: Path) -> bool:
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
-                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync"})
+                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
@@ -183,6 +184,7 @@ class ComicService:
         self.plans: OrderedDict[str, PreparedExport] = OrderedDict()
         self.imports: OrderedDict[str, PreparedImport] = OrderedDict()
         self.reviews = BatchReview(self.repo, self.progress)
+        self.jobs = KomgaJobs(self.repo)
 
     @staticmethod
     def serialize(comic: Comic) -> dict:
@@ -201,7 +203,22 @@ class ComicService:
         if method == "bootstrap":
             return {"comics": [self.serialize(c) for c in self.repo.all()],
                     "roots": self.repo.setting("roots").splitlines(),
-                    "outputRoot": self.repo.setting("output_root"), "dataDir": str(self.data_dir)}
+                    "outputRoot": self.repo.setting("output_root"), "dataDir": str(self.data_dir),
+                    "autoSyncJobs": list_jobs(self.repo)}
+        if method == "komga_jobs":
+            if params:
+                raise ServiceError("同步任务列表不接受额外参数。")
+            return {"jobs": list_jobs(self.repo)}
+        if method in ("komga_jobs_retry", "komga_jobs_run"):
+            allowed = {"ids", "url", "libraryId"} if method == "komga_jobs_retry" else {"url", "apiKey", "libraryId"}
+            if set(params) - allowed:
+                raise ServiceError("自动同步任务参数无效。")
+            url = _string(params.get("url"), "Komga 地址")
+            library = _string(params.get("libraryId"), "Komga 书库")
+            if method == "komga_jobs_retry":
+                return retry_jobs(self.repo, _strings(params.get("ids"), "任务 id"), url, library, cancel=cancel)
+            return run_due(self.repo, url, _string(params.get("apiKey"), "API Key"), library,
+                           cancel, self.progress, limit=1)
         if method == "source_context":
             comic = self.repo.get(_string(params.get("id"), "id"))
             return {"kind": comic.kind, "remote": comic.remote}
@@ -530,6 +547,7 @@ class ComicService:
             snapshot = inspect_source(Path(comic.source))
             check_cancel(cancel)
             self.repo.approve(identity, snapshot)
+            record_approval(self.repo, identity)
         return self.serialize(self.repo.get(identity))
 
     def page(self, params: dict, cancel: Event) -> dict:
@@ -591,11 +609,20 @@ class ComicService:
             sum(m.size for m in p.snapshot.pages + p.snapshot.extras) + len(p.xml) for p in plans)}
 
     def export(self, params: dict, cancel: Event) -> dict:
+        if set(params) - {"token", "autoSync"}:
+            raise ServiceError("生成参数无效。")
+        auto_sync = params.get("autoSync")
+        if auto_sync is not None and (not isinstance(auto_sync, dict)
+                or set(auto_sync) != {"url", "libraryId"}):
+            raise ServiceError("自动同步配置无效。")
+        if auto_sync is not None:
+            _string(auto_sync.get("url"), "Komga 地址")
+            _string(auto_sync.get("libraryId"), "Komga 书库")
         token = _string(params.get("token"), "生成计划")
         prepared = self.plans.pop(token, None)
         if prepared is None or time.monotonic() - prepared.created_at > PLAN_TTL_SECONDS:
             raise ServiceError("生成计划已失效，请重新预览并确认。", "INVALID_PLAN")
-        completed, errors = [], []
+        completed, errors, auto_sync_errors = [], [], []
         try:
             fresh = []
             for previous in prepared.plans:
@@ -608,16 +635,25 @@ class ComicService:
             for plan in fresh:
                 check_cancel(cancel)
                 try:
-                    report = export_cbz(plan, cancel=cancel, progress=self.progress)
+                    report = export_cbz(plan, cancel=cancel, progress=self.progress, verify_images=bool(auto_sync))
                     self.repo.mark_packaged(plan.comic.id, plan.destination, report)
                     completed.append(str(plan.destination))
+                    try:
+                        record_validated_export(self.repo, plan.comic.id, prepared.output_root)
+                        if auto_sync:
+                            enqueue_export(self.repo, plan.comic.id, prepared.output_root,
+                                           auto_sync["url"], auto_sync["libraryId"], cancel=cancel)
+                    except Cancelled:
+                        raise
+                    except Exception as exc:
+                        auto_sync_errors.append(f"{plan.destination}: CBZ 已生成，但未能加入 Komga 同步任务：{exc}")
                 except Cancelled:
                     raise
                 except Exception as exc:
                     errors.append(f"{plan.comic.source}: {exc}")
         except Cancelled:
-            return {"completed": completed, "errors": errors, "cancelled": True}
-        return {"completed": completed, "errors": errors, "cancelled": False}
+            return {"completed": completed, "errors": errors, "autoSyncErrors": auto_sync_errors, "cancelled": True}
+        return {"completed": completed, "errors": errors, "autoSyncErrors": auto_sync_errors, "cancelled": False}
 
 
 def error_payload(exc: Exception) -> dict:

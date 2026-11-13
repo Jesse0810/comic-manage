@@ -1,1 +1,1 @@
-# Electron file service uses only Python's standard library.
+Pillow==13.0.0

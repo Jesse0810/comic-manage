@@ -311,6 +311,7 @@ async function run() {
   assert.equal((await fs.readFile(path.join(dataDir, 'komga-connection.json'), 'utf8')).includes(syntheticKey), false)
   const savedConnection = await evaluate('window.comic.komgaConfig()')
   assert.equal(savedConnection.hasApiKey, true)
+  assert.equal(savedConnection.autoSyncEnabled, true)
   assert.equal(JSON.stringify(savedConnection).includes(syntheticKey), false)
   await capture('ComicManage-Komga-result.png')
   await click('完成')
@@ -328,6 +329,49 @@ async function run() {
   for (const tag of ['Series','Number','Count','LocalizedSeries','BlackAndWhite']) assert.equal(oneShotXml.includes('<'+tag+'>'), false, tag)
   assert.ok(oneShotXml.includes('<Volume>3</Volume>'))
   catalog = await call('bootstrap')
+
+  const indexedOneShot = catalog.comics.find(book => book.id === secondId)
+  const automaticJob = catalog.autoSyncJobs.find(job => job.comicId === secondId)
+  assert.ok(automaticJob && automaticJob.status === 'PendingIndex')
+  assert.equal(automaticJob.libraryId, 'test-library')
+  assert.equal(automaticJob.relativePath, '_oneshots/' + path.basename(indexedOneShot.output))
+  const automaticBook = {
+    id:'automatic-book', libraryId:'test-library', seriesId:'automatic-series', oneshot:true,
+    name:path.basename(indexedOneShot.output, '.cbz'), url:'/remote/library/' + automaticJob.relativePath,
+    media:{pagesCount:1}, readProgress:{page:1,completed:false},
+    metadata:{title:indexedOneShot.metadata.title,number:'1',numberSort:1,
+      summary:'已从 CBZ 读取的简介',authors:[{name:'CBZ 作者',role:'writer'}],tags:['CBZ 标签'],
+      notableEntities:[{kind:'character',name:'待清理的旧角色'},{kind:'team',name:'第三方队伍'}],
+      notableEntitiesLock:false,links:[]},
+  }
+  komgaFixture.books.set('automatic-book',structuredClone(automaticBook))
+  const automaticSeries={id:'automatic-series',libraryId:'test-library',oneshot:true,booksCount:1,
+    url:automaticBook.url,metadata:{title:indexedOneShot.metadata.title,ageRating:0,genres:['漫画'],language:'ja',alternateTitles:[]}}
+  komgaFixture.series.set('automatic-series',structuredClone(automaticSeries))
+  const beforeAutomatic=komgaFixture.patches.length
+  await toggle('komga-settings')
+  await waitFor("document.querySelector('[data-testid=komga-auto-sync]')?.getAttribute('aria-checked') === 'true' || document.querySelector('[data-testid=komga-auto-sync] input')?.checked === true",'automatic synchronization enabled')
+  await toggle('komga-auto-jobs')
+  await waitFor("!!document.querySelector('[data-testid=komga-auto-jobs-table]')",'durable automatic task list')
+  await call('komga_jobs_retry',{ids:[automaticJob.id]})
+  await waitFor(`document.querySelector('[data-testid=komga-auto-jobs-table]')?.textContent.includes('已同步')`,'automatic scheduled entity synchronization',45000)
+  const automaticPatches=komgaFixture.patches.slice(beforeAutomatic)
+  assert.deepEqual(automaticPatches.map(item=>[item.kind,item.id,Object.keys(item.body).sort()]),[['books','automatic-book',['notableEntities','notableEntitiesLock']]])
+  const finalAutomatic=structuredClone(komgaFixture.books.get('automatic-book'))
+  assert.equal(finalAutomatic.metadata.notableEntitiesLock,true)
+  assert.ok(finalAutomatic.metadata.notableEntities.some(item=>item.kind==='team'&&item.name==='第三方队伍'))
+  assert.equal(finalAutomatic.metadata.notableEntities.some(item=>item.name==='待清理的旧角色'),false)
+  delete finalAutomatic.metadata.notableEntities; delete finalAutomatic.metadata.notableEntitiesLock
+  const unchangedNative=structuredClone(automaticBook)
+  delete unchangedNative.metadata.notableEntities; delete unchangedNative.metadata.notableEntitiesLock
+  assert.deepEqual(finalAutomatic,unchangedNative)
+  assert.deepEqual(komgaFixture.series.get('automatic-series'),automaticSeries)
+  await capture('ComicManage-automatic-sync-jobs.png')
+  await click('关闭')
+  await waitFor("!document.querySelector('[data-testid=komga-auto-jobs-table]')",'automatic task dialog closed')
+  await evaluate(`window.comic.saveKomgaConfig({url:${JSON.stringify(komgaFixture.url)},autoSyncEnabled:false})`)
+  assert.equal((await evaluate('window.comic.komgaConfig()')).autoSyncEnabled,false)
+  komgaFixture.books.delete('automatic-book');komgaFixture.series.delete('automatic-series')
 
   await evaluate("[...document.querySelectorAll('.table-area .el-table__header .el-checkbox')].find(item=>item.getClientRects().length).click()")
   await waitFor("document.querySelector('.selected-count')?.textContent.includes('2')", 'two comics checked')
@@ -658,7 +702,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

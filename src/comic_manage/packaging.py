@@ -96,7 +96,7 @@ def verify_archive(path: Path, expected: dict[str, str], xml: bytes,
 
 
 def export_cbz(plan: ExportPlan, *, cancel: Event | None = None,
-               progress: Callable[[str], None] | None = None) -> dict:
+               progress: Callable[[str], None] | None = None, verify_images: bool = False) -> dict:
     check_cancel(cancel)
     if inspect_source(plan.snapshot.path).fingerprint != plan.snapshot.fingerprint:
         raise ValueError("源文件在预览后发生变化，请重新扫描并审核。")
@@ -137,6 +137,9 @@ def export_cbz(plan: ExportPlan, *, cancel: Event | None = None,
         if progress:
             progress(f"正在逐文件校验 · {plan.comic.metadata.display_title}")
         report = verify_archive(temporary, expected, plan.xml, cancel)
+        if verify_images:
+            from .image_validation import verify_page_images
+            verify_page_images(temporary, cancel)
         if inspect_source(plan.snapshot.path).fingerprint != plan.snapshot.fingerprint:
             raise ValueError("源文件在生成期间发生变化，已放弃此次成品。请重新扫描。")
         check_cancel(cancel)

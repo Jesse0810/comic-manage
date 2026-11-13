@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 import socket
 from threading import Event
@@ -15,9 +17,11 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 class KomgaError(ValueError):
-    def __init__(self, message: str, code: str = "KOMGA_ERROR"):
+    def __init__(self, message: str, code: str = "KOMGA_ERROR", *, http_status: int | None = None, retry_after: float | None = None):
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
+        self.retry_after = retry_after
 
 
 def normalize_url(value: str) -> str:
@@ -42,6 +46,25 @@ def normalize_url(value: str) -> str:
         raise KomgaError("Komga 地址须为 HTTP(S)，且不包含用户名、密码、查询参数或片段。") from None
     path = quote(parsed.path.rstrip("/"), safe="/%:@!$&'()*+,;=-._~")
     return urlunsplit((parsed.scheme.lower(), host, path, "", ""))
+
+
+def _retry_after(value: str | None) -> float | None:
+    """Read only the safe scheduling hint; never expose remote error bodies."""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+        if seconds >= 0 and seconds < float("inf"):
+            return seconds
+    except (ValueError, TypeError):
+        pass
+    try:
+        target = parsedate_to_datetime(value)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -91,16 +114,22 @@ class KomgaClient:
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
                 return raw, content_type
         except HTTPError as error:
+            status = error.code
+            retry_after = _retry_after(error.headers.get("Retry-After")) if error.headers else None
             error.close()
             if error.code == 401:
-                raise KomgaError("Komga API Key 无效或已失效，请重新配置。", "KOMGA_AUTH") from None
+                raise KomgaError("Komga API Key 无效或已失效，请重新配置。", "KOMGA_AUTH", http_status=status) from None
             if error.code == 403:
-                raise KomgaError("当前 Komga API Key 缺少操作权限，请使用管理员凭据。", "KOMGA_FORBIDDEN") from None
+                raise KomgaError("当前 Komga API Key 缺少操作权限，请使用管理员凭据。", "KOMGA_FORBIDDEN", http_status=status) from None
             if 300 <= error.code < 400:
-                raise KomgaError("Komga 返回了重定向，请在设置中填写最终地址。", "KOMGA_REDIRECT") from None
+                raise KomgaError("Komga 返回了重定向，请在设置中填写最终地址。", "KOMGA_REDIRECT", http_status=status) from None
             if error.code == 404:
-                raise KomgaError("Komga API 路径不存在，请检查服务器地址和部署前缀。", "KOMGA_NOT_FOUND") from None
-            raise KomgaError(f"Komga 请求失败（HTTP {error.code}）。", "KOMGA_HTTP") from None
+                raise KomgaError("Komga API 路径不存在，请检查服务器地址和部署前缀。", "KOMGA_NOT_FOUND", http_status=status) from None
+            if status == 429:
+                raise KomgaError("Komga 请求过于频繁，将按服务器提示稍后重试。", "KOMGA_RATE_LIMIT", http_status=status, retry_after=retry_after) from None
+            if status >= 500:
+                raise KomgaError(f"Komga 服务暂时不可用（HTTP {status}）。", "KOMGA_HTTP", http_status=status, retry_after=retry_after) from None
+            raise KomgaError(f"Komga 请求失败（HTTP {status}）。", "KOMGA_HTTP", http_status=status) from None
         except (TimeoutError, socket.timeout):
             raise KomgaError("连接 Komga 超时，请检查地址和网络后重试。", "KOMGA_NETWORK") from None
         except (URLError, OSError, HTTPException):

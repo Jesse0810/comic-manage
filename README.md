@@ -6,7 +6,7 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 ## Windows 便携版
 
-解压 `ComicManage-Electron-1.10.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
+解压 `ComicManage-Electron-1.11.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
 
 ## 直接整理 Komga 远端书库
 
@@ -36,6 +36,14 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 6. 多选已审核作品，查看生成计划，确认目标路径后生成。
 
 图片不转码，逐图片与附件验证 ZIP CRC 和 SHA-256，校验成功后才发布正式 CBZ。不会覆盖已有目标，不会删除原始图片。修改元数据或扫描到源变化后需要重新审核。
+
+### 生成后自动同步 Komga 实体
+
+在左下角“Komga 连接设置”配置实际书库，并开启“生成后自动同步实体”。新审核记录先等待生成；生成时对临时 CBZ 完成 ZIP、XML 和图片解码校验，再原子发布到所选成品目录并加入持久化任务。请将该目录设为 Komga 监控目录，由 Komga 文件监控或既有扫描流程入库。
+
+软件打开期间会在空闲时自动处理任务；关闭后暂停，再次启动会继续等待入库或重试。优先用完整相对路径加精确 Title 匹配，备用无扩展名文件名加 Title，必须唯一匹配。未入库继续等待，匹配歧义或标题不符需要人工处理；不会猜测 Book，也不自动调用未经配置验证的扫描接口。
+
+自动任务只对账受管 Notable Entities（含角色），保留第三方实体；真实系列如填写了别名则读取并合并别名。写前保存本地备份，写后回读验证，成功后才显示“同步成功”。网络和服务暂时错误延后重试，权限或数据错误停止该任务并显示原因。重试使用已经验证的 CBZ，不会重新打包或删除源图。任务状态与审核、生成状态独立，可在同一连接设置中查看和重新排队。关闭开关时生成的成品，或曾经入队失败的成品，也可勾选任务从现有 CBZ 校验并创建队列，无需重新打包；切换服务器或书库不会将旧任务发往新连接。
 
 当前采用 [漫画资源元数据规范 v1.3](docs/NAS_METADATA.md)。Genre 使用漫画、小说、CG集、画集、设定集、插画集；发行性质、出版形态、发布方式与多值发布平台分别编辑。色彩为黑白、全彩、部分彩色，通过 Tags 与 Komga 实体保存，不再输出 BlackAndWhite。原作单值，角色多值，修正状态仅用于 R18+。新增可选“作品组”和“文字版本”（有文字 / 无文字），通过同名前缀 Tags 与 Book 实体关联独立版本，不伪造 Series 或 Number，也不自动建 Collection。所有新增分类支持只修改勾选字段的批量编辑。独立作品导出到 _oneshots，请将 Komga 的 One-Shots directory 设为 /_oneshots。Number 表示系列内顺序；Volume 仅在来源明确时填写并导出，不从 Number 复制，Komga 需关闭追加卷号到系列标题。
 
@@ -97,13 +105,14 @@ Windows 默认仍使用 `%LOCALAPPDATA%\ComicManage\ComicManage\catalog.sqlite3`
 
 ```powershell
 py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 npm ci
 npm run dev
 ```
 
 也可双击 start.bat，它会检查开发环境、安装依赖、构建并启动 Electron。`npm run dev` 同时启动 Vite 与 Electron，支持界面热更新。
 
-默认使用项目 .venv 的 Python，可通过 `COMIC_MANAGE_PYTHON` 指定完整路径。文件服务只用标准库，不需要 PySide6。
+默认使用项目 .venv 的 Python，可通过 `COMIC_MANAGE_PYTHON` 指定完整路径。文件服务使用 Pillow 检查自动发布页面是否可读，不需要 PySide6。
 
 ```powershell
 npm run build          # Vue 类型检查与生产构建

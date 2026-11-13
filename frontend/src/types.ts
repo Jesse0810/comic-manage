@@ -20,18 +20,29 @@ export interface Comic {
   metadata: Metadata; status: ComicStatus; output: string; warning: string; updated_at: string
   remote?: { serverUrl: string; libraryId: string; libraryName: string; bookId: string; seriesId: string; scope: string; hasLocalChanges: boolean; conflict: boolean; syncedAt?: string; unavailable?: boolean; pendingSync?: boolean; dirtyFields?: string[]; sharedMetadata?: { ageRating?: number | null; genres?: string[]; readingDirection?: string; alternateTitles?: { label: string; title: string }[]; [key: string]: unknown } }
 }
-export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string }
+export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string; autoSyncJobs?: KomgaAutoSyncJob[] }
 export interface ImportCandidate {
   id: string; source: string; kind: 'folder' | 'cbz'; page_count: number; metadata: Metadata
   import_status: 'new' | 'existing' | 'removed'; warning: string
 }
 export interface ImportPreview { token: string; items: ImportCandidate[]; errors: string[]; cancelled?: boolean }
 export interface ImportResult { count: number; skipped: number; errors: string[]; cancelled: boolean; ids: string[] }
-export interface KomgaConfig { url: string; libraryId: string; libraryName: string; hasApiKey: boolean }
+export interface KomgaConfig { url: string; libraryId: string; libraryName: string; hasApiKey: boolean; autoSyncEnabled?: boolean }
 export interface KomgaPullResult { total: number; added: number; updated: number; kept: number; skipped: number; cancelled: boolean; errors: string[]; ids: string[]; scope: string }
 export interface KomgaLibrary { id: string; name: string; root?: string }
 export interface KomgaConnectionInput { url: string; apiKey?: string; clearKey?: boolean }
-export interface KomgaConfigInput extends KomgaConnectionInput { libraryId: string; libraryName: string }
+export interface KomgaConfigInput extends KomgaConnectionInput { libraryId: string; libraryName: string; autoSyncEnabled?: boolean }
+export type KomgaAutoSyncStatus = 'Approved' | 'Packaging' | 'Validated' | 'PendingIndex' | 'PendingSync' | 'Synced' | 'RetryableFailure' | 'NeedsManualReview' | 'PermanentFailure'
+export interface KomgaAutoSyncJob {
+  id: string; comicId: string; title: string; status: KomgaAutoSyncStatus
+  outputPath: string; relativePath: string; serverUrl: string; libraryId: string; bookId: string; seriesId: string
+  attempts: number; lastError: string; nextAttemptAt: string; syncedAt: string; updatedAt: string; metadataVersion: string; canRetry: boolean
+}
+export interface KomgaAutoSyncJobs { jobs: KomgaAutoSyncJob[] }
+export const komgaAutoSyncLabels: Record<KomgaAutoSyncStatus, string> = {
+  Approved: '已审核 · 等待生成', Packaging: '正在生成', Validated: '成品已校验', PendingIndex: '等待 Komga 入库',
+  PendingSync: '等待同步实体', Synced: '已同步', RetryableFailure: '稍后自动重试', NeedsManualReview: '需要人工核对', PermanentFailure: '需要修复配置或资料',
+}
 export type KomgaSyncStatus = 'success' | 'skipped' | 'failed'
 export interface KomgaSyncItem { id: string; title: string; status: KomgaSyncStatus; message: string; bookId?: string; changed?: boolean; warnings?: string[] }
 export interface KomgaSyncResult {

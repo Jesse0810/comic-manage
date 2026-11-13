@@ -10,8 +10,9 @@ import BatchReviewDialog from './components/BatchReviewDialog.vue'
 import BatchReviewResultDialog from './components/BatchReviewResultDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult } from './types'
-import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres, versionLabels } from './types'
+import KomgaJobsDialog from './components/KomgaJobsDialog.vue'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs } from './types'
+import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres, versionLabels, komgaAutoSyncLabels } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
@@ -51,6 +52,17 @@ const settingsVisible = ref(false)
 const komgaSettingsVisible = ref(false)
 const komgaResultVisible = ref(false)
 const komgaResult = ref<KomgaSyncResult | null>(null)
+const autoSyncJobs = ref<KomgaAutoSyncJob[]>([])
+const komgaJobsVisible = ref(false)
+const autoSyncPendingCount = computed(() => autoSyncJobs.value.filter(job => job.status !== 'Synced' && (job.status !== 'Approved' || job.canRetry)).length)
+const autoSyncByComic = computed(() => {
+  const latest = new Map<string, KomgaAutoSyncJob>()
+  for (const job of autoSyncJobs.value) {
+    const previous = latest.get(job.comicId)
+    if (!previous || (Date.parse(job.updatedAt) || 0) > (Date.parse(previous.updatedAt) || 0)) latest.set(job.comicId, job)
+  }
+  return latest
+})
 const pendingSyncIds = ref<string[]>([])
 const pendingReviewIds = ref<string[]>([])
 const pendingPull = ref(false)
@@ -129,12 +141,23 @@ async function refresh(preferId = selectedId.value) {
   const data = await invoke<Bootstrap>('bootstrap')
   komgaScope.value = data.komgaScope || ''
   komgaLibraryName.value = data.komgaLibraryName || ''
+  autoSyncJobs.value = data.autoSyncJobs || []
   comics.value = data.comics
   roots.value = data.roots
   outputRoot.value = data.outputRoot
   dataDir.value = data.dataDir
   selectedIds.value = selectedIds.value.filter(id => comics.value.some(c => c.id === id && canEditComic(c)))
   selectData(comics.value.find(c => c.id === preferId) || null)
+}
+
+async function refreshAutoSyncJobs() {
+  if (!available.value) return
+  try { autoSyncJobs.value = (await invoke<KomgaAutoSyncJobs>('komga_jobs', {})).jobs }
+  catch { /* A background status refresh must not interrupt editing. */ }
+}
+function autoSyncLabel(comic: Comic) {
+  const job = autoSyncByComic.value.get(comic.id)
+  return job ? job.status === 'Approved' && job.canRetry ? '成品已生成 · 待创建任务' : komgaAutoSyncLabels[job.status] || job.status : ''
 }
 
 function showResult(title: string, summary: string, details: string[] | string = '') {
@@ -326,7 +349,12 @@ async function confirmExport() {
   const token = plan.value.token
   planVisible.value = false
   await runTask('生成并校验 CBZ', () => invoke('export', { token }), (result: any) => {
-    showResult(result.cancelled ? '生成已取消' : '生成完成', `${result.completed.length} 本已生成并通过校验，${result.errors.length} 本失败。全部源文件已保留。`, [...result.errors, ...result.completed])
+    const paths = new Set<string>((result.completed || []).map((path: string) => path.replace(/\\/g, '/')))
+    const queued = autoSyncJobs.value.filter(job => job.outputPath && paths.has(job.outputPath.replace(/\\/g, '/')))
+    const autoSyncErrors: string[] = Array.isArray(result.autoSyncErrors) ? result.autoSyncErrors : []
+    const syncSummary = queued.length ? ' Komga 实体同步状态单独保存，可在左下角“Komga 连接设置”的“同步任务”查看；成品生成完成不代表服务器已同步。' : ''
+    const syncWarning = autoSyncErrors.length ? ` 自动同步有 ${autoSyncErrors.length} 项问题，相关任务未能创建；已生成并通过校验的成品仍然有效。请查看原因，修复后重试同步，无需重新打包。` : ''
+    showResult(result.cancelled ? '生成已取消' : '生成完成', `${result.completed.length} 本已生成并通过校验，${result.errors.length} 本生成失败。全部源文件已保留。${syncWarning}${syncSummary}`, [...result.errors, ...autoSyncErrors.map(reason => `自动同步任务：${reason}`), ...result.completed])
   })
   plan.value = null
 }
@@ -356,6 +384,13 @@ async function openKomgaSettings() {
   pendingSyncIds.value = []
   pendingPull.value = true
   komgaSettingsVisible.value = true
+}
+
+function openKomgaJobs() {
+  if (disabled.value) return
+  pendingReviewIds.value = []; pendingSyncIds.value = []; pendingPull.value = false
+  komgaSettingsVisible.value = false
+  komgaJobsVisible.value = true
 }
 
 async function executeKomgaSync(ids: string[]) {
@@ -558,6 +593,10 @@ onMounted(async () => {
   }
   unsubscribe = window.comic.onEvent((event, data) => {
     if (event === 'task-progress') taskMessage.value = data.message
+    if (event === 'komga-jobs-updated') {
+      if (Array.isArray(data?.jobs)) autoSyncJobs.value = data.jobs
+      else void refreshAutoSyncJobs()
+    }
     if (event === 'close-request') closeRequested()
     if (event === 'service-exit') {
       available.value = false
@@ -578,7 +617,7 @@ onBeforeUnmount(() => unsubscribe?.())
       <div class="workspace-label">我的工作区</div>
       <nav class="navigation"><button v-for="item in navigation" :key="item.key" :class="{ active: section === item.key }" @click="section = item.key"><el-icon :size="18"><component :is="item.icon" /></el-icon><span>{{ item.title }}</span><b>{{ counts[item.key] }}</b></button></nav>
       <div class="sidebar-note"><div class="sidebar-note-icon"><el-icon><Lock /></el-icon></div><div><strong>原图保留，资料有序</strong><p>审核后生成成品，<br />可同步资料到你的 Komga。</p></div></div>
-      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
+      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
     </aside>
 
     <main class="workspace">
@@ -595,7 +634,7 @@ onBeforeUnmount(() => unsubscribe?.())
           <div class="table-area" v-loading="loading">
             <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
               <el-table-column type="selection" width="43" :reserve-selection="true" :selectable="(comic: Comic) => !disabled && canEditComic(comic)" />
-              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'komga' ? Connection : scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><div v-if="versionLabels(scope.row.metadata).length" class="version-badges" data-testid="book-version-labels"><span v-for="label in versionLabels(scope.row.metadata)" :key="label" :title="label">{{ label }}</span></div><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else-if="scope.row.kind !== 'komga'" class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span><span v-if="scope.row.kind === 'komga'" class="comic-source remote-source-label" :title="scope.row.remote?.serverUrl">Komga · {{ scope.row.remote?.libraryName || '远端书库' }}{{ !canEditComic(scope.row) ? ' · 只读缓存' : scope.row.remote?.conflict ? ' · 存在冲突' : (scope.row.remote?.hasLocalChanges || scope.row.remote?.pendingSync) ? ' · 待同步' : '' }}</span></div></div></template></el-table-column>
+              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'komga' ? Connection : scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><div v-if="versionLabels(scope.row.metadata).length" class="version-badges" data-testid="book-version-labels"><span v-for="label in versionLabels(scope.row.metadata)" :key="label" :title="label">{{ label }}</span></div><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else-if="scope.row.kind !== 'komga'" class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span><span v-if="scope.row.kind !== 'komga' && autoSyncLabel(scope.row)" class="comic-auto-sync-label" data-testid="comic-auto-sync-status">Komga · {{ autoSyncLabel(scope.row) }}</span><span v-if="scope.row.kind === 'komga'" class="comic-source remote-source-label" :title="scope.row.remote?.serverUrl">Komga · {{ scope.row.remote?.libraryName || '远端书库' }}{{ !canEditComic(scope.row) ? ' · 只读缓存' : scope.row.remote?.conflict ? ' · 存在冲突' : (scope.row.remote?.hasLocalChanges || scope.row.remote?.pendingSync) ? ' · 待同步' : '' }}</span></div></div></template></el-table-column>
               <el-table-column label="作者" min-width="105" show-overflow-tooltip><template #default="scope"><span :class="{ 'muted-text': !scope.row.metadata.authors.length }">{{ scope.row.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
               <el-table-column label="页数" width="60" align="center"><template #default="scope"><span class="page-count">{{ scope.row.page_count }}</span></template></el-table-column>
               <el-table-column label="状态" width="92"><template #default="scope"><span class="status-pill" :class="scope.row.status">{{ statusLabels[scope.row.status as ComicStatus] }}</span></template></el-table-column>
@@ -613,7 +652,8 @@ onBeforeUnmount(() => unsubscribe?.())
       <footer class="workspace-footnote"><span class="connection-dot" :class="{ offline: !available }"></span><span>{{ available ? '本机资料库已连接' : '本机服务不可用' }}</span><span class="footnote-divider">/</span><span>原图保留 · 人工审核 · 无损打包</span><span v-if="dirty" class="unsaved-note">当前作品有未保存修改</span></footer>
     </main>
 
-    <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-review="pendingReviewIds.length > 0" :continue-sync="pendingSyncIds.length > 0" :continue-pull="pendingPull" @state="dialogTask" @saved="komgaConfigured" />
+    <KomgaSettingsDialog v-model="komgaSettingsVisible" :jobs="autoSyncJobs" :continue-review="pendingReviewIds.length > 0" :continue-sync="pendingSyncIds.length > 0" :continue-pull="pendingPull" @state="dialogTask" @saved="komgaConfigured" @jobs="openKomgaJobs" />
+    <KomgaJobsDialog v-model="komgaJobsVisible" :jobs="autoSyncJobs" @updated="autoSyncJobs = $event" @state="dialogTask" />
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <BatchReviewDialog v-model="reviewPlanVisible" :plan="reviewPlan" :busy="disabled" @confirm="commitReviewSync" />
     <BatchReviewResultDialog v-model="reviewResultVisible" :result="reviewResult" :error="reviewError" />
@@ -634,6 +674,8 @@ onBeforeUnmount(() => unsubscribe?.())
 .remote-source-label { color: #5f8c86 !important; }
 .remote-output-info .output-copy > span:last-child { color: #6c8676; font-size: 11px; }
 .comic-file-icon.komga { color: #5b8d87; background: #edf6f3; }
+.comic-auto-sync-label { color: #64856d; font-size: 10px; line-height: 1.6; margin-top: 4px; }
+.sidebar-job-count { margin-left: auto; min-width: 19px; padding: 1px 5px; border-radius: 6px; font-size: 10px; background: #365e4d; color: #d4e8d6; }
 .library-batch-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px 12px; }
 .version-badges { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .version-badges > span { max-width: 100%; padding: 1px 5px; border: 1px solid #dfe8d7; border-radius: 4px; background: #f2f7ed; color: #6d8662; font-size: 10px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

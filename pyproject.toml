@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-manage"
-version = "1.10.0"
-description = "Windows 本地漫画整理与 Kavita CBZ 元数据编辑器"
+version = "1.11.0"
+description = "Windows 本地漫画整理与 Komga 元数据编辑器"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["Pillow==13.0.0"]
 
 [project.optional-dependencies]
 build = ["PyInstaller==6.19.0"]

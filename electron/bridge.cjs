@@ -6,8 +6,8 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync'])
-const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
@@ -74,7 +74,9 @@ function validateCall(method, params) {
   if (['import', 'prepare_import'].includes(method)) strings('paths')
   if (method === 'browse_folders') string('path')
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
-  if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync', 'prepare_review_sync'].includes(method)) strings('ids')
+  if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync', 'prepare_review_sync', 'komga_jobs_retry'].includes(method)) strings('ids')
+  if (method === 'komga_jobs' && Object.keys(params).length) throw new Error('同步任务列表不接受额外参数。')
+  if (method === 'komga_jobs_retry' && (!params.ids.length || Object.keys(params).some(key => !['ids', 'url', 'libraryId'].includes(key)))) throw new Error('重试任务参数无效。')
   if (method === 'prepare_review_sync' && !params.ids.length) throw new Error('请勾选要批量审核的作品。')
   if (method === 'commit_review_sync') string('token')
   if (method === 'source_context' && Object.keys(params).some(key => key !== 'id')) throw new Error('作品来源参数无效。')
@@ -107,6 +109,15 @@ function validateCall(method, params) {
   if (method === 'batch_edit') validateBatchEdit(params.changes)
   if (method === 'plan') { strings('ids'); string('outputRoot') }
   if (method === 'export') string('token')
+  if (method === 'export' && params.autoSync !== undefined) {
+    if (!params.autoSync || typeof params.autoSync !== 'object' || Array.isArray(params.autoSync)
+        || Object.keys(params.autoSync).sort().join(',') !== 'libraryId,url'
+        || ['url', 'libraryId'].some(key => typeof params.autoSync[key] !== 'string' || !params.autoSync[key].trim() || params.autoSync[key].length > 8192 || /[\r\n\0]/.test(params.autoSync[key]))) throw new Error('自动同步配置无效。')
+  }
+  if (method === 'komga_jobs_run') {
+    if (Object.keys(params).sort().join(',') !== 'apiKey,libraryId,url'
+        || ['url', 'apiKey', 'libraryId'].some(key => typeof params[key] !== 'string' || !params[key].trim() || params[key].length > 8192 || /[\r\n\0]/.test(params[key]))) throw new Error('自动同步连接参数无效。')
+  }
   if (['set_output', 'backup', 'export_komga'].includes(method)) string('path')
 }
 

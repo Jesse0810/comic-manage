@@ -52,11 +52,13 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
   const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
   let requestQueue = Promise.resolve()
+  let pendingServiceRequests = 0
   const callService = (method, params = {}) => {
     if (method === 'cancel') return bridge.call(method, params)
+    pendingServiceRequests += 1
     const request = requestQueue.then(() => bridge.call(method, params))
     requestQueue = request.catch(() => {})
-    return request
+    return request.finally(() => { pendingServiceRequests -= 1 })
   }
   const window = new BrowserWindow({
     width: 1500, height: 980, minWidth: 1120, minHeight: 740,
@@ -68,7 +70,32 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   })
   let windowState = { dirty: false, busy: false }
   let allowClose = false
-  const send = (event, data) => { if (!window.isDestroyed()) window.webContents.send('comic:event', event, data) }
+  let automaticRunning = false
+  let automaticTickPending = false
+  const send = (event, data) => {
+    if (automaticRunning && ['progress', 'task-progress'].includes(event)) return
+    if (!window.isDestroyed()) window.webContents.send('comic:event', event, data)
+  }
+  const automaticTick = async () => {
+    if (window.isDestroyed() || automaticTickPending || pendingServiceRequests || windowState.busy || windowState.dirty) return
+    automaticTickPending = true
+    try {
+      const config = await komgaConfig.get()
+      if (!config.autoSyncEnabled || !config.hasApiKey || !config.libraryId || !config.url) return
+      const connection = await komgaConfig.connection()
+      if (window.isDestroyed() || pendingServiceRequests || windowState.busy || windowState.dirty) return
+      automaticRunning = true
+      const result = await callService('komga_jobs_run', connection)
+      if (result.processed) send('komga-jobs-updated', { jobs: result.jobs })
+    } catch {
+      // Task errors are persisted by the service. Configuration errors remain in settings.
+    } finally {
+      automaticRunning = false
+      automaticTickPending = false
+    }
+  }
+  const automaticTimer = setInterval(automaticTick, 20000)
+  automaticTimer.unref()
   bridge.on('event', send)
   const trusted = event => {
     const expected = devURL || 'comic://ui/'
@@ -81,7 +108,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args) })
   }
   handle('comic:call', async (method, params = {}) => {
-    if (['komga_test', 'source_context'].includes(method)) throw new Error('此操作只允许主进程调用。')
+    if (['komga_test', 'source_context', 'komga_jobs_run'].includes(method)) throw new Error('此操作只允许主进程调用。')
     validateCall(method, params)
     if (method === 'bootstrap') {
       const result = await callService(method, params)
@@ -98,6 +125,32 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     if (method === 'komga_pull') {
       if (Object.keys(params).length) throw new Error('请使用当前配置的 Komga 书库。')
       return callService(method, await komgaConfig.connection())
+    }
+    if (method === 'komga_jobs') {
+      if (Object.keys(params).length) throw new Error('同步任务列表不接受额外参数。')
+      return callService(method, {})
+    }
+    if (method === 'komga_jobs_retry') {
+      if (Object.keys(params).some(key => key !== 'ids')) throw new Error('重试只接受选中的同步任务。')
+      const config = await komgaConfig.get()
+      if (!config.url || !config.libraryId) throw new Error('请先配置 Komga 服务器和书库。')
+      const result = await callService(method, { ids: params.ids, url: normalizeKomgaUrl(config.url), libraryId: config.libraryId })
+      send('komga-jobs-updated', { jobs: result.jobs })
+      return result
+    }
+    if (method === 'export') {
+      if (Object.keys(params).some(key => key !== 'token')) throw new Error('生成只接受已确认的计划。')
+      let autoSync
+      let configError = false
+      try {
+        const config = await komgaConfig.get()
+        autoSync = config.autoSyncEnabled && config.url && config.libraryId && config.hasApiKey
+          ? { url: normalizeKomgaUrl(config.url), libraryId: config.libraryId } : undefined
+      } catch { configError = true }
+      const result = await callService(method, { token: params.token, ...(autoSync ? { autoSync } : {}) })
+      if (configError) result.autoSyncErrors = [...(result.autoSyncErrors || []), 'CBZ 生成结果独立保留；无法读取 Komga 配置，自动同步未入队，请检查左下角连接设置。']
+      send('komga-jobs-updated', {})
+      return result
     }
     if (method === 'komga_resolve') {
       if (Object.keys(params).some(key => !['id', 'resolution'].includes(key))) throw new Error('冲突处理参数无效。')
@@ -120,7 +173,9 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       if (Object.keys(params).some(key => key !== 'ids')) throw new Error('同步只接受选中的作品。')
       return callService(method, { ...params, ...await komgaConfig.connection() })
     }
-    return callService(method, params)
+    const result = await callService(method, params)
+    if (['save', 'approve', 'batch_edit', 'remove'].includes(method)) send('komga-jobs-updated', {})
+    return result
   })
   handle('comic:komga-config', () => komgaConfig.get())
   handle('comic:save-komga-config', input => komgaConfig.save(input))
@@ -189,7 +244,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   window.on('close', event => {
     if (!allowClose && (windowState.dirty || windowState.busy)) { event.preventDefault(); send('close-request', {}) }
   })
-  window.on('closed', () => { ipcMain.removeListener('comic:window-state', stateListener) })
+  window.on('closed', () => { clearInterval(automaticTimer); ipcMain.removeListener('comic:window-state', stateListener) })
   window.once('ready-to-show', () => { if (show) window.show() })
   await window.loadURL(devURL || 'comic://ui/index.html')
   return { window, bridge, dataDir }

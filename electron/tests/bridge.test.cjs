@@ -126,6 +126,8 @@ async function mainProcessFixture(options = {}) {
   const externalUrls = []
   const localPaths = []
   const statPaths = []
+  const intervals = []
+  const sentEvents = []
   let connectionCalls = 0
   const ipcMain = new EventEmitter()
   ipcMain.removeHandler = channel => handlers.delete(channel)
@@ -136,6 +138,7 @@ async function mainProcessFixture(options = {}) {
       calls.push({method, params})
       if (method === 'bootstrap') return {comics:options.comics || [], roots:[], outputRoot:'', dataDir:'fixture-data'}
       if (method === 'source_context') return options.contexts?.[params.id] || {kind:'folder'}
+      if (options.respond) return options.respond(method, params)
       return {accepted:true}
     }
   }
@@ -158,7 +161,7 @@ async function mainProcessFixture(options = {}) {
       this.webContents.mainFrame = {url:'comic://ui/index.html'}
       this.webContents.session = {setPermissionRequestHandler() {}}
       this.webContents.setWindowOpenHandler = () => {}
-      this.webContents.send = () => {}
+      this.webContents.send = (...args) => sentEvents.push(args)
     }
     isDestroyed() { return false }
     async loadURL() {}
@@ -187,11 +190,15 @@ async function mainProcessFixture(options = {}) {
   vm.runInNewContext(source, {
     module, require:fakeRequire, __dirname:path.resolve(__dirname, '..'),
     process:{env:{}, resourcesPath:'fixture-resources'},
+    setInterval: callback => { intervals.push(callback); return {unref() {}} },
+    clearInterval() {},
   }, {filename:'main.cjs'})
   const desktop = await module.exports.createApplication({dataDir:'fixture-data', show:false})
   const event = {sender:desktop.window.webContents, senderFrame:desktop.window.webContents.mainFrame}
   return {
-    calls, credentials, config, externalUrls, localPaths, statPaths, connectionCalls:() => connectionCalls,
+    calls, credentials, config, externalUrls, localPaths, statPaths, sentEvents, tick:() => intervals[0](),
+    windowState: state => ipcMain.emit('comic:window-state', event, state),
+    connectionCalls:() => connectionCalls,
     invoke: (channel, ...args) => handlers.get(channel)(event, ...args),
   }
 }
@@ -657,4 +664,56 @@ test('malformed stdout rejects every in-flight request rather than leaving promi
   const invalid = assert.rejects(bridge.call('import', {paths:['malformed']}), /无效数据/)
   await Promise.all([pending, invalid])
   assert.equal(bridge.pending.size, 0)
+})
+
+test('automatic task calls validate scopes and never accept embedded secrets in publication options', () => {
+  for (const [method, params] of [
+    ['komga_jobs', {url:'http://elsewhere'}], ['komga_jobs_retry', {ids:[]}],
+    ['komga_jobs_retry', {ids:['job'],apiKey:'injected'}], ['komga_jobs_run', {}],
+    ['komga_jobs_run', {url:'http://localhost',libraryId:'lib',apiKey:'bad\nkey'}],
+    ['export', {token:'plan',autoSync:{url:'http://localhost',libraryId:'lib',apiKey:'injected'}}],
+  ]) assert.throws(() => validateCall(method,params))
+  assert.doesNotThrow(() => validateCall('komga_jobs',{}))
+  assert.doesNotThrow(() => validateCall('komga_jobs_retry',{ids:['job']}))
+  assert.doesNotThrow(() => validateCall('export',{token:'plan',autoSync:{url:'http://localhost',libraryId:'lib'}}))
+})
+
+test('publication receives the saved server scope without a key and the renderer cannot drive the worker', async () => {
+  const main = await mainProcessFixture({config:{autoSyncEnabled:true,hasApiKey:true}})
+  await assert.rejects(main.invoke('comic:call','komga_jobs_run',{}),/主进程/)
+  await assert.rejects(main.invoke('comic:call','export',{token:'plan',autoSync:{url:'http://other',libraryId:'lib'}}),/只接受/)
+  await assert.rejects(main.invoke('comic:call','komga_jobs_retry',{ids:['job'],url:'http://other'}),/只接受/)
+  await main.invoke('comic:call','export',{token:'plan'})
+  await main.invoke('comic:call','komga_jobs_retry',{ids:['job']})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls)),[
+    {method:'export',params:{token:'plan',autoSync:{url:main.config.url,libraryId:main.config.libraryId}}},
+    {method:'komga_jobs_retry',params:{ids:['job'],url:main.config.url,libraryId:main.config.libraryId}},
+  ])
+  assert.equal(JSON.stringify(main.calls).includes(main.credentials.apiKey),false)
+  main.config.autoSyncEnabled=false
+  await main.invoke('comic:call','export',{token:'manual-only'})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls.at(-1))),{method:'export',params:{token:'manual-only'}})
+})
+
+test('automatic worker pauses for edits and busy operations and serializes repeated timer ticks', async () => {
+  let complete
+  const main = await mainProcessFixture({config:{autoSyncEnabled:true,hasApiKey:true},respond:()=>new Promise(resolve=>{complete=resolve})})
+  main.windowState({dirty:true})
+  await main.tick()
+  main.windowState({busy:true})
+  await main.tick()
+  assert.equal(main.calls.length,0)
+  main.windowState({dirty:false,busy:false})
+  const first=main.tick()
+  while (!complete) await new Promise(resolve=>setImmediate(resolve))
+  await main.tick()
+  assert.equal(main.calls.length,1)
+  assert.equal(main.calls[0].method,'komga_jobs_run')
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[0].params)),main.credentials)
+  complete({processed:1,jobs:[]})
+  await first
+  assert.equal(main.sentEvents.some(item=>item[1]==='komga-jobs-updated'),true)
+  main.config.autoSyncEnabled=false
+  await main.tick()
+  assert.equal(main.calls.length,1)
 })

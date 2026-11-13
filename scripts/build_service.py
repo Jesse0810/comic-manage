@@ -1,4 +1,4 @@
-"""Bundle the stdlib-only file service. Qt is deliberately absent from this build."""
+"""Bundle the file service and page decoder without Qt."""
 from pathlib import Path
 from importlib.metadata import distribution
 import os
@@ -25,8 +25,12 @@ destination = root / "build" / "service" / "ComicManageService"
 notices = destination / "licenses"
 notices.mkdir(exist_ok=True)
 shutil.copy2(Path(sys.base_prefix) / "LICENSE.txt", notices / "Python-LICENSE.txt")
-dist = distribution("pyinstaller")
-for file in dist.files or []:
-    if "/licenses/" in str(file).replace("\\", "/") and Path(dist.locate_file(file)).is_file():
-        shutil.copy2(dist.locate_file(file), notices / Path(file).name)
+for package in ("pyinstaller", "Pillow"):
+    dist = distribution(package)
+    for file in dist.files or []:
+        if "/licenses/" in str(file).replace("\\", "/") and Path(dist.locate_file(file)).is_file():
+            relative = str(file).replace("\\", "/").split("/licenses/", 1)[1]
+            target = notices / package / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dist.locate_file(file), target)
 print(destination)

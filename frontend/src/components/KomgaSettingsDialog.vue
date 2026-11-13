@@ -1,21 +1,23 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Check, Connection } from '@element-plus/icons-vue'
-import type { KomgaConfig, KomgaConnectionInput, KomgaLibrary } from '../types'
+import type { KomgaConfig, KomgaConnectionInput, KomgaLibrary, KomgaAutoSyncJob } from '../types'
 import { errorMessage } from '../types'
 
-const props = defineProps<{ modelValue: boolean; continueReview?: boolean; continueSync?: boolean; continuePull?: boolean }>()
+const props = defineProps<{ modelValue: boolean; continueReview?: boolean; continueSync?: boolean; continuePull?: boolean; jobs?: KomgaAutoSyncJob[] }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'state', value: { busy: boolean; title: string }): void
   (e: 'saved', value: KomgaConfig): void
+  (e: 'jobs'): void
 }>()
-const emptyConfig = (): KomgaConfig => ({ url: '', libraryId: '', libraryName: '', hasApiKey: false })
+const emptyConfig = (): KomgaConfig => ({ url: '', libraryId: '', libraryName: '', hasApiKey: false, autoSyncEnabled: true })
 const original = ref<KomgaConfig>(emptyConfig())
 const url = ref('')
 const apiKey = ref('')
 const clearKey = ref(false)
 const libraryId = ref('')
+const autoSyncEnabled = ref(true)
 const libraries = ref<KomgaLibrary[]>([])
 const busy = ref(false)
 const action = ref<'load' | 'test' | 'save' | ''>('')
@@ -28,6 +30,7 @@ const connectionChanged = computed(() => urlChanged.value || !!apiKey.value.trim
 const hasKey = computed(() => !clearKey.value && (!!apiKey.value.trim() || (original.value.hasApiKey && !urlChanged.value)))
 const selectedLibrary = computed(() => libraries.value.find(library => library.id === libraryId.value))
 const saveLabel = computed(() => clearKey.value ? '保存并清除密钥' : props.continueReview ? '保存并检查' : props.continueSync ? '保存并同步' : props.continuePull ? '保存并读取书库' : '保存配置')
+const pendingJobs = computed(() => (props.jobs || []).filter(job => job.status !== 'Synced' && (job.status !== 'Approved' || job.canRetry)).length)
 
 function setBusy(value: boolean, nextAction: typeof action.value = '') {
   busy.value = value
@@ -55,6 +58,7 @@ async function load() {
     original.value = config
     url.value = config.url
     libraryId.value = config.libraryId
+    autoSyncEnabled.value = config.autoSyncEnabled !== false
     libraries.value = config.libraryId ? [{ id: config.libraryId, name: config.libraryName || config.libraryId }] : []
   } catch (reason) { if (currentRequest === request) error.value = errorMessage(reason) }
   finally { if (currentRequest === request) setBusy(false) }
@@ -85,7 +89,7 @@ async function save() {
   let saved: KomgaConfig | undefined
   setBusy(true, 'save')
   try {
-    saved = await window.comic.saveKomgaConfig({ ...connectionInput(), libraryId: libraryId.value, libraryName: selectedLibrary.value?.name || '' })
+    saved = await window.comic.saveKomgaConfig({ ...connectionInput(), libraryId: libraryId.value, libraryName: selectedLibrary.value?.name || '', autoSyncEnabled: autoSyncEnabled.value })
     apiKey.value = ''
   } catch (reason) { error.value = errorMessage(reason) }
   finally { setBusy(false) }
@@ -112,9 +116,15 @@ watch(() => props.modelValue, visible => {
       </el-form-item>
       <div class="connection-test"><el-button data-testid="komga-test" :icon="Connection" :loading="action === 'test'" :disabled="busy || clearKey" @click="testConnection">测试连接并读取书库</el-button><span v-if="tested && libraries.length" class="connection-ok" data-testid="komga-test-success">连接成功 · {{ libraries.length }} 个书库</span></div>
       <el-form-item label="目标书库" :required="!clearKey"><el-select data-testid="komga-library" v-model="libraryId" :disabled="busy || clearKey || !libraries.length" placeholder="先测试连接，再选择书库" class="full-width"><el-option v-for="library in libraries" :key="library.id" :label="library.name" :value="library.id" /></el-select><p class="connection-help">可直接读取此书库中的作品，无需逐本本地导入。系列级资料只有选全系列时才会更新。</p></el-form-item>
+      <div class="auto-sync-setting" data-testid="komga-auto-sync-setting">
+        <div class="auto-sync-heading"><strong>生成后自动同步实体</strong><el-switch data-testid="komga-auto-sync" v-model="autoSyncEnabled" aria-label="生成后自动同步实体" /></div>
+        <p class="connection-help">新审核的本地作品生成并校验 CBZ 后，等待 Komga 扫描入库，再自动同步自定义分类和角色。成品目录需位于这个书库的监控目录中。</p>
+        <p class="connection-help">自动任务不改标题、作者等原生资料；这些资料先随 CBZ 导入。现有远端作品仍可编辑、审核并手动同步。</p>
+        <p class="connection-help">任务保存在本机；软件运行时重试，重新启动后继续。关闭开关会暂停自动处理，不会删除任务。</p>
+      </div>
     </el-form>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon data-testid="komga-config-error" />
-    <template #footer><el-button :disabled="busy" @click="emit('update:modelValue', false)">取消</el-button><el-button data-testid="komga-save" type="primary" :icon="Check" :loading="action === 'save'" :disabled="busy" @click="save">{{ saveLabel }}</el-button></template>
+    <template #footer><div class="connection-footer"><el-button data-testid="komga-auto-jobs" :disabled="busy" @click="emit('jobs')">同步任务<span v-if="pendingJobs">（{{ pendingJobs }}）</span></el-button><span class="footer-space"></span><el-button :disabled="busy" @click="emit('update:modelValue', false)">取消</el-button><el-button data-testid="komga-save" type="primary" :icon="Check" :loading="action === 'save'" :disabled="busy" @click="save">{{ saveLabel }}</el-button></div></template>
   </el-dialog>
 </template>
 
@@ -128,4 +138,9 @@ watch(() => props.modelValue, visible => {
 .connection-test { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: -2px 0 18px; }
 .connection-ok { color: #39775d; font-size: 11px; }
 .connection-form :deep(.el-form-item) { margin-bottom: 17px; }
+.auto-sync-setting { margin-top: 4px; border: 1px solid #e1e9de; background: #f6f9f4; border-radius: 10px; padding: 13px 15px; }
+.auto-sync-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #45674f; font-size: 13px; }
+.connection-footer { display: flex; align-items: center; gap: 8px; }
+.connection-footer :deep(.el-button + .el-button) { margin-left: 0; }
+.footer-space { flex: 1; }
 </style>
