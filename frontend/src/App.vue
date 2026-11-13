@@ -402,25 +402,6 @@ async function executeKomgaPull() {
   finally { busy.value = false; cancelling.value = false; taskMessage.value = '' }
 }
 
-async function pullKomga() {
-  if (disabled.value || !await resolveEdits()) return
-  let config: KomgaConfig | undefined
-  busy.value = true
-  taskTitle.value = '准备读取 Komga 书库'
-  taskMessage.value = '正在读取连接配置…'
-  try { config = await window.comic.komgaConfig() }
-  catch (reason) { showError(errorMessage(reason)) }
-  finally { busy.value = false; taskMessage.value = '' }
-  if (!config) return
-  if (!config.url || !config.libraryId || !config.hasApiKey) {
-    pendingSyncIds.value = []
-    pendingPull.value = true
-    komgaSettingsVisible.value = true
-    return
-  }
-  await executeKomgaPull()
-}
-
 async function komgaConfigured(config: KomgaConfig) {
   const ids = [...pendingSyncIds.value]
   const shouldPull = pendingPull.value
@@ -515,7 +496,7 @@ onBeforeUnmount(() => unsubscribe?.())
 
       <div class="work-area">
         <section class="library-panel">
-          <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span><el-button data-testid="komga-pull" :icon="Connection" :disabled="disabled" @click="pullKomga">读取 Komga 书库</el-button></div>
+          <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
           <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
@@ -527,7 +508,7 @@ onBeforeUnmount(() => unsubscribe?.())
               <el-table-column label="页数" width="60" align="center"><template #default="scope"><span class="page-count">{{ scope.row.page_count }}</span></template></el-table-column>
               <el-table-column label="状态" width="92"><template #default="scope"><span class="status-pill" :class="scope.row.status">{{ statusLabels[scope.row.status as ComicStatus] }}</span></template></el-table-column>
             </el-table>
-            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><el-button type="primary" :disabled="disabled" @click="pullKomga">读取 Komga 书库</el-button></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><span class="empty-eyebrow">让你的漫画库井然有序</span><h2>从第一本漫画开始</h2><p>勾选多个本地或 NAS 文件夹，也可以导入已有 CBZ。<br />先预览解析资料，再确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button><button class="empty-import-link" :disabled="disabled" @click="importCbz">或导入已有 CBZ<el-icon><ArrowRight /></el-icon></button></template></div>
+            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><p>请从左下角“Komga 连接设置”读取书库。</p></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><span class="empty-eyebrow">让你的漫画库井然有序</span><h2>从第一本漫画开始</h2><p>勾选多个本地或 NAS 文件夹，也可以导入已有 CBZ。<br />先预览解析资料，再确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button><button class="empty-import-link" :disabled="disabled" @click="importCbz">或导入已有 CBZ<el-icon><ArrowRight /></el-icon></button></template></div>
           </div>
 
           <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
@@ -556,9 +537,8 @@ onBeforeUnmount(() => unsubscribe?.())
 .library-source-bar { display: flex; align-items: center; gap: 10px; padding: 13px 19px 0; }
 .library-source-bar > .el-select { width: 165px; flex-shrink: 0; }
 .library-source-bar > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b9b83; font-size: 11px; }
-.library-source-bar > .el-button { font-size: 12px; }
 .remote-source-label { color: #5f8c86 !important; }
 .remote-output-info .output-copy > span:last-child { color: #6c8676; font-size: 11px; }
 .comic-file-icon.komga { color: #5b8d87; background: #edf6f3; }
-@media (max-width: 1300px) { .library-source-bar { gap: 8px; padding: 12px 14px 0; }.library-source-bar > span { display: none; }.library-source-bar > .el-select { flex: 1; }.library-source-bar > .el-button { flex-shrink: 0; } }
+@media (max-width: 1300px) { .library-source-bar { gap: 8px; padding: 12px 14px 0; }.library-source-bar > span { display: none; }.library-source-bar > .el-select { flex: 1; } }
 </style>

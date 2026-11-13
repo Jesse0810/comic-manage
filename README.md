@@ -6,12 +6,12 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 ## Windows 便携版
 
-解压 `ComicManage-Electron-1.7.0-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
+解压 `ComicManage-Electron-1.7.1-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
 
 ## 直接整理 Komga 远端书库
 
 1. 在侧栏“Komga 连接设置”填写服务器地址和管理员 API Key，测试连接并选择书库。
-2. 点击“读取 Komga 书库”，建立远端作品的本机工作副本。
+2. 在该窗口点击“保存并读取书库”，建立远端作品的本机工作副本。之后重新读取仍从左下角“Komga 连接设置”进入。
 3. 逐本编辑资料，或选中多本打开“批量编辑”，只勾选需要修改的字段；点击“保存草稿”。
 4. 逐本预览页面、核对资料，勾选审核确认并点击“审核通过”。
 5. 选中已审核作品，点击“同步到 Komga”，将修改写回原 Book ID。

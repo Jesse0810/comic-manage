@@ -117,6 +117,8 @@ async function run() {
   }
 
   await waitFor("document.body.innerText.includes('从第一本漫画开始')", 'empty state')
+  assert.equal(await evaluate("document.querySelectorAll('[data-testid=komga-settings]').length"), 1)
+  assert.equal(await evaluate("document.querySelector('[data-testid=komga-pull]')"), null)
   assert.equal(await evaluate('typeof window.require'), 'undefined')
   assert.equal(await evaluate('typeof window.process'), 'undefined')
   assert.equal(await evaluate("window.comic.invoke('arbitrary-shell',{}).then(()=>false,()=>true)"), true)
@@ -412,7 +414,13 @@ async function run() {
     await click('完成')
     await waitFor("!document.querySelector('.komga-sync-result-dialog')", 'remote sync result closed')
   }
-  await toggle('komga-pull')
+  const readKomgaLibrary = async () => {
+    await toggle('komga-settings')
+    await waitFor("document.querySelector('[data-testid=komga-save]')?.disabled === false && document.querySelector('[data-testid=komga-save]')?.textContent.includes('保存并读取书库')", 'sidebar connection ready to read')
+    await toggle('komga-save')
+    await waitFor("!document.querySelector('.komga-settings-dialog')", 'sidebar connection saved')
+  }
+  await readKomgaLibrary()
   await waitFor("document.querySelector('.table-area')?.textContent.includes('云端卷一') && !document.querySelector('.table-disabled')", 'remote library without import')
   catalog = await call('bootstrap')
   const cloudA = catalog.comics.find(book => book.remote?.bookId === 'cloud-a')
@@ -437,7 +445,7 @@ async function run() {
   await click('保存草稿')
   await waitFor("document.querySelector('[data-testid=komga-local-changes]')", 'saved remote draft')
   komgaFixture.books.get('cloud-a').metadata.summary = '服务器上的新简介'
-  await toggle('komga-pull')
+  await readKomgaLibrary()
   await waitFor("!document.querySelector('.table-disabled')", 'refreshed remote library')
   await selectRemote('云端卷一·校订')
   await waitFor("document.querySelector('[data-testid=komga-conflict-actions]')", 'remote conflict keeps draft')
