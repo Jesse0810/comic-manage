@@ -11,7 +11,7 @@ from urllib.parse import quote
 from .komga_payloads import book_payload, series_payload, remote_book_payload, remote_series_payload
 from .komga_client import KomgaClient, KomgaError, path_matches, server_path
 from .metadata import title_key
-from .sources import Cancelled, check_cancel
+from .sources import Cancelled, check_cancel, inspect_source
 from .komga_remote import (SERIES_FIELDS, finalize_sync, require_scope, semantic_snapshot,
                            snapshot_fingerprint, validate_changes)
 
@@ -36,8 +36,24 @@ def _same_path(first: str, second: str) -> bool:
     return first == second
 
 
+def _confirmed_target(comic, book: dict, client: KomgaClient, library_id: str, expected_targets: dict | None) -> dict | None:
+    if expected_targets is None:
+        return None
+    expected = expected_targets.get(comic.id)
+    if (not expected or expected.get("serverUrl") != client.url or expected.get("libraryId") != library_id
+            or book.get("id") != expected.get("bookId") or book.get("seriesId") != expected.get("seriesId")
+            or book.get("libraryId") != library_id or not _same_path(book.get("url", ""), expected.get("path", ""))):
+        raise ValueError("已确认的 Komga 漫画身份、书库、归属或路径发生变化，请重新预览确认。")
+    if (comic.metadata.to_dict() != expected.get("metadata")
+            or any(getattr(comic, field) != expected.get(field) for field in ("kind", "source", "fingerprint", "output"))):
+        raise ValueError("本机资料在确认后发生变化，请重新预览审核。")
+    if comic.kind != "komga" and inspect_source(Path(comic.source)).fingerprint != expected.get("fingerprint"):
+        raise ValueError("源文件在确认后发生变化，请重新扫描并预览审核。")
+    return expected
+
+
 def synchronize(repo, identities: list[str], url: str, api_key: str, library_id: str,
-                cancel: Event, progress: Callable[[str], None]) -> dict:
+                cancel: Event, progress: Callable[[str], None], *, expected_targets: dict | None = None) -> dict:
     client = KomgaClient(url, api_key, cancel=cancel)
     if not isinstance(library_id, str) or not library_id:
         raise KomgaError("请先选择要同步的 Komga 书库。")
@@ -49,6 +65,7 @@ def synchronize(repo, identities: list[str], url: str, api_key: str, library_id:
     successful = defaultdict(list)
     remote_acknowledged = []
     checked_series = {}
+    guarded_series = {}
     series_sent = {}
     try:
         if sum(item["id"] == library_id for item in client.libraries()) != 1:
@@ -75,6 +92,7 @@ def synchronize(repo, identities: list[str], url: str, api_key: str, library_id:
                     book = remote_by_id.get(source["book_id"])
                     if not book or book.get("deleted") or book.get("libraryId") != library_id or book.get("seriesId") != source["series_id"] or not _same_path(book.get("url", ""), source["remote_path"]):
                         raise ValueError("远端 ID、书库、归属或路径已变化，请重新读取。")
+                    _confirmed_target(comic, book, client, library_id, expected_targets)
                     plans.append((comic, None, book))
                     target_ids[book["id"]] += 1
                     continue
@@ -89,6 +107,7 @@ def synchronize(repo, identities: list[str], url: str, api_key: str, library_id:
                 if len(matches) != 1:
                     raise ValueError(f"CBZ 相对路径匹配到 {len(matches)} 本漫画，需在选定书库中唯一匹配后才能同步。")
                 book = matches[0]
+                _confirmed_target(comic, book, client, library_id, expected_targets)
                 plans.append((comic, relative, book))
                 target_ids[book["id"]] += 1
             except (ValueError, OSError) as error:
@@ -120,6 +139,13 @@ def synchronize(repo, identities: list[str], url: str, api_key: str, library_id:
                 latest = repo.get(identity)
                 if latest.status not in ("approved", "packaged") or latest.metadata.to_dict() != comic.metadata.to_dict():
                     raise ValueError("本机资料在同步期间发生变化，请重新审核后重试。")
+                expected = _confirmed_target(latest, current, client, library_id, expected_targets)
+                if expected is not None:
+                    live_series = client.request("GET", "api/v1/series/" + quote(current["seriesId"], safe=""))
+                    if snapshot_fingerprint(semantic_snapshot(current, live_series)) != expected["snapshotHash"]:
+                        raise ValueError("已确认的远端资料在同步前发生变化，请重新预览确认。")
+                    guarded_series[current["seriesId"]] = snapshot_fingerprint({"series": semantic_snapshot({}, live_series)["series"]})
+                    checked_series[current["seriesId"]] = live_series
                 if comic.kind == "komga":
                     if current["seriesId"] not in checked_series:
                         checked_series[current["seriesId"]] = client.request("GET", "api/v1/series/" + quote(current["seriesId"], safe=""))
@@ -182,11 +208,14 @@ def synchronize(repo, identities: list[str], url: str, api_key: str, library_id:
                 current = client.request("GET", f"api/v1/series/{escaped}")
                 if not isinstance(current, dict) or current.get("id") != series_id or current.get("libraryId") != library_id or current.get("deleted"):
                     raise ValueError("远端系列身份发生变化，本次已跳过。")
+                if series_id in guarded_series and snapshot_fingerprint({"series": semantic_snapshot({}, current)["series"]}) != guarded_series[series_id]:
+                    raise ValueError("已确认的远端系列资料在同步期间发生变化，请重新预览确认。")
                 if type(current.get("booksCount")) is not int or current["booksCount"] != len(members):
                     raise ValueError("Komga 系列的当前册数缺失或发生变化，请重新读取全系列后同步。")
                 for comic, book in records:
                     fresh = current_by_id[book["id"]]
                     latest = repo.get(comic.id)
+                    _confirmed_target(latest, fresh, client, library_id, expected_targets)
                     if not _same_path(fresh.get("url", ""), book["url"]) or latest.status not in ("approved", "packaged") or latest.metadata.to_dict() != comic.metadata.to_dict():
                         raise ValueError("漫画路径或本机审核资料在同步期间发生变化，本次跳过系列字段。")
                 parent_paths = {server_path(book["url"]).rsplit("/", 1)[0] for _, book in records}

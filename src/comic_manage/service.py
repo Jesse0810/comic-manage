@@ -20,6 +20,7 @@ from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
 from .komga_sync import synchronize
 from .komga_remote import approve_remote, preview_changes, pull_library, resolve_remote
+from .batch_review import BatchReview
 from .packaging import ExportPlan, export_cbz, make_plan
 from .repository import Comic, Repository
 from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, inspect_source,
@@ -172,7 +173,7 @@ def _folder_link(path: Path) -> bool:
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
-                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context"})
+                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
@@ -180,6 +181,7 @@ class ComicService:
         self.progress = progress or (lambda message: None)
         self.plans: OrderedDict[str, PreparedExport] = OrderedDict()
         self.imports: OrderedDict[str, PreparedImport] = OrderedDict()
+        self.reviews = BatchReview(self.repo, self.progress)
 
     @staticmethod
     def serialize(comic: Comic) -> dict:
@@ -193,7 +195,7 @@ class ComicService:
         if not isinstance(params, dict):
             raise ServiceError("params 必须是对象。")
         cancel = cancel if cancel is not None else Event()
-        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync", "komga_pull"):
+        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync", "komga_pull", "prepare_review_sync", "commit_review_sync"):
             check_cancel(cancel)
         if method == "bootstrap":
             return {"comics": [self.serialize(c) for c in self.repo.all()],
@@ -233,6 +235,11 @@ class ComicService:
             return synchronize(self.repo, _strings(params.get("ids"), "作品 id"),
                                _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
                                _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)
+        if method in ("prepare_review_sync", "commit_review_sync"):
+            connection = (_string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"), _string(params.get("libraryId"), "Komga 书库"), cancel)
+            if method == "prepare_review_sync":
+                return self.reviews.prepare(_strings(params.get("ids"), "作品 id"), *connection)
+            return self.reviews.commit(_string(params.get("token"), "审核预览"), *connection)
         if method == "komga_pull":
             return pull_library(self.repo, _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
                                 _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)

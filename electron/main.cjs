@@ -103,6 +103,11 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       if (Object.keys(params).some(key => !['id', 'resolution'].includes(key))) throw new Error('冲突处理参数无效。')
       return callService(method, { ...params, ...await komgaConfig.connection() })
     }
+    if (['prepare_review_sync', 'commit_review_sync'].includes(method)) {
+      const allowed = method === 'prepare_review_sync' ? 'ids' : 'token'
+      if (Object.keys(params).some(key => key !== allowed)) throw new Error('批量审核只接受所选作品或本次检查凭证。')
+      return callService(method, { ...params, ...await komgaConfig.connection() })
+    }
     if (['approve', 'page'].includes(method)) {
       const allowed = method === 'approve' ? ['id', 'metadata'] : ['id', 'index']
       if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('作品请求参数无效。')

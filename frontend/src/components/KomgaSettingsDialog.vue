@@ -4,7 +4,7 @@ import { Check, Connection } from '@element-plus/icons-vue'
 import type { KomgaConfig, KomgaConnectionInput, KomgaLibrary } from '../types'
 import { errorMessage } from '../types'
 
-const props = defineProps<{ modelValue: boolean; continueSync?: boolean; continuePull?: boolean }>()
+const props = defineProps<{ modelValue: boolean; continueReview?: boolean; continueSync?: boolean; continuePull?: boolean }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'state', value: { busy: boolean; title: string }): void
@@ -27,7 +27,7 @@ const urlChanged = computed(() => normalizeUrl(url.value) !== normalizeUrl(origi
 const connectionChanged = computed(() => urlChanged.value || !!apiKey.value.trim())
 const hasKey = computed(() => !clearKey.value && (!!apiKey.value.trim() || (original.value.hasApiKey && !urlChanged.value)))
 const selectedLibrary = computed(() => libraries.value.find(library => library.id === libraryId.value))
-const saveLabel = computed(() => clearKey.value ? '保存并清除密钥' : props.continueSync ? '保存并同步' : props.continuePull ? '保存并读取书库' : '保存配置')
+const saveLabel = computed(() => clearKey.value ? '保存并清除密钥' : props.continueReview ? '保存并检查' : props.continueSync ? '保存并同步' : props.continuePull ? '保存并读取书库' : '保存配置')
 
 function setBusy(value: boolean, nextAction: typeof action.value = '') {
   busy.value = value

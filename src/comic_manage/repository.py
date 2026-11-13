@@ -11,7 +11,7 @@ import re
 import sqlite3
 
 from .metadata import COLORS, READING_DIRECTIONS, V12_FIELDS, Metadata, legacy_color, migration_warnings
-from .sources import Snapshot, source_id
+from .sources import Snapshot, check_cancel, source_id
 
 
 def now() -> str:
@@ -286,6 +286,40 @@ class Repository:
             db.execute("UPDATE comics SET status='approved',updated_at=? WHERE id=?", (now(), comic_id))
             db.execute("UPDATE komga_sources SET pending_sync=1 WHERE comic_id=?", (comic_id,))
             self._event(db, comic_id, "komga_approve", "已在线核对远端快照并审核本机修改。")
+
+    @staticmethod
+    def _review_state(db, comic_id: str) -> dict:
+        row = db.execute("SELECT * FROM comics WHERE id=? AND id NOT IN (SELECT comic_id FROM removed_comics)", (comic_id,)).fetchone()
+        if row is None:
+            raise ValueError("作品记录不存在或已移除。")
+        state = {key: row[key] for key in ("id", "source", "kind", "fingerprint", "page_count", "status", "output", "updated_at")}
+        state["metadata"] = Metadata.from_dict(json.loads(row["metadata"])).to_dict()
+        remote = db.execute("SELECT * FROM komga_sources WHERE comic_id=?", (comic_id,)).fetchone()
+        state["remote"] = dict(remote) if remote else None
+        state["revision"] = db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE comic_id=?", (comic_id,)).fetchone()[0]
+        return state
+
+    def review_state(self, comic_id: str) -> dict:
+        """Read the local revision used to bind a one-use batch confirmation."""
+        with self.connect() as db:
+            return self._review_state(db, comic_id)
+
+    def approve_checked(self, comic_id: str, expected: dict, cancel=None) -> str:
+        """Approve only the exact revision that passed the live batch checks."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._review_state(db, comic_id)
+            if state != expected:
+                raise ValueError("本机资料在预览后发生变化，本次已跳过，请重新预览确认。")
+            if state["status"] not in ("draft", "approved", "packaged"):
+                raise ValueError("作品状态无效，请重新读取列表。")
+            check_cancel(cancel)
+            if state["status"] == "draft":
+                db.execute("UPDATE comics SET status='approved',warning='',updated_at=? WHERE id=?", (now(), comic_id))
+            if state["kind"] == "komga":
+                db.execute("UPDATE komga_sources SET pending_sync=1 WHERE comic_id=?", (comic_id,))
+            self._event(db, comic_id, "batch_review", "已确认批量预览并重新校验，审核后同步 Komga。")
+            return "approved" if state["status"] == "draft" else state["status"]
 
     def is_removed(self, comic_id: str) -> bool:
         with self.connect() as db:

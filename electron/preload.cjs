@@ -1,6 +1,6 @@
 'use strict'
 const { contextBridge, ipcRenderer } = require('electron')
-const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_sync', 'komga_pull', 'komga_resolve']
+const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_sync', 'komga_pull', 'komga_resolve', 'prepare_review_sync', 'commit_review_sync']
 
 contextBridge.exposeInMainWorld('comic', {
   invoke: (method, params = {}) => methods.includes(method)

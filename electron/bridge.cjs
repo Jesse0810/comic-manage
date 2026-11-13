@@ -6,8 +6,8 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context'])
-const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
@@ -73,13 +73,17 @@ function validateCall(method, params) {
   if (['import', 'prepare_import'].includes(method)) strings('paths')
   if (method === 'browse_folders') string('path')
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
-  if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync'].includes(method)) strings('ids')
+  if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync', 'prepare_review_sync'].includes(method)) strings('ids')
+  if (method === 'prepare_review_sync' && !params.ids.length) throw new Error('请勾选要批量审核的作品。')
+  if (method === 'commit_review_sync') string('token')
   if (method === 'source_context' && Object.keys(params).some(key => key !== 'id')) throw new Error('作品来源参数无效。')
   if (method === 'komga_resolve' && !['keep_local', 'use_remote'].includes(params.resolution)) throw new Error('冲突处理方式无效。')
-  if (['komga_test', 'komga_sync', 'komga_pull', 'komga_resolve'].includes(method)) {
+  if (['komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'prepare_review_sync', 'commit_review_sync'].includes(method)) {
     const allowed = method === 'komga_test' ? ['url', 'apiKey']
       : method === 'komga_sync' ? ['ids', 'url', 'apiKey', 'libraryId']
       : method === 'komga_resolve' ? ['id', 'resolution', 'url', 'apiKey', 'libraryId']
+      : method === 'prepare_review_sync' ? ['ids', 'url', 'apiKey', 'libraryId']
+      : method === 'commit_review_sync' ? ['token', 'url', 'apiKey', 'libraryId']
       : ['url', 'apiKey', 'libraryId']
     if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('Komga 请求参数无效。')
     for (const key of ['url', 'apiKey', 'libraryId']) {

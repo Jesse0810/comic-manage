@@ -42,7 +42,7 @@ def handle(request):
         emit({'event':'task-progress','data':{'message':'扫描中：春の旅'}})
         cancel.wait(10)
         emit({'id':identity, 'result':{'count':1, 'errors':[], 'cancelled':cancel.is_set()}})
-    elif method in ('komga_sync', 'komga_pull'):
+    elif method in ('komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync'):
         emit({'event':'task-progress','data':{'message':'拉取中：春の旅' if method == 'komga_pull' else '同步中：春の旅'}})
         cancel.wait(10)
         emit({'id':identity, 'result':{'synced':0, 'cancelled':cancel.is_set()}})
@@ -361,12 +361,16 @@ test('preload exposes synchronization and settings testing through separate allo
   await api.invoke('komga_sync', {ids:['book']})
   await api.invoke('komga_pull', {})
   await api.invoke('komga_resolve', {id:'remote',resolution:'keep_local'})
+  await api.invoke('prepare_review_sync', {ids:['one','two']})
+  await api.invoke('commit_review_sync', {token:'review-token'})
   await api.openKomgaBook('remote')
   await api.testKomgaConfig({url:'http://localhost', apiKey:'fixture-key'})
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ['comic:call', 'komga_sync', {ids:['book']}],
     ['comic:call', 'komga_pull', {}],
     ['comic:call', 'komga_resolve', {id:'remote',resolution:'keep_local'}],
+    ['comic:call', 'prepare_review_sync', {ids:['one','two']}],
+    ['comic:call', 'commit_review_sync', {token:'review-token'}],
     ['comic:open-komga-book', 'remote'],
     ['comic:test-komga-config', {url:'http://localhost', apiKey:'fixture-key'}],
   ])
@@ -435,6 +439,50 @@ test('public library pull and conflict resolution use the current saved connecti
   ])
   assert.equal(main.connectionCalls(), 2)
 })
+
+test('batch review preview and execution use only server-owned credentials and a frozen token', async () => {
+  const main = await mainProcessFixture()
+  const connection = {url:'http://127.0.0.1:25600',apiKey:'fixture-key',libraryId:'library'}
+  for (const [method, params] of [
+    ['prepare_review_sync',{ids:['one','two']}],
+    ['commit_review_sync',{token:'prepared-review-token'}],
+  ]) {
+    assert.doesNotThrow(() => validateCall(method, params))
+    assert.doesNotThrow(() => validateCall(method, {...params,...connection}))
+    for (const extra of [{url:'http://other.invalid'}, {apiKey:'renderer-key'}, {libraryId:'other'}, {metadata:{title:'injected'}}, {confirmed:true}]) {
+      await assert.rejects(main.invoke('comic:call',method,{...params,...extra}), /批量审核|参数无效/)
+    }
+  }
+  for (const [method, params] of [
+    ['prepare_review_sync',{}], ['prepare_review_sync',{ids:[]}],
+    ['prepare_review_sync',{ids:['one',null]}], ['prepare_review_sync',{ids:['one'],token:'injected'}],
+    ['commit_review_sync',{}], ['commit_review_sync',{token:''}],
+    ['commit_review_sync',{token:'prepared-review-token',ids:['other']}],
+  ]) assert.throws(() => validateCall(method,params), undefined, method)
+  assert.equal(main.calls.length,0)
+  await main.invoke('comic:call','prepare_review_sync',{ids:['one','two']})
+  await main.invoke('comic:call','commit_review_sync',{token:'prepared-review-token'})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls)),[
+    {method:'prepare_review_sync',params:{ids:['one','two'],...main.credentials}},
+    {method:'commit_review_sync',params:{token:'prepared-review-token',...main.credentials}},
+  ])
+  const broken = await mainProcessFixture({connectionError:true})
+  await assert.rejects(broken.invoke('comic:call','prepare_review_sync',{ids:['one']}), /missing connection/)
+  assert.equal(broken.calls.length,0)
+})
+
+for (const [method, params] of [
+  ['prepare_review_sync',{ids:['one']}], ['commit_review_sync',{token:'review-token'}],
+]) {
+  test(`${method} remains cancellable without an ordinary response deadline`, async t => {
+    const bridge = await fixture(t)
+    const waiting = bridge.call(method,params)
+    await eventOf(bridge,'task-progress')
+    assert.equal([...bridge.pending.values()].every(request=>!request.timer),true)
+    await bridge.call('cancel')
+    assert.equal((await waiting).cancelled,true)
+  })
+}
 
 test('approve and page inject credentials only for a remotely sourced work', async () => {
   const local = await mainProcessFixture({connectionError:true})

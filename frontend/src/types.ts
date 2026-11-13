@@ -34,7 +34,21 @@ export type KomgaSyncStatus = 'success' | 'skipped' | 'failed'
 export interface KomgaSyncItem { id: string; title: string; status: KomgaSyncStatus; message: string; bookId?: string; changed?: boolean; warnings?: string[] }
 export interface KomgaSyncResult {
   total: number; updated: number; unchanged?: number; skipped: number; failed: number; seriesUpdated: number; cancelled: boolean
-  books: KomgaSyncItem[]; series: KomgaSyncItem[]
+  books: KomgaSyncItem[]; series: KomgaSyncItem[]; error?: string
+}
+export interface ReviewSyncPreviewItem {
+  id: string; title: string; kind: Comic['kind'] | ''; status: 'ready' | 'blocked'; message: string
+  authors: string[]; genre: string; ageRating: string; dirtyFields?: string[]
+}
+export interface ReviewSyncPlan {
+  token: string; total: number; ready: number; blocked: number; cancelled: boolean
+  items: ReviewSyncPreviewItem[]; warnings: string[]
+}
+export type ReviewSyncStatus = 'approved' | 'skipped' | 'failed'
+export interface ReviewSyncItem { id: string; title: string; status: ReviewSyncStatus; message: string }
+export interface ReviewSyncResult {
+  total: number; reviewed: number; skipped: number; failed: number; cancelled: boolean
+  items: ReviewSyncItem[]; sync: KomgaSyncResult | null; error?: string
 }
 export const comicGenres = ['漫画', '小说', 'CG集', '画集', '设定集', '插画集']
 export const releaseTypes = ['同人发行', '商业出版', '个人独立发布']

@@ -6,9 +6,11 @@ import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAd
 import DetailsPanel from './components/DetailsPanel.vue'
 import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
+import BatchReviewDialog from './components/BatchReviewDialog.vue'
+import BatchReviewResultDialog from './components/BatchReviewResultDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult } from './types'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult } from './types'
 import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres } from './types'
 import { invoke } from './api'
 
@@ -50,7 +52,13 @@ const komgaSettingsVisible = ref(false)
 const komgaResultVisible = ref(false)
 const komgaResult = ref<KomgaSyncResult | null>(null)
 const pendingSyncIds = ref<string[]>([])
+const pendingReviewIds = ref<string[]>([])
 const pendingPull = ref(false)
+const reviewPlan = ref<ReviewSyncPlan | null>(null)
+const reviewPlanVisible = ref(false)
+const reviewResult = ref<ReviewSyncResult | null>(null)
+const reviewResultVisible = ref(false)
+const reviewError = ref('')
 const importVisible = ref(false)
 const importMode = ref<'folder' | 'cbz'>('folder')
 const batchVisible = ref(false)
@@ -82,6 +90,10 @@ const disabled = computed(() => busy.value || loading.value || !available.value)
 const selectedComics = computed(() => comics.value.filter(comic => exportIds.value.includes(comic.id)))
 const selectionHasRemote = computed(() => selectedComics.value.some(comic => comic.kind === 'komga'))
 const selectionHasInactive = computed(() => selectedComics.value.some(comic => !canEditComic(comic)))
+const checkedSelectionHasInactive = computed(() => selectedIds.value.some(id => {
+  const comic = comics.value.find(item => item.id === id)
+  return !comic || !canEditComic(comic)
+}))
 const currentReadOnly = computed(() => !!current.value && !canEditComic(current.value))
 function canEditComic(comic: Comic) { return comic.kind !== 'komga' || (!!komgaScope.value && comic.remote?.scope === komgaScope.value && comic.remote?.unavailable !== true) }
 async function changeSource(value: SourceFilter) {
@@ -340,6 +352,7 @@ async function backup() {
 
 async function openKomgaSettings() {
   if (disabled.value || !await resolveEdits()) return
+  pendingReviewIds.value = []
   pendingSyncIds.value = []
   pendingPull.value = true
   komgaSettingsVisible.value = true
@@ -374,12 +387,87 @@ async function syncKomga() {
   finally { busy.value = false; taskMessage.value = '' }
   if (!config) return
   if (!config.url || !config.libraryId || !config.hasApiKey) {
+    pendingReviewIds.value = []
     pendingSyncIds.value = ids
     pendingPull.value = false
     komgaSettingsVisible.value = true
     return
   }
   await executeKomgaSync(ids)
+}
+
+function reviewSelectionAvailable(ids: string[]) {
+  return ids.every(id => {
+    const comic = comics.value.find(item => item.id === id)
+    return !!comic && canEditComic(comic)
+  })
+}
+
+async function executePrepareReview(ids: string[]) {
+  if (disabled.value || !ids.length) return
+  if (!reviewSelectionAvailable(ids)) { ElMessage.warning('所选作品不属于当前可用的 Komga 书库，请切回对应连接后重新勾选'); return }
+  busy.value = true
+  cancelling.value = false
+  reviewPlan.value = null
+  reviewPlanVisible.value = false
+  reviewResultVisible.value = false
+  taskTitle.value = '检查批量审核与同步'
+  taskMessage.value = '正在逐本检查必填资料、来源与远端状态…'
+  try {
+    reviewPlan.value = await invoke<ReviewSyncPlan>('prepare_review_sync', { ids: [...ids] })
+    try { await refresh() } catch (reason) { ElMessage.warning(`预检已返回，本机列表刷新失败：${errorMessage(reason)}`) }
+    reviewPlanVisible.value = true
+  } catch (reason) {
+    try { await refresh() } catch { /* Keep the original preflight error. */ }
+    showError(errorMessage(reason))
+  } finally { busy.value = false; cancelling.value = false; taskMessage.value = '' }
+}
+
+async function batchReviewSync() {
+  if (disabled.value || !selectedIds.value.length || checkedSelectionHasInactive.value || !await resolveEdits()) return
+  const ids = [...selectedIds.value]
+  if (!ids.length || !reviewSelectionAvailable(ids)) return
+  let config: KomgaConfig | undefined
+  busy.value = true
+  taskTitle.value = '准备批量审核与同步'
+  taskMessage.value = '正在读取连接配置…'
+  try { config = await window.comic.komgaConfig() }
+  catch (reason) { showError(errorMessage(reason)) }
+  finally { busy.value = false; taskMessage.value = '' }
+  if (!config) return
+  if (!config.url || !config.libraryId || !config.hasApiKey) {
+    pendingReviewIds.value = ids
+    pendingSyncIds.value = []
+    pendingPull.value = false
+    komgaSettingsVisible.value = true
+    return
+  }
+  await executePrepareReview(ids)
+}
+
+async function commitReviewSync() {
+  const plan = reviewPlan.value
+  if (disabled.value || !plan?.token || !plan.ready || plan.cancelled) return
+  const token = plan.token
+  reviewPlanVisible.value = false
+  reviewPlan.value = null
+  reviewResult.value = null
+  reviewError.value = ''
+  busy.value = true
+  cancelling.value = false
+  taskTitle.value = '批量审核并同步'
+  taskMessage.value = '正在重新检查资料、审核可通过作品并同步到 Komga…'
+  try {
+    reviewResult.value = await invoke<ReviewSyncResult>('commit_review_sync', { token })
+  } catch (reason) {
+    reviewError.value = errorMessage(reason)
+  } finally {
+    try { await refresh() } catch (reason) { ElMessage.warning(`批量操作后列表刷新失败：${errorMessage(reason)}`) }
+    reviewResultVisible.value = true
+    busy.value = false
+    cancelling.value = false
+    taskMessage.value = ''
+  }
 }
 
 async function executeKomgaPull() {
@@ -405,15 +493,17 @@ async function executeKomgaPull() {
 }
 
 async function komgaConfigured(config: KomgaConfig) {
+  const reviewIds = [...pendingReviewIds.value]
   const ids = [...pendingSyncIds.value]
   const shouldPull = pendingPull.value
-  pendingSyncIds.value = []; pendingPull.value = false
+  pendingReviewIds.value = []; pendingSyncIds.value = []; pendingPull.value = false
   loading.value = true
   try { await refresh() }
   catch (reason) { showError(errorMessage(reason)); return }
   finally { loading.value = false }
   if (config.url && config.libraryId && config.hasApiKey) {
-    if (ids.length) await executeKomgaSync(ids)
+    if (reviewIds.length) await executePrepareReview(reviewIds)
+    else if (ids.length) await executeKomgaSync(ids)
     else if (shouldPull) await executeKomgaPull()
     else ElMessage.success('Komga 配置已保存')
   } else ElMessage.success('API Key 已清除')
@@ -500,7 +590,7 @@ onBeforeUnmount(() => unsubscribe?.())
         <section class="library-panel">
           <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
-          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
+          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
             <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
@@ -523,8 +613,10 @@ onBeforeUnmount(() => unsubscribe?.())
       <footer class="workspace-footnote"><span class="connection-dot" :class="{ offline: !available }"></span><span>{{ available ? '本机资料库已连接' : '本机服务不可用' }}</span><span class="footnote-divider">/</span><span>原图保留 · 人工审核 · 无损打包</span><span v-if="dirty" class="unsaved-note">当前作品有未保存修改</span></footer>
     </main>
 
-    <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-sync="pendingSyncIds.length > 0" :continue-pull="pendingPull" @state="dialogTask" @saved="komgaConfigured" />
+    <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-review="pendingReviewIds.length > 0" :continue-sync="pendingSyncIds.length > 0" :continue-pull="pendingPull" @state="dialogTask" @saved="komgaConfigured" />
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
+    <BatchReviewDialog v-model="reviewPlanVisible" :plan="reviewPlan" :busy="disabled" @confirm="commitReviewSync" />
+    <BatchReviewResultDialog v-model="reviewResultVisible" :result="reviewResult" :error="reviewError" />
     <ImportDialog v-model="importVisible" :mode="importMode" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
 
@@ -542,5 +634,6 @@ onBeforeUnmount(() => unsubscribe?.())
 .remote-source-label { color: #5f8c86 !important; }
 .remote-output-info .output-copy > span:last-child { color: #6c8676; font-size: 11px; }
 .comic-file-icon.komga { color: #5b8d87; background: #edf6f3; }
+.library-batch-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px 12px; }
 @media (max-width: 1300px) { .library-source-bar { gap: 8px; padding: 12px 14px 0; }.library-source-bar > span { display: none; }.library-source-bar > .el-select { flex: 1; } }
 </style>
