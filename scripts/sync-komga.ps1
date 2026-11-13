@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$knownKinds = @('原作', '发行性质', '出版形态', '修正状态', '年龄分级', '色彩', '内容类型')
+$knownKinds = @('原作', '发行性质', '出版形态', '发布方式', '发布平台', '修正状态', '年龄分级', '色彩', '内容类型')
 
 function ConvertTo-RelativePath([string]$Value) {
     $normalized = $Value.Replace('\', '/').Trim('/')

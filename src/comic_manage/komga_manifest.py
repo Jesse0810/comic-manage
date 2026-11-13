@@ -11,7 +11,7 @@ from .komga import komga_metadata
 from .metadata import to_comicinfo
 from .sources import is_inside
 
-MANAGED_KINDS = ["原作", "发行性质", "出版形态", "修正状态", "年龄分级", "色彩", "内容类型"]
+MANAGED_KINDS = ["原作", "发行性质", "出版形态", "发布方式", "发布平台", "修正状态", "年龄分级", "色彩", "内容类型"]
 
 
 def export_manifest(repo, comic_ids: list[str], destination: Path) -> dict:

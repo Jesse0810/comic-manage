@@ -4,7 +4,7 @@ from __future__ import annotations
 from .metadata import Metadata, split_values, title_key
 
 
-MANAGED_ENTITY_KINDS = frozenset({"原作", "发行性质", "出版形态", "修正状态", "年龄分级", "色彩", "内容类型"})
+MANAGED_ENTITY_KINDS = frozenset({"原作", "发行性质", "出版形态", "发布方式", "发布平台", "修正状态", "年龄分级", "色彩", "内容类型"})
 
 
 def komga_metadata(metadata: Metadata) -> dict:
@@ -14,15 +14,16 @@ def komga_metadata(metadata: Metadata) -> dict:
     for kind, name in (("发行性质", value.release_type), ("出版形态", value.publication_format)):
         if name.strip():
             entities.append({"kind": kind, "name": name.strip()})
+    for kind, names in (("发布方式", value.release_methods), ("发布平台", value.release_platforms)):
+        entities.extend({"kind": kind, "name": name} for name in names)
     if value.age_rating == "R18+" and value.uncensored:
         entities.append({"kind": "修正状态", "name": "无修正"})
     if value.age_rating in ("Everyone", "MA15+", "R18+"):
         entities.append({"kind": "年龄分级", "name": value.age_rating})
     for genre in split_values(value.genre):
         entities.append({"kind": "内容类型", "name": genre})
-    color = {"Yes": "黑白", "No": "彩色/非黑白"}.get(value.black_and_white)
-    if color:
-        entities.append({"kind": "色彩", "name": color})
+    if value.color:
+        entities.append({"kind": "色彩", "name": value.color})
     alternate_titles = []
     if value.collection_mode == "series" and value.localized_series.strip():
         alternate_titles.append({"label": value.localized_series_label.strip(), "title": value.localized_series.strip()})
@@ -64,7 +65,9 @@ def komga_warnings(metadata: Metadata) -> list[str]:
     else:
         warnings.append("Komga 将出版社、内容类型、语言和年龄分级汇总到系列层级，逐册分类通过补充实体保存。")
     if metadata.volume.strip():
-        warnings.append("本机保留的 Volume 不写入 Komga 成品，使用 Number 作为本册编号，避免拆分系列。")
+        warnings.append("Volume 会保留在 ComicInfo.xml；请关闭 Komga 的“将卷号附加到系列标题”，避免拆分系列。Komga API 不支持单独编辑卷号。")
+    if metadata.reading_direction in ("VERTICAL", "WEBTOON"):
+        warnings.append("纵向 / Webtoon 方向通过 Komga 系列原生 readingDirection 同步；ComicInfo Manga 无法表达此模式，成品中保留独立设置的 Manga 值。")
     if metadata.collection_mode == "series" and metadata.localized_series.strip():
         warnings.append("系列别名通过 Komga 补充清单同步到 alternateTitles，ComicInfo.xml 不包含 LocalizedSeries。")
     return warnings

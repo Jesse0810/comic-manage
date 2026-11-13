@@ -11,7 +11,13 @@ from urllib.parse import urlsplit
 MAX_XML_BYTES = 2 * 1024 * 1024
 POSITIVE_TAGS = ("汉化", "无修正", "全彩")  # Legacy import aliases only.
 AGE_RATINGS = ("Unknown", "Everyone", "MA15+", "R18+")
-GENRES = ("同人志", "CG集", "画集", "设定集", "漫画", "插画集")
+GENRES = ("漫画", "小说", "CG集", "画集", "设定集", "插画集")
+COLORS = ("", "黑白", "全彩", "部分彩色")
+RELEASE_TYPES = ("", "同人发行", "商业出版", "个人独立发布")
+RELEASE_METHODS = ("公开发布", "单次购买", "会员订阅", "免费与付费并行")
+READING_DIRECTIONS = ("", "LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL", "WEBTOON")
+RELEASE_PLATFORMS = ("Fantia", "pixivFANBOX", "Ci-en", "Patreon", "pixiv", "BOOTH", "DLsite", "FANZA同人", "DiGiket", "Gumroad", "Ko-fi", "Melonbooks", "Toranoana")
+V12_FIELDS = frozenset({"color", "release_methods", "release_platforms", "reading_direction"})
 THEMES = {"恋爱", "奇幻", "日常", "悬疑", "纯爱", "猎奇", "NTR"}
 UNKNOWN_TRANSLATORS = {"未知汉化", "未知漢化", "中国翻訳", "中国翻译", "中國翻譯", "未知翻译"}
 AGE_ALIASES = {"全年龄": "Everyone", "R15": "MA15+", "R18": "R18+", "Adults Only 18+": "R18+"}
@@ -58,6 +64,88 @@ def parse_xml(data: bytes | str) -> ET.Element:
     return root
 
 
+def legacy_color(value: dict) -> str:
+    tags = value.get("tags", [])
+    explicit = [tag.replace("：", ":", 1).removeprefix("色彩:").strip()
+                for tag in tags if tag.replace("：", ":", 1).startswith("色彩:")]
+    explicit.extend(tag for tag in tags if tag in COLORS[1:])
+    xml = value.get("original_xml")
+    xml_color = ""
+    if xml:
+        try:
+            root = parse_xml(xml)
+            xml_tags = split_values(root.findtext("Tags") or "")
+            explicit.extend(tag.replace("：", ":", 1).removeprefix("色彩:").strip()
+                            for tag in xml_tags if tag.replace("：", ":", 1).startswith("色彩:"))
+            explicit.extend(tag for tag in xml_tags if tag in COLORS[1:])
+            xml_color = (root.findtext("BlackAndWhite") or "").strip()
+        except (ValueError, UnicodeError, ET.ParseError):
+            pass
+    explicit = list(dict.fromkeys(color for color in explicit if color in COLORS[1:]))
+    if len(explicit) == 1:
+        return explicit[0]
+    if len(explicit) > 1:
+        return ""
+    if value.get("full_color") and xml_color != "No":
+        return "全彩"
+    if value.get("black_and_white") == "Yes" or xml_color == "Yes":
+        return "黑白"
+    return ""
+
+
+def migrate_legacy_values(value: dict) -> dict:
+    """Convert explicit older local facts once. Remote working copies may retain original vocabulary."""
+    result = dict(value)
+    tags = result.get("tags", [])
+    for prefix, field_name in (("发行性质", "release_type"), ("出版形态", "publication_format"), ("内容类型", "genre")):
+        if not result.get(field_name):
+            found = [tag.replace("：", ":", 1).partition(":")[2].strip() for tag in tags
+                     if tag.replace("：", ":", 1).partition(":")[0].strip() == prefix]
+            if found:
+                result[field_name] = found[0]
+    if "color" not in result or result["color"] is None:
+        result["color"] = legacy_color(result)
+    genres = []
+    for genre in split_values(result.get("genre", "")):
+        if genre in ("同人志", "同人誌"):
+            genre = "漫画"
+            result["release_type"] = result.get("release_type") or "同人发行"
+        elif genre in ("商业志", "商業誌", "商業志"):
+            genre = "漫画"
+            result["release_type"] = result.get("release_type") or "商业出版"
+        elif genre in ("单行本", "單行本"):
+            genre = "漫画"
+            result["publication_format"] = result.get("publication_format") or "单行本"
+        genres.append(genre)
+    result["genre"] = ", ".join(unique(genres))
+    result["release_type"] = {"同人": "同人发行", "商业": "商业出版", "商業": "商业出版"}.get(result.get("release_type"), result.get("release_type", ""))
+    if result.get("publication_format") == "独立短篇":
+        result["publication_format"] = "独立作品"
+    result.setdefault("release_methods", [])
+    result.setdefault("release_platforms", [])
+    result.setdefault("reading_direction", {"No": "LEFT_TO_RIGHT", "YesAndRightToLeft": "RIGHT_TO_LEFT"}.get(result.get("manga"), ""))
+    return result
+
+
+def migration_warnings(value: dict) -> list[str]:
+    warnings = []
+    converted = migrate_legacy_values(value)
+    if len(value.get("original_works", [])) > 1:
+        warnings.append("旧记录包含多个原作，值已完整保留，请核对后只选择一个原作。")
+    if not converted.get("color") and value.get("black_and_white") == "No":
+        warnings.append("旧 BlackAndWhite=No 只表示非黑白，无法确认全彩或部分彩色，请人工核对。")
+    original, chinese = value.get("original_title", ""), value.get("chinese_title", "")
+    if original and chinese and original != chinese and value.get("title", chinese) == chinese:
+        warnings.append("旧记录包含不同的原名和中文名，名称均已保留，请核对主标题；已有人工标题不自动改写。")
+    if value.get("genre") and value["genre"] not in GENRES:
+        warnings.append("旧内容类型已保留或转换，请按 v1.2 六类内容类型重新核对。")
+    if value.get("release_type") and value["release_type"] not in RELEASE_TYPES:
+        warnings.append("旧发行性质用词需要核对，请选择同人发行、商业出版或个人独立发布。")
+    if value.get("publication_format") == "独立短篇":
+        warnings.append("旧出版形态“独立短篇”请核对是否使用“独立作品”。")
+    return warnings
+
+
 @dataclass
 class Metadata:
     # Retained only to migrate and preserve earlier manual names, not XML authority.
@@ -83,11 +171,15 @@ class Metadata:
     characters: list[str] = field(default_factory=list)
     release_type: str = ""
     publication_format: str = ""
+    release_methods: list[str] = field(default_factory=list)
+    release_platforms: list[str] = field(default_factory=list)
+    color: str | None = None
     uncensored: bool = False
-    language: str = "ja"
+    language: str = ""
     age_rating: str = "Unknown"
     black_and_white: str = "Unknown"
     manga: str = "Unknown"
+    reading_direction: str = ""
     web: list[str] = field(default_factory=list)
     summary: str = ""
     year: str = ""
@@ -98,9 +190,9 @@ class Metadata:
 
     def __post_init__(self):
         if self.title is None:
-            self.title = (self.chinese_title if self.translated and self.chinese_title.strip() else self.original_title).strip()
-            if self.full_color and self.black_and_white == "Unknown":
-                self.black_and_white = "No"
+            self.title = (self.original_title or self.chinese_title).strip()
+        if self.color is None:
+            self.color = legacy_color(asdict(self))
         if self.collection_mode is None:
             self.collection_mode = "series" if self.series.strip() else "oneshot"
         self.normalize()
@@ -113,11 +205,18 @@ class Metadata:
         self.authors = unique(self.authors)
         writers = {title_key(v) for v in self.authors}
         self.pencillers = [v for v in unique(self.pencillers) if title_key(v) not in writers]
-        self.original_works = classification_values(self.original_works)
+        self.original_works = unique(self.original_works)
         self.characters = classification_values(self.characters)
+        self.release_methods = unique(self.release_methods)
+        platforms = {value.casefold(): value for value in RELEASE_PLATFORMS}
+        self.release_platforms = unique(platforms.get(value.strip().casefold(), value.strip()) for value in self.release_platforms)
         # URL path and query strings are case-sensitive; normalize whitespace only.
         self.web = list(dict.fromkeys(value.strip() for value in self.web if value.strip()))
         ordinary = []
+        colors_from_tags = {tag.replace("：", ":", 1).partition(":")[2].strip()
+                            for tag in self.tags if tag.replace("：", ":", 1).partition(":")[0].strip() == "色彩"}
+        if not self.color and len(colors_from_tags) == 1:
+            self.color = next(iter(colors_from_tags))
         for tag in self.tags:
             tag = tag.strip()
             prefix, separator, value = tag.replace("：", ":", 1).partition(":")
@@ -125,13 +224,19 @@ class Metadata:
             if separator and prefix in ("原作", "角色"):
                 if value:
                     target = self.original_works if prefix == "原作" else self.characters
-                    target.extend(v.strip() for v in value.split("、") if v.strip())
+                    target.extend([value] if prefix == "原作" else [v.strip() for v in value.split("、") if v.strip()])
             elif separator and prefix == "发行性质":
                 if value and not self.release_type:
                     self.release_type = value
             elif separator and prefix == "出版形态":
                 if value and not self.publication_format:
                     self.publication_format = value
+            elif separator and prefix in ("发布方式", "发布平台"):
+                target = self.release_methods if prefix == "发布方式" else self.release_platforms
+                if value:
+                    target.append(value)
+            elif separator and prefix == "色彩":
+                continue
             elif separator and prefix == "修正状态":
                 if value == "无修正":
                     self.uncensored = True
@@ -140,27 +245,23 @@ class Metadata:
                     self.genre = value
             elif separator and prefix in ("汉化状态", "年龄", "年龄等级", "年龄分级", "AgeRating", "彩色状态"):
                 continue
-            elif tag in (*POSITIVE_TAGS, "生肉", "有修正", "黑白", "全年龄", "R15", "R18", "R18+", "MA15+", "Everyone"):
+            elif tag in (*POSITIVE_TAGS, "生肉", "有修正", "黑白", "部分彩色", "全年龄", "R15", "R18", "R18+", "MA15+", "Everyone"):
                 # Historical flags are imported by from_dict/from_comicinfo, not inferred when edited.
                 continue
             elif tag:
                 ordinary.append(tag)
-        self.original_works = classification_values(self.original_works)
+        self.original_works = unique(self.original_works)
         self.characters = classification_values(self.characters)
+        self.release_methods = unique(self.release_methods)
+        self.release_platforms = unique(platforms.get(value.strip().casefold(), value.strip()) for value in self.release_platforms)
         genres = []
         for genre in split_values(self.genre):
             if genre in THEMES:
                 ordinary.append(genre)
-            elif genre in ("商业志", "商業誌", "商業志"):
-                genres.append("漫画")
-                self.release_type = self.release_type or "商业"
-            elif genre in ("单行本", "單行本"):
-                genres.append("漫画")
-                self.publication_format = self.publication_format or "单行本"
             else:
                 genres.append(genre)
         self.genre = ", ".join(unique(genres))
-        self.tags = unique(ordinary)
+        self.tags = unique(tag for tag in ordinary if tag != self.genre and not (tag in ("同人志", "同人誌") and self.release_type == "同人发行"))
         if self.localized_series.strip() == self.series.strip():
             self.localized_series = ""
 
@@ -176,23 +277,35 @@ class Metadata:
             custom.append(f"发行性质:{value.release_type.strip()}")
         if value.publication_format.strip():
             custom.append(f"出版形态:{value.publication_format.strip()}")
+        custom.extend(f"发布方式:{item}" for item in value.release_methods)
+        custom.extend(f"发布平台:{item}" for item in value.release_platforms)
+        if value.color:
+            custom.append(f"色彩:{value.color}")
         if value.age_rating == "R18+" and value.uncensored:
             custom.append("修正状态:无修正")
         return unique(custom + value.tags)
 
-    def validate(self, page_count: int) -> None:
+    def validate_review(self) -> None:
         if not self.display_title:
             raise ValueError("请填写作品名称。")
         if not self.authors:
             raise ValueError("请填写至少一位作者。")
+        if self.genre not in GENRES:
+            raise ValueError("请确认内容类型：漫画、小说、CG集、画集、设定集或插画集。")
         if self.age_rating not in AGE_RATINGS[1:]:
             raise ValueError("请人工确认年龄分级：全年龄、MA15+ 或 R18。")
         unknown_translator = any(t in UNKNOWN_TRANSLATORS for t in split_values(self.translator))
         if unknown_translator:
             raise ValueError("已确认有翻译的作品请补录实际译者或汉化组；未知汉化信息仍需人工确认。")
-        if self.collection_mode == "series" and (not self.series.strip() or not self.number.strip()):
-            raise ValueError("系列作品请填写共同系列名称和本册编号 Number。完整一卷也使用 Number 排序。")
-        fields = set(self.__dataclass_fields__) - {"original_xml", "volume"}
+        self.validate_fields({"original_works", "release_type", "release_methods", "color"})
+        if not self.all_tags:
+            raise ValueError("请填写至少一条真实已确认的题材或自定义标签，未知时先保存草稿。")
+
+    def validate(self, page_count: int) -> None:
+        self.validate_review()
+        if self.collection_mode == "series" and not self.series.strip():
+            raise ValueError("系列作品请填写共同系列名称。")
+        fields = set(self.__dataclass_fields__) - {"original_xml", "black_and_white", "full_color"}
         if self.collection_mode == "oneshot":
             fields -= {"series", "number", "count", "localized_series", "localized_series_label"}
         self.validate_fields(fields)
@@ -213,11 +326,19 @@ class Metadata:
             raise ValueError("系列别名需要对应的真实系列名称。")
         if fields & {"localized_series", "localized_series_label", "collection_mode"} and self.collection_mode == "series" and self.localized_series.strip() and not self.localized_series_label.strip():
             raise ValueError("请填写系列别名标签，如 zh-Hans 或原名。")
-        if "black_and_white" in fields and self.black_and_white not in ("Unknown", "Yes", "No"):
-            raise ValueError("黑白 / 彩色状态无效。")
+        if "original_works" in fields and len(self.original_works) > 1:
+            raise ValueError("原作只允许一个值，旧多值已保留，请人工核对。")
+        if "color" in fields and self.color not in COLORS:
+            raise ValueError("色彩请填写黑白、全彩、部分彩色，未知时留空。")
+        if "release_type" in fields and self.release_type not in RELEASE_TYPES:
+            raise ValueError("发行性质请填写同人发行、商业出版或个人独立发布，未知时留空。")
+        if "release_methods" in fields and any(item not in RELEASE_METHODS for item in self.release_methods):
+            raise ValueError("发布方式请使用公开发布、单次购买、会员订阅或免费与付费并行。")
+        if "reading_direction" in fields and self.reading_direction not in READING_DIRECTIONS:
+            raise ValueError("阅读方向选项无效。")
         if "manga" in fields and self.manga not in ("Unknown", "Yes", "No", "YesAndRightToLeft"):
             raise ValueError("阅读方向无效。")
-        if "language" in fields and not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", self.language):
+        if "language" in fields and self.language and not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", self.language):
             raise ValueError("语言请填写 ja、zh-Hans、zh-Hant 等语言代码。")
         if "web" in fields:
             for url in self.web:
@@ -229,7 +350,7 @@ class Metadata:
             values = value if isinstance(value, list) else [value]
             if any(isinstance(v, str) and re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", v) for v in values):
                 raise ValueError("元数据中含有 XML 不支持的字符。")
-            if field_name in {"original_works", "characters", "release_type", "publication_format", "tags"}:
+            if field_name in {"original_works", "characters", "release_type", "publication_format", "release_methods", "release_platforms", "color", "tags"}:
                 if any(re.search(r"[,，;；\n]", v) for v in values):
                     raise ValueError("每个标签值请单独填写，不能包含逗号、分号或换行。")
 
@@ -253,7 +374,7 @@ class Metadata:
 
     @classmethod
     def from_dict(cls, value: dict) -> Metadata:
-        values = dict(value)
+        values = dict(value) if V12_FIELDS.issubset(value) else migrate_legacy_values(value)
         legacy = "title" not in values
         if legacy:
             tags = values.get("tags", [])
@@ -283,7 +404,7 @@ def from_comicinfo(data: bytes, fallback_title: str) -> Metadata:
     root = parse_xml(data)
     get = lambda tag: (root.findtext(tag) or "").strip()
     tags = split_values(get("Tags"))
-    language = get("LanguageISO") or "ja"
+    language = get("LanguageISO")
     title = get("Title") or get("Series") or fallback_title
     cover = next((p.get("Image", "0") for p in root.findall("./Pages/Page") if p.get("Type") == "FrontCover"), "0")
     black_and_white = get("BlackAndWhite") or ("No" if "全彩" in tags else "Unknown")
@@ -291,7 +412,7 @@ def from_comicinfo(data: bytes, fallback_title: str) -> Metadata:
     translation_evidence = bool(translator) or has_translation_tag(tags)
     if translation_evidence and not translator:
         translator = "未知汉化"
-    return Metadata(
+    values = dict(
         title=title, original_title=title, series=get("Series"), localized_series=get("LocalizedSeries"),
         collection_mode="series" if get("Series") else "oneshot",
         number=get("Number"), count=get("Count") if get("Count") != "-1" else "",
@@ -302,13 +423,14 @@ def from_comicinfo(data: bytes, fallback_title: str) -> Metadata:
         # Language describes this edition, not whether it was translated. Chinese originals are valid.
         translated=translation_evidence,
         uncensored="无修正" in tags or "修正状态:无修正" in tags,
-        full_color=black_and_white == "No", black_and_white=black_and_white,
+        full_color=False, black_and_white=black_and_white,
         manga=get("Manga") or "Unknown", web=get("Web").split(),
         language=language, age_rating=get("AgeRating") or "Unknown",
         summary=get("Summary"), year=get("Year") if get("Year") != "-1" else "",
         month=get("Month") if get("Month") != "-1" else "", day=get("Day") if get("Day") != "-1" else "",
         cover_index=int(cover) if cover.isdecimal() else 0, original_xml=data.decode("utf-8-sig"),
     )
+    return Metadata.from_dict(migrate_legacy_values(values))
 
 
 def to_comicinfo(metadata: Metadata, page_count: int) -> bytes:
@@ -318,14 +440,14 @@ def to_comicinfo(metadata: Metadata, page_count: int) -> bytes:
     fields = {
         "Title": value.display_title, "Series": value.series.strip() if value.collection_mode == "series" else "",
         "Number": value.number.strip() if value.collection_mode == "series" else "",
-        "Count": value.count if value.collection_mode == "series" else "", "Volume": "",
+        "Count": value.count if value.collection_mode == "series" else "", "Volume": value.volume,
         "LocalizedSeries": "",  # Komga alternateTitles are supplied through its API.
         "Summary": value.summary.strip(), "Year": value.year, "Month": value.month, "Day": value.day,
         "Writer": ", ".join(value.authors), "Penciller": ", ".join(value.pencillers),
         "Translator": value.translator.strip(), "Publisher": value.publisher.strip(), "Genre": value.genre,
         "Tags": ", ".join(value.all_tags), "AgeRating": value.age_rating, "Web": " ".join(value.web),
         "PageCount": str(page_count), "LanguageISO": value.language,
-        "BlackAndWhite": value.black_and_white, "Manga": value.manga,
+        "BlackAndWhite": "", "Manga": value.manga,
         "Characters": ", ".join(value.characters),  # Komga character entities plus portable 角色: tag copies.
         "SeriesSort": "",
         "SeriesGroup": "", "StoryArc": "", "StoryArcNumber": "", "AlternateSeries": "", "AlternateNumber": "",

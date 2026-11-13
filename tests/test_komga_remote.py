@@ -24,7 +24,7 @@ class KomgaRemoteTests(unittest.TestCase):
                          "numberSort": 1.0, "isbn": "unknown-preserved", "releaseDate": "2020-02-03",
                          "authors": [{"name": "Writer", "role": "writer"}, {"name": "Pencil", "role": "penciller"}, {"name": "Inker", "role": "inker"}],
                          "tags": ["原作:OldIP", "全彩", "其他:保留"],
-                         "notableEntities": entities if entities is not None else [{"kind": "team", "name": "保留团队"}, {"kind": "character", "name": "原角色"}],
+                         "notableEntities": entities if entities is not None else [{"kind": "team", "name": "保留团队"}, {"kind": "character", "name": "原角色"}, {"kind": "年龄分级", "name": "Everyone"}, {"kind": "内容类型", "name": "漫画"}],
                          "links": [{"label": "标签一", "url": "https://example.org/a"}, {"label": "标签二", "url": "https://example.org/a"}]}}
         self.remote_series["s"] = {
             "id": "s", "libraryId": "lib", "deleted": False, "oneshot": oneshot,
@@ -43,8 +43,8 @@ class KomgaRemoteTests(unittest.TestCase):
         return self.call("approve", id=identity, metadata=metadata)
 
     def test_pull_creates_scoped_persistent_remote_records_without_local_files(self):
-        self.seed("b1")
-        self.seed("b2")
+        self.seed("b1", entities=[])
+        self.seed("b2", entities=[])
         result = self.call("komga_pull")
         self.assertEqual(result["added"], 2)
         self.assertEqual(result["scope"], komga_scope(self.url + "/", "lib"))
@@ -64,7 +64,6 @@ class KomgaRemoteTests(unittest.TestCase):
 
     def test_unchanged_approval_and_sync_issue_zero_patches_and_preserve_unknown_values(self):
         self.seed()
-        self.remote_books["b1"]["metadata"]["authors"] = []
         self.call("komga_pull")
         record = self.records()["b1"]
         before_book, before_series = deepcopy(self.remote_books), deepcopy(self.remote_series)
@@ -111,7 +110,8 @@ class KomgaRemoteTests(unittest.TestCase):
         self.assertEqual((shared["ageRating"], shared["genres"], shared["readingDirection"]), (17, ["奇幻"], "WEBTOON"))
         for payload in self.patches("books"):
             self.assertEqual(set(payload), {"notableEntities", "notableEntitiesLock", "tags", "tagsLock"})
-            self.assertFalse(any(item["kind"] in ("年龄分级", "内容类型") for item in payload["notableEntities"]))
+            self.assertIn({"kind": "年龄分级", "name": "Everyone"}, payload["notableEntities"])
+            self.assertIn({"kind": "内容类型", "name": "漫画"}, payload["notableEntities"])
 
     def test_refresh_conflict_and_keep_local_rebase_preserve_only_actual_edits(self):
         self.seed()
@@ -221,7 +221,7 @@ class KomgaRemoteTests(unittest.TestCase):
         self.assertEqual(snapshot["book"]["metadata"]["numberSort"], 10 ** 1000)
 
     def test_age_change_clears_derived_correction_copies_but_keeps_local_unchecked_flag(self):
-        self.seed(entities=[{"kind": "年龄分级", "name": "R18+"}, {"kind": "修正状态", "name": "无修正"}, {"kind": "team", "name": "保留"}])
+        self.seed(entities=[{"kind": "年龄分级", "name": "R18+"}, {"kind": "内容类型", "name": "漫画"}, {"kind": "修正状态", "name": "无修正"}, {"kind": "team", "name": "保留"}])
         self.remote_books["b1"]["metadata"]["tags"].append("修正状态:无修正")
         self.call("komga_pull")
         record = self.records()["b1"]

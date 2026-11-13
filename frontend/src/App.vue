@@ -9,7 +9,7 @@ import BatchEditDialog from './components/BatchEditDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
 import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult } from './types'
-import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode } from './types'
+import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
@@ -274,18 +274,20 @@ async function approveCurrent() {
   if (!current.value || !form.value || disabled.value || !canEditComic(current.value)) return
   if (!reviewed.value) { ElMessage.warning('请先核对作品，并勾选审核确认'); return }
   const remote = current.value.kind === 'komga'
+  const m = form.value
+  if (!m.title.trim()) { ElMessage.warning('请填写作品原始标题，无需强制填写中文标题'); return }
+  if (!m.authors.some(author => author.trim())) { ElMessage.warning('请在“作者与出版”中填写至少一位真实作者'); return }
+  if (!comicGenres.includes(m.genre)) { ElMessage.warning('请在“内容与分级”中选择实际内容类型：漫画、小说、CG集、画集、设定集或插画集'); return }
+  if (!['Everyone', 'MA15+', 'R18+'].includes(m.age_rating)) { ElMessage.warning('请在“内容与分级”中确认本册年龄分级：全年龄、MA15+ 或 R18'); return }
+  if (![...m.tags, ...customTags(m)].some(tag => tag.trim())) { ElMessage.warning('请填写至少一条真实题材标签或已确认分类；未知信息请保存草稿，不填写“无”凑数'); return }
+  if (m.original_works.length > 1) { ElMessage.warning('旧资料包含多个原作，请在“内容与分级”中核对并改为一个'); return }
+  const translators = m.translator.split(/[,，;；\n]/).map(value => value.trim()).filter(Boolean)
+  if (translators.some(value => ['未知汉化', '未知漢化', '中国翻訳', '中国翻译', '中國翻譯', '未知翻译'].includes(value))) { ElMessage.warning('请在“作者与出版”中补充已知翻译版本的实际译者或汉化组'); return }
   if (!remote) {
-    const m = form.value
-    if (!m.title.trim()) { ElMessage.warning('请填写作品名称'); return }
-    if (!['Everyone', 'MA15+', 'R18+'].includes(m.age_rating)) { ElMessage.warning('请在“内容与分类”中确认年龄分级：全年龄、MA15+ 或 R18'); return }
-    const translators = m.translator.split(/[,，;；\n]/).map(value => value.trim()).filter(Boolean)
-    if (translators.some(value => ['未知汉化', '未知漢化', '中国翻訳', '中国翻译', '中國翻譯', '未知翻译'].includes(value))) { ElMessage.warning('请在“创作与出版”中补充已知翻译版本的实际译者或汉化组'); return }
     if (collectionMode(m) === 'series') {
       if (!m.series.trim()) { ElMessage.warning('多卷系列请填写系列名称；独立作品请选择 One-Shot 模式'); return }
-      if (!m.number.trim()) { ElMessage.warning('请填写册编号 Number，完整一卷也使用 Number 排序'); return }
       if (m.localized_series.trim() && !m.localized_series_label.trim()) { ElMessage.warning('系列别名需要填写标签，例如 zh-Hans 或原名'); return }
     }
-    if (!m.authors.some(a => a.trim())) { ElMessage.warning('请填写至少一位作者'); return }
   }
   await runTask('审核作品', () => invoke('approve', { id: current.value!.id, metadata: clone(form.value) }), () => {
     ElMessage.success(remote ? '审核通过，可以同步到 Komga' : '审核通过，可以生成 CBZ')
@@ -524,7 +526,7 @@ onBeforeUnmount(() => unsubscribe?.())
     <KomgaSettingsDialog v-model="komgaSettingsVisible" :continue-sync="pendingSyncIds.length > 0" :continue-pull="pendingPull" @state="dialogTask" @saved="komgaConfigured" />
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <ImportDialog v-model="importVisible" :mode="importMode" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
-    <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" @state="dialogTask" @completed="batchSaved" />
+    <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
 
     <el-dialog v-model="planVisible" title="确认生成计划" width="min(940px, 90vw)" :close-on-click-modal="false" destroy-on-close class="plan-dialog"><template v-if="plan"><div class="dialog-intro"><div class="dialog-icon"><el-icon :size="24"><Box /></el-icon></div><div><h3>即将生成 {{ plan.items.length }} 本漫画</h3><p>先检查成品路径，确认后将逐本打包并校验。</p></div></div><el-alert title="只新增文件，不覆盖已有成品；所有源文件保留。" type="info" :closable="false" show-icon /><el-alert v-for="warning in planWarnings" :key="warning" :title="warning" type="warning" :closable="false" show-icon /><el-table :data="plan.items" max-height="330" class="plan-table"><el-table-column label="作品" prop="title" min-width="160" /><el-table-column label="成品路径" min-width="320"><template #default="scope"><span class="plan-path" :title="scope.row.source">{{ scope.row.destination }}</span><div class="plan-source">源：{{ scope.row.source }}</div></template></el-table-column><el-table-column label="页数" prop="pageCount" width="60" align="center" /><el-table-column label="附件" prop="attachmentCount" width="60" align="center" /></el-table><p class="plan-note">图片不转码，完成后检查 CRC、SHA-256、页数和 ComicInfo.xml。原始内容约 {{ sizeText(plan.totalBytes) }}，请保留足够空间。</p></template><template #footer><el-button @click="planVisible = false">返回检查</el-button><el-button type="primary" :icon="Check" @click="confirmExport">确认生成并校验</el-button></template></el-dialog>
 

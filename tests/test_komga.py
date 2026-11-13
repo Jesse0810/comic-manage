@@ -16,7 +16,7 @@ from comic_manage.sources import inspect_source
 
 class KomgaMetadataTests(unittest.TestCase):
     def valid(self, **fields):
-        return Metadata(title="作品", authors=["作者"], age_rating="Everyone", **fields)
+        return Metadata(**{"title": "作品", "authors": ["作者"], "genre": "漫画", "age_rating": "Everyone", "tags": ["日常"], **fields})
 
     def test_xml_import_infers_real_series_without_guessing_number_from_volume(self):
         metadata = from_comicinfo('<ComicInfo><Title>卷二</Title><Series>真实系列</Series><Volume>2</Volume></ComicInfo>'.encode(), "fallback")
@@ -33,38 +33,38 @@ class KomgaMetadataTests(unittest.TestCase):
                               localized_series="旧别名", characters=["甲", "乙"], original_xml=old_xml)
         before = metadata.to_dict()
         root = parse_xml(to_comicinfo(metadata, 3))
-        for element in ("Series", "Number", "Count", "Volume", "LocalizedSeries", "SeriesSort", "SeriesGroup", "StoryArc", "StoryArcNumber", "AlternateSeries", "AlternateNumber"):
+        for element in ("Series", "Number", "Count", "LocalizedSeries", "SeriesSort", "SeriesGroup", "StoryArc", "StoryArcNumber", "AlternateSeries", "AlternateNumber"):
             self.assertIsNone(root.find(element), element)
+        self.assertEqual(root.findtext("Volume"), "4")
         self.assertEqual(root.findtext("Characters"), "甲, 乙")
-        self.assertEqual(root.findtext("Tags"), "角色:甲, 角色:乙")
+        self.assertEqual(set(root.findtext("Tags").split(", ")), {"角色:甲", "角色:乙", "日常"})
         self.assertEqual(root.findtext("Notes"), "Keep")
         self.assertEqual(metadata.to_dict(), before)
         imported = from_comicinfo(to_comicinfo(metadata, 3), "fallback")
         self.assertEqual(imported.characters, ["甲", "乙"])
         self.assertEqual(imported.collection_mode, "oneshot")
 
-    def test_true_series_requires_number_and_excludes_volume_and_kavita_alias(self):
+    def test_true_series_preserves_optional_number_explicit_volume_and_excludes_kavita_alias(self):
         metadata = self.valid(series="真实系列", volume="2", count="3", localized_series="中文系列", localized_series_label="原名")
-        with self.assertRaisesRegex(ValueError, "Number"):
-            to_comicinfo(metadata, 1)
+        self.assertIsNone(parse_xml(to_comicinfo(metadata, 1)).find("Number"))
         metadata.number = "2"
         root = parse_xml(to_comicinfo(metadata, 1))
         self.assertEqual(root.findtext("Series"), "真实系列")
         self.assertEqual(root.findtext("Number"), "2")
         self.assertEqual(root.findtext("Count"), "3")
-        self.assertIsNone(root.find("Volume"))
+        self.assertEqual(root.findtext("Volume"), "2")
         self.assertIsNone(root.find("LocalizedSeries"))
         self.assertEqual(komga_metadata(metadata)["alternateTitles"], [{"label": "原名", "title": "中文系列"}])
 
     def test_supplementary_entities_keep_each_books_age_genre_and_color(self):
-        metadata = Metadata(title="作品", authors=["作者"], age_rating="R18+", genre="同人志", black_and_white="No",
-                            original_works=["东方Project"], release_type="同人", publication_format="独立短篇", uncensored=True)
+        metadata = Metadata(title="作品", authors=["作者"], age_rating="R18+", genre="漫画", color="部分彩色",
+                            original_works=["东方Project"], release_type="同人发行", publication_format="独立作品", uncensored=True)
         entities = komga_metadata(metadata)["notableEntities"]
-        for entity in ({"kind": "年龄分级", "name": "R18+"}, {"kind": "内容类型", "name": "同人志"},
-                       {"kind": "色彩", "name": "彩色/非黑白"}, {"kind": "修正状态", "name": "无修正"}):
+        for entity in ({"kind": "年龄分级", "name": "R18+"}, {"kind": "内容类型", "name": "漫画"},
+                       {"kind": "色彩", "name": "部分彩色"}, {"kind": "修正状态", "name": "无修正"}):
             self.assertIn(entity, entities)
         metadata.age_rating = "Everyone"
-        metadata.black_and_white = "Unknown"
+        metadata.color = ""
         kinds = {entity["kind"] for entity in komga_metadata(metadata)["notableEntities"]}
         self.assertNotIn("色彩", kinds)
         self.assertNotIn("修正状态", kinds)
@@ -115,8 +115,8 @@ class KomgaCatalogTests(unittest.TestCase):
         return self.repo.get(identity)
 
     def test_output_directories_group_real_series_across_writers_without_name_collisions(self):
-        first = self.comic("first", Metadata(title="第一卷", authors=["甲"], series="共同系列", number="1", age_rating="Everyone"))
-        second = self.comic("second", Metadata(title="第二卷", authors=["乙"], series="共同系列", number="2", age_rating="Everyone"))
+        first = self.comic("first", Metadata(title="第一卷", authors=["甲"], series="共同系列", number="1", genre="漫画", age_rating="Everyone", tags=["日常"]))
+        second = self.comic("second", Metadata(title="第二卷", authors=["乙"], series="共同系列", number="2", genre="漫画", age_rating="Everyone", tags=["日常"]))
         output = self.root / "out"
         first_plan, second_plan = make_plan(first, output), make_plan(second, output)
         self.assertEqual(first_plan.destination.parent, second_plan.destination.parent)
@@ -134,7 +134,7 @@ class KomgaCatalogTests(unittest.TestCase):
         self.assertTrue(first_plan.warnings)
 
     def test_v14_migration_backs_up_raw_data_keeps_removed_records_and_revokes_review(self):
-        comic = self.comic("old", Metadata(title="人工标题", authors=["作者"], series="旧系列", number="1", age_rating="Everyone"))
+        comic = self.comic("old", Metadata(title="人工标题", authors=["作者"], series="旧系列", number="1", genre="漫画", age_rating="Everyone", tags=["日常"]))
         previous = comic.metadata.to_dict()
         previous.pop("collection_mode")
         previous.pop("localized_series_label")

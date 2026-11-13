@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import re
 import unicodedata
 
-from .metadata import Metadata, split_values
+from .metadata import COLORS, GENRES, RELEASE_METHODS, RELEASE_PLATFORMS, RELEASE_TYPES, Metadata, split_values
 
 
 @dataclass(frozen=True)
@@ -25,10 +25,12 @@ class _Group:
 
 _BRACKETS = {"[": "]", "［": "］"}
 _GENRES = {
-    "同人志": "同人志", "同人誌": "同人志",
-    "商业志": "商业志", "商業志": "商业志", "商业誌": "商业志", "商業誌": "商业志",
-    "单行本": "单行本", "單行本": "单行本",
+    **{value: value for value in GENRES},
+    "同人志": "漫画", "同人誌": "漫画", "商业志": "漫画", "商業志": "漫画", "商业誌": "漫画", "商業誌": "漫画",
 }
+_RELEASE_TYPES = {"同人": "同人发行", "商业": "商业出版", "商業": "商业出版", **{value: value for value in RELEASE_TYPES if value}}
+_PUBLICATION_FORMATS = {"独立短篇": "独立作品", "單行本": "单行本", **{value: value for value in ("独立作品", "单行本", "合集", "分卷", "连载")}}
+_PLATFORMS = {value.casefold(): value for value in RELEASE_PLATFORMS}
 _OTHER_LABELS = {"digital", "dl版", "dl", "電子版", "电子版", "掃圖", "扫图", "scan", "raw", "生肉", "有修正", "黑白"}
 _DATE = re.compile(r"(\d{4})[.-](\d{1,2})")
 _DATE_LIKE = re.compile(r"\d{4}(?:[.-].*)?")
@@ -125,6 +127,7 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
     publishers: list[str] = []
     translators: list[str] = []
     plain_author_seen = False
+    colors_seen: set[str] = set()
 
     for group in groups:
         value = group.value
@@ -158,9 +161,13 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
 
         if label in ("无修正", "無修正", "无修正版", "無修正版"):
             metadata.uncensored = True
-        elif label == "全彩":
-            metadata.full_color = True
-            metadata.black_and_white = "No"
+        elif label in COLORS[1:]:
+            colors_seen.add(label)
+            if len(colors_seen) > 1:
+                warnings.append("发现多个色彩标签，请按正文内容人工核对。")
+                metadata.color = ""
+            else:
+                metadata.color = label
         elif label in _GENRES:
             genre = _GENRES[label]
             if metadata.genre and metadata.genre != genre:
@@ -168,6 +175,23 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
                 warnings.append(f"发现多个作品类型，请确认：{metadata.genre} / {value}")
             else:
                 metadata.genre = genre
+            inferred_release = "同人发行" if label in ("同人志", "同人誌") else "商业出版" if label in ("商业志", "商業志", "商业誌", "商業誌") else ""
+            if inferred_release:
+                if metadata.release_type and metadata.release_type != inferred_release:
+                    metadata.tags.append(value)
+                    warnings.append("发现相互冲突的发行性质标签，请人工核对。")
+                else:
+                    metadata.release_type = inferred_release
+        elif label in _RELEASE_TYPES:
+            metadata.release_type = _RELEASE_TYPES[label]
+        elif label in _PUBLICATION_FORMATS:
+            metadata.publication_format = _PUBLICATION_FORMATS[label]
+        elif label in RELEASE_METHODS:
+            metadata.release_methods.append(label)
+        elif label.casefold() in _PLATFORMS:
+            metadata.release_platforms.append(_PLATFORMS[label.casefold()])
+        elif ":" in label and label.partition(":")[0] in ("原作", "角色", "发行性质", "出版形态", "发布方式", "发布平台", "色彩"):
+            metadata.tags.append(value)
         elif any(token in label for token in ("汉化", "漢化", "翻译", "翻譯", "翻訳")):
             normalized = label.translate(str.maketrans({"國": "国", "漢": "汉", "譯": "译", "訳": "译"}))
             translator = "未知汉化" if normalized in ("中国翻译", "中国汉化", "未知汉化", "未知翻译", "汉化", "翻译") else value

@@ -9,16 +9,18 @@ const path = require('node:path')
 const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull'])
 const BATCH_TEXT_FIELDS = new Set([
-  'genre', 'series', 'localized_series', 'number', 'count', 'translator', 'publisher',
+  'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
-  'age_rating', 'black_and_white', 'manga', 'collection_mode', 'localized_series_label',
+  'age_rating', 'color', 'reading_direction', 'manga', 'collection_mode', 'localized_series_label',
 ])
-const BATCH_LIST_FIELDS = new Set(['authors', 'pencillers', 'original_works', 'characters', 'web'])
+const BATCH_LIST_FIELDS = new Set(['authors', 'pencillers', 'original_works', 'characters', 'web', 'tags', 'release_methods', 'release_platforms'])
 const BATCH_ENUMS = {
   collection_mode: ['oneshot', 'series'],
-  release_type: ['', '同人', '商业'],
+  genre: ['', '漫画', '小说', 'CG集', '画集', '设定集', '插画集'],
+  release_type: ['', '同人发行', '商业出版', '个人独立发布'],
   age_rating: ['Unknown', 'Everyone', 'MA15+', 'R18+'],
-  black_and_white: ['Unknown', 'Yes', 'No'],
+  color: ['', '黑白', '全彩', '部分彩色'],
+  reading_direction: ['', 'LEFT_TO_RIGHT', 'RIGHT_TO_LEFT', 'VERTICAL', 'WEBTOON'],
   manga: ['Unknown', 'Yes', 'No', 'YesAndRightToLeft'],
 }
 
@@ -36,10 +38,12 @@ function validateBatchEdit(changes) {
     if (BATCH_LIST_FIELDS.has(field)) {
       if (!Array.isArray(value) || value.length > 1000 || (field === 'authors' && value.length === 0)
           || value.some(item => !validBatchText(item))) throw new Error(`批量字段 ${field} 的列表无效。`)
+      if (field === 'original_works' && value.length > 1) throw new Error('原作最多填写一个名称。')
+      if (field === 'release_methods' && value.some(item => !['公开发布', '单次购买', '会员订阅', '免费与付费并行'].includes(item.trim()))) throw new Error('发布方式无效。')
     } else if (field === 'uncensored') {
       if (typeof value !== 'boolean') throw new Error('无修正选项无效。')
     } else if (BATCH_TEXT_FIELDS.has(field)) {
-      if (!validBatchText(value, field !== 'language')) throw new Error(`批量字段 ${field} 的文本无效。`)
+      if (!validBatchText(value, true)) throw new Error(`批量字段 ${field} 的文本无效。`)
       if (Object.hasOwn(BATCH_ENUMS, field) && !BATCH_ENUMS[field].includes(value.trim())) throw new Error(`批量字段 ${field} 的选项无效。`)
     } else {
       throw new Error('批量字段无效。')
@@ -92,7 +96,7 @@ function validateCall(method, params) {
     if (fields) {
       if (Object.keys(fields).some(key => !['authors', 'genre'].includes(key))) throw new Error('批量字段无效。')
       if (fields.authors !== undefined && (!Array.isArray(fields.authors) || fields.authors.length > 1000 || fields.authors.some(author => typeof author !== 'string' || !author.trim() || author.length > 32767))) throw new Error('作者无效。')
-      if (fields.genre !== undefined && (typeof fields.genre !== 'string' || !fields.genre.trim() || fields.genre.length > 32767)) throw new Error('类型无效。')
+      if (fields.genre !== undefined && (typeof fields.genre !== 'string' || !fields.genre || !BATCH_ENUMS.genre.includes(fields.genre))) throw new Error('类型无效。')
     }
   }
   if (method === 'batch_edit') validateBatchEdit(params.changes)

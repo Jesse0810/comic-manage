@@ -70,6 +70,7 @@ def synchronize(repo, identities: list[str], url: str, api_key: str, library_id:
                     source = require_scope(repo.get_komga_source(identity), client, library_id)
                     if source["unavailable"] or source["conflict"]:
                         raise ValueError("远端记录不可用或存在冲突，请重新读取并处理后再审核。")
+                    comic.metadata.validate_review()
                     validate_changes(comic.metadata, set(source["dirty_fields"]))
                     book = remote_by_id.get(source["book_id"])
                     if not book or book.get("deleted") or book.get("libraryId") != library_id or book.get("seriesId") != source["series_id"] or not _same_path(book.get("url", ""), source["remote_path"]):

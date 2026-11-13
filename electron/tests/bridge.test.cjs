@@ -225,7 +225,10 @@ test('request boundary rejects arbitrary methods, malformed records and unsafe n
     ['batch_edit', {ids:['book'],changes:{pencillers:[' ']}}],
     ['batch_edit', {ids:['book'],changes:{web:[null]}}],
     ['batch_edit', {ids:['book'],changes:{uncensored:0}}],
-    ['batch_edit', {ids:['book'],changes:{language:''}}],
+    ['batch_edit', {ids:['book'],changes:{black_and_white:'No'}}],
+    ['batch_edit', {ids:['book'],changes:{genre:'同人志'}}],
+    ['batch_edit', {ids:['book'],changes:{original_works:['原作甲','原作乙']}}],
+    ['batch_edit', {ids:['book'],changes:{release_methods:['平台推测的方式']}}],
     ['batch_edit', {ids:['book'],changes:{age_rating:'R18'}}],
     ['remove', {ids:['book',null]}],
     ['bootstrap', null],
@@ -240,29 +243,30 @@ test('staged import and batch actions cross the same restricted bridge', async t
   const operations = [
     ['browse_folders', {path:'C:\\Comics'}],
     ['prepare_import', {paths:['C:\\Comics','D:\\漫画'],recursive:true}],
-    ['commit_import', {token:'prepared',ids:['one','two'],defaults:{authors:['みずいろめがね'],genre:'同人志'},overwriteExisting:false}],
-    ['batch_edit', {ids:['one','two'],changes:{genre:'商业志'}}],
+    ['commit_import', {token:'prepared',ids:['one','two'],defaults:{authors:['みずいろめがね'],genre:'漫画'},overwriteExisting:false}],
+    ['batch_edit', {ids:['one','two'],changes:{genre:'漫画'}}],
     ['batch_edit', {ids:['one','two'],changes:{
       collection_mode:'series', series:'原作系列', localized_series:'系列译名',
-      localized_series_label:'zh-Hans', number:'2.5', count:'12',
+      localized_series_label:'zh-Hans', number:'2.5', count:'12', volume:'7',
       authors:['みずいろめがね'], pencillers:['森野'], translator:'译者',
-      original_works:['东方Project'], characters:['灵梦'], release_type:'同人',
+      original_works:['东方Project'], characters:['灵梦'], release_type:'同人发行',
       publication_format:'单行本', year:'2024', month:'2', day:'29',
-      language:'zh-Hans', age_rating:'R18+', black_and_white:'No',
-      manga:'YesAndRightToLeft', uncensored:true, web:['https://example.org/comic'],
+      language:'zh-Hans', age_rating:'R18+', color:'部分彩色',
+      release_methods:['会员订阅','单次购买'], release_platforms:['Fantia','自定义平台'], tags:['日常'],
+      manga:'YesAndRightToLeft', reading_direction:'WEBTOON', uncensored:true, web:['https://example.org/comic'],
     }}],
     ['batch_edit', {ids:['one','two'],changes:{
       collection_mode:'oneshot', genre:'', series:'', localized_series:'',
       localized_series_label:'', translator:'', pencillers:[],
       original_works:[], characters:[], release_type:'', publication_format:'',
-      web:[], uncensored:false,
+      web:[], tags:[], language:'', color:'', reading_direction:'', release_methods:[], release_platforms:[], uncensored:false,
     }}],
     ['remove', {ids:['one']}],
   ]
   for (const [method, params] of operations) assert.deepEqual(await bridge.call(method, params), params)
 })
 
-test('collection patches reject unknown modes, malformed labels and retired Volume fields', () => {
+test('collection patches reject unknown modes, malformed labels and retired color fields', () => {
   const invalidChanges = [
     {collection_mode:'collection'},
     {collection_mode:'Series'},
@@ -271,7 +275,7 @@ test('collection patches reject unknown modes, malformed labels and retired Volu
     {collection_mode:true},
     {localized_series_label:['zh-Hans']},
     {localized_series_label:' '},
-    {volume:'3'},
+    {black_and_white:'No'},
     {Volume:'3'},
   ]
   for (const changes of invalidChanges) {

@@ -23,7 +23,7 @@ class FilenameParserTests(unittest.TestCase):
         self.assertTrue(metadata.translated)
         self.assertEqual(metadata.language, "zh-Hans")
         self.assertTrue(metadata.uncensored)
-        self.assertTrue(metadata.full_color)
+        self.assertEqual(metadata.color, "全彩")
         self.assertEqual(warnings, [])
 
     def test_simple_title_is_not_changed(self):
@@ -31,7 +31,7 @@ class FilenameParserTests(unittest.TestCase):
         metadata, warnings = parse_filename(title)
         self.assertEqual(metadata.original_title, title)
         self.assertEqual(metadata.authors, [])
-        self.assertEqual(metadata.language, "ja")
+        self.assertEqual(metadata.language, "")
         self.assertEqual(warnings, [])
 
     def test_unknown_translator_aliases_use_same_name(self):
@@ -53,13 +53,14 @@ class FilenameParserTests(unittest.TestCase):
     def test_traditional_tags_and_genre_are_canonicalized(self):
         metadata, _ = parse_filename("[作者] 作品 [無修正] [全彩] [同人誌]")
         self.assertEqual(metadata.authors, ["作者"])
-        self.assertEqual(metadata.genre, "同人志")
+        self.assertEqual(metadata.genre, "漫画")
+        self.assertEqual(metadata.release_type, "同人发行")
         self.assertTrue(metadata.uncensored)
-        self.assertTrue(metadata.full_color)
+        self.assertEqual(metadata.color, "全彩")
         self.assertEqual(metadata.original_title, "作品")
 
     def test_explicit_genres_without_guessing(self):
-        for label, expected in (("商業誌", "漫画"), ("商业志", "漫画"), ("單行本", "漫画")):
+        for label, expected in (("商業誌", "漫画"), ("商业志", "漫画"), ("單行本", "")):
             with self.subTest(label=label):
                 metadata, _ = parse_filename(f"[作者] 作品 [{label}]")
                 self.assertEqual(metadata.genre, expected)
@@ -68,9 +69,10 @@ class FilenameParserTests(unittest.TestCase):
 
     def test_conflicting_genres_preserve_second_type_for_review(self):
         metadata, warnings = parse_filename("作品 [同人志] [商业志]")
-        self.assertEqual(metadata.genre, "同人志")
+        self.assertEqual(metadata.genre, "漫画")
+        self.assertEqual(metadata.release_type, "同人发行")
         self.assertIn("商业志", metadata.tags)
-        self.assertTrue(any("多个作品类型" in warning for warning in warnings))
+        self.assertTrue(any("冲突的发行性质" in warning for warning in warnings))
 
     def test_fullwidth_brackets_and_nested_author_alias(self):
         metadata, _ = parse_filename("［2020-01］ ［社團（作者（別名））］ 作品 ［無修正］")
@@ -111,7 +113,7 @@ class FilenameParserTests(unittest.TestCase):
         self.assertEqual(metadata.original_title, "[Circle [Alias] (作者)] 原名")
         self.assertEqual(metadata.authors, [])
         self.assertTrue(any("嵌套" in warning for warning in warnings))
-        self.assertTrue(metadata.full_color)
+        self.assertEqual(metadata.color, "全彩")
 
     def test_incomplete_author_group_does_not_delete_title(self):
         metadata, warnings = parse_filename("[Circle (作者] 完整作品名 [无修正]")
@@ -145,7 +147,7 @@ class FilenameParserTests(unittest.TestCase):
         metadata, warnings = parse_filename("[作者] [全彩]")
         self.assertEqual(metadata.original_title, "")
         self.assertEqual(metadata.authors, ["作者"])
-        self.assertTrue(metadata.full_color)
+        self.assertEqual(metadata.color, "全彩")
         self.assertTrue(any("未识别到作品标题" in warning for warning in warnings))
 
 
@@ -161,7 +163,7 @@ class InitialMetadataTests(unittest.TestCase):
         metadata, _ = Snapshot(Path("[作者] 作品 [全彩]"), "folder", []).initial_metadata()
         self.assertEqual(metadata.original_title, "作品")
         self.assertEqual(metadata.authors, ["作者"])
-        self.assertTrue(metadata.full_color)
+        self.assertEqual(metadata.color, "全彩")
 
     def test_cbz_fallback_uses_stem_including_date_period(self):
         metadata, _ = Snapshot(Path("[2019.10] [作者] 作品.cbz"), "cbz", []).initial_metadata()
@@ -182,16 +184,17 @@ class InitialMetadataTests(unittest.TestCase):
         metadata, warning = Snapshot(Path("[作者] 作品 [全彩]"), "folder", [], xml=b"<ComicInfo>broken").initial_metadata()
         self.assertEqual(metadata.original_title, "作品")
         self.assertEqual(metadata.authors, ["作者"])
-        self.assertTrue(metadata.full_color)
+        self.assertEqual(metadata.color, "全彩")
         self.assertIn("原 ComicInfo", warning)
 
 
 class MonthMappingTests(unittest.TestCase):
     def test_month_round_trip_preserves_other_xml_fields(self):
         metadata = from_comicinfo(
-            b"<ComicInfo><Series>Title</Series><Number>1</Number><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month><Month>2</Month><CustomField>Keep me</CustomField></ComicInfo>", "fallback"
+            b"<ComicInfo><Series>Title</Series><Number>1</Number><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Genre>comic</Genre><Tags>daily</Tags><Month>1</Month><Month>2</Month><CustomField>Keep me</CustomField></ComicInfo>", "fallback"
         )
         self.assertEqual(metadata.month, "1")
+        metadata.genre = "漫画"
         metadata.month = "10"
         xml = to_comicinfo(metadata, 1)
         root = ET.fromstring(xml)
@@ -200,7 +203,8 @@ class MonthMappingTests(unittest.TestCase):
         self.assertEqual(from_comicinfo(xml, "fallback").month, "10")
 
     def test_empty_month_removes_existing_month(self):
-        metadata = from_comicinfo(b"<ComicInfo><Series>Title</Series><Number>1</Number><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Month>1</Month></ComicInfo>", "fallback")
+        metadata = from_comicinfo(b"<ComicInfo><Series>Title</Series><Number>1</Number><Writer>Author</Writer><AgeRating>Everyone</AgeRating><Genre>comic</Genre><Tags>daily</Tags><Month>1</Month></ComicInfo>", "fallback")
+        metadata.genre = "漫画"
         metadata.month = ""
         self.assertIsNone(ET.fromstring(to_comicinfo(metadata, 1)).find("Month"))
 
@@ -210,11 +214,11 @@ class MonthMappingTests(unittest.TestCase):
     def test_month_validation_is_bounded_and_optional(self):
         for month in ("", "1", "01", "12"):
             with self.subTest(month=month):
-                Metadata(original_title="Title", authors=["Author"], month=month, age_rating="Everyone").validate(1)
+                Metadata(original_title="Title", authors=["Author"], month=month, genre="漫画", tags=["日常"], age_rating="Everyone").validate(1)
         for month in ("0", "13", "-1", "1.5", "Jan", "001"):
             with self.subTest(month=month):
                 with self.assertRaisesRegex(ValueError, "月份"):
-                    Metadata(original_title="Title", authors=["Author"], month=month, age_rating="Everyone").validate(1)
+                    Metadata(original_title="Title", authors=["Author"], month=month, genre="漫画", tags=["日常"], age_rating="Everyone").validate(1)
 
 
 if __name__ == "__main__":

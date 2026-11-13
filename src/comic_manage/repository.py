@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sqlite3
 
-from .metadata import Metadata
+from .metadata import COLORS, READING_DIRECTIONS, V12_FIELDS, Metadata, legacy_color, migration_warnings
 from .sources import Snapshot, source_id
 
 
@@ -77,27 +78,75 @@ class Repository:
         self._migrate_metadata()
 
     def _migrate_metadata(self) -> None:
-        # Back up before converting either an earlier catalog or the former Kavita rules.
+        required = {"title", "collection_mode", "localized_series_label"} | V12_FIELDS
         with self.connect() as db:
-            legacy = [(row["id"], json.loads(row["metadata"]), row["warning"])
+            remote_rows = {row["comic_id"]: dict(row) for row in db.execute("SELECT * FROM komga_sources")}
+            legacy = [(dict(row), json.loads(row["metadata"]))
                       for row in db.execute("SELECT id, metadata, warning FROM comics")
-                      if not {"title", "collection_mode", "localized_series_label"}.issubset(json.loads(row["metadata"]))]
+                      if not required.issubset(json.loads(row["metadata"]))
+                      or (row["id"] in remote_rows and not V12_FIELDS.issubset(json.loads(remote_rows[row["id"]]["base_metadata"])))]
         if not legacy:
             return
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        rule = "metadata-v1_1" if any("title" not in previous for _, previous, _ in legacy) else "komga-v1_1-K"
+        rule = "metadata-v1_1" if any("title" not in previous for _, previous in legacy) else "komga-v1_1-K" if any("collection_mode" not in previous for _, previous in legacy) else "metadata-v1_2"
         backup = self.path.with_name(f"{self.path.stem}.before-{rule}-{stamp}.sqlite3")
         self.backup(backup)
         with self.connect() as db:
-            for comic_id, previous, warning in legacy:
-                metadata = Metadata.from_dict(previous)
-                note = "已切换 Komga 元数据规范，原资料已自动备份，请核对独立作品或系列方式、本册编号、年龄分级与译者后重新审核。"
+            for row, previous in legacy:
+                comic_id = row["id"]
+                remote = remote_rows.get(comic_id)
+                if remote:
+                    snapshot = json.loads(remote["snapshot"])
+                    old_dirty = set(json.loads(remote["dirty_fields"]))
+                    metadata = self._migrate_remote_metadata(previous, snapshot, old_dirty)
+                    base = self._migrate_remote_metadata(json.loads(remote["base_metadata"]), snapshot, set())
+                    rename = {"black_and_white": "color", "full_color": "color", "manga": "reading_direction"}
+                    dirty = {rename.get(field, field) for field in old_dirty}
+                    dirty = sorted(field for field in dirty if field in metadata.to_dict() and getattr(metadata, field) != getattr(base, field))
+                    db.execute("UPDATE komga_sources SET base_metadata=?,dirty_fields=?,pending_sync=0 WHERE comic_id=?",
+                               (json.dumps(base.to_dict(), ensure_ascii=False), json.dumps(dirty), comic_id))
+                else:
+                    evidence = dict(previous)
+                    source = db.execute("SELECT source FROM comics WHERE id=?", (comic_id,)).fetchone()[0]
+                    if "color" not in previous and re.search(r"[\[［]全彩[\]］]", Path(source).name):
+                        evidence["color"] = "全彩"
+                    metadata = Metadata.from_dict(evidence)
+                note = "元数据规范已升级到 v1.2，原资料已自动备份。请核对内容类型、发行分类、色彩和原作后重新审核。"
+                if remote:
+                    note += " 远端原始快照未改动，旧词保留供核对，实际选择新版值后才会写回。"
                 if previous.get("age_rating", "Unknown") not in ("Unknown", "Everyone", "MA15+", "R18+", "Adults Only 18+", "全年龄", "R15", "R18"):
                     note += f" 原分级 {previous['age_rating']} 无法准确对应，已留待确认。"
+                notes = [row["warning"], note, *migration_warnings(previous)]
                 db.execute("UPDATE comics SET metadata=?, status='draft', warning=?, updated_at=? WHERE id=?", (
-                    json.dumps(metadata.to_dict(), ensure_ascii=False), "；".join(filter(None, [warning, note])), now(), comic_id))
-                self._event(db, comic_id, "metadata_rules_migration", json.dumps({"backup": str(backup), "previous": previous}, ensure_ascii=False))
-            db.execute("INSERT INTO settings VALUES ('metadata_rules', '1.1-K') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                    json.dumps(metadata.to_dict(), ensure_ascii=False), " ".join(filter(None, notes)), now(), comic_id))
+                audit = {"backup": str(backup), "previous": previous}
+                if remote:
+                    audit["previousRemote"] = remote
+                self._event(db, comic_id, "metadata_rules_migration", json.dumps(audit, ensure_ascii=False))
+            db.execute("INSERT INTO settings VALUES ('metadata_rules', '1.2') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+
+    @staticmethod
+    def _migrate_remote_metadata(previous: dict, snapshot: dict, dirty: set[str]) -> Metadata:
+        values = Metadata.from_dict(previous).to_dict()
+        for field in ("genre", "release_type", "publication_format"):
+            if field in previous:
+                values[field] = previous[field]
+        raw = (snapshot.get("book") or {}).get("metadata") or {}
+        entities = raw.get("notableEntities") or []
+        names = lambda kind: [item["name"] for item in entities if item.get("kind", "").strip() == kind and isinstance(item.get("name"), str)]
+        if "color" not in previous and not dirty.intersection({"black_and_white", "full_color"}):
+            colors = list(dict.fromkeys(names("色彩")))
+            values["color"] = (colors[0] if len(colors) == 1 and colors[0] in COLORS else "") if colors else legacy_color({"tags": raw.get("tags") or []})
+        for kind, field in (("发布方式", "release_methods"), ("发布平台", "release_platforms")):
+            if field not in previous and names(kind):
+                values[field] = names(kind)
+        if "reading_direction" not in previous:
+            if "manga" in dirty:
+                values["reading_direction"] = {"No": "LEFT_TO_RIGHT", "YesAndRightToLeft": "RIGHT_TO_LEFT"}.get(previous.get("manga"), "")
+            else:
+                direction = ((snapshot.get("series") or {}).get("metadata") or {}).get("readingDirection")
+                values["reading_direction"] = direction if direction in READING_DIRECTIONS else ""
+        return Metadata.from_dict(values)
 
     @contextmanager
     def connect(self):
@@ -175,7 +224,10 @@ class Repository:
             remote_row = db.execute("SELECT * FROM komga_sources WHERE comic_id=?", (identity,)).fetchone()
             if previous and remote_row:
                 remote = self._source_decode(remote_row)
-                changed = previous["fingerprint"] != fingerprint
+                # Compare both snapshots under the current semantic algorithm. A
+                # rules upgrade must not turn unchanged remote data into conflicts.
+                from .komga_remote import snapshot_fingerprint
+                changed = snapshot_fingerprint(remote["snapshot"]) != fingerprint
                 protected = bool(remote["dirty_fields"] or remote["pending_sync"] or remote["conflict"])
                 if protected:
                     conflict = changed or remote["conflict"]
@@ -243,6 +295,7 @@ class Repository:
                     defaults: dict | None = None, overwrite_existing: bool = False) -> str | None:
         comic_id = source_id(snapshot.path)
         metadata, warning = snapshot.initial_metadata()
+        warning = " ".join(filter(None, [warning, *migration_warnings(metadata.to_dict())]))
         defaults = defaults or {}
         with self.connect() as db:
             removed = db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (comic_id,)).fetchone()
@@ -341,6 +394,8 @@ class Repository:
         if before["cover_index"] != after["cover_index"]:
             raise ValueError("远端封面由 Komga 管理，当前只支持元数据编辑。")
         applicable = {field for field in fields if before.get(field) != after.get(field)}
+        if applicable & {"volume", "manga", "black_and_white", "full_color", "original_xml", "original_title", "chinese_title", "translated"}:
+            raise ValueError("这些本机或 ComicInfo 专用字段不能通过 Komga API 修改。")
         if after["collection_mode"] == "oneshot" and applicable & {"series", "number", "count", "localized_series", "localized_series_label"}:
             raise ValueError("One-Shot 的系列归属、编号和别名不能通过此编辑修改。")
         base = json.loads(row["base_metadata"])

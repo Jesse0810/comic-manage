@@ -1,101 +1,77 @@
-# Komga 元数据规则 v1.1-K
+# 漫画资源元数据规范 v1.2 · Comic Manage
 
-Comic Manage 1.7.1 以用户的 Komga 专用模板为准，对照 Komga 1.30.1 的官方文档和实现。Notable Entities 自动导入需要 Komga 1.29.0 或以上。
+Comic Manage 1.8 按《漫画资源元数据规范 v1.2》组织编辑字段。ComicInfo.xml 和 Tags 保存可移植资料；Komga API 提供服务器索引与系列信息。继续使用 Komga 连接，不新增 Kavita 模式或页面版式字段。
 
-## 作品组织
+## 编辑分组与取值
 
-本节和下方 ComicInfo 映射适用于本地生成 CBZ。直接读取远端书库时保留 Komga 已有组织方式，编辑与同步规则见后文。
+| 分组 | 字段与规则 |
+| --- | --- |
+| 名称与系列 | Title 必填，优先原文；Series 在属于系列时填写；Number 条件填写；Count 只填明确总数；Volume 只填来源明确的独立卷号，不复制 Number；系列别名另存 Komga alternateTitles。 |
+| 作者与出版 | Writer 必填；Penciller 仅在绘画者与作者分离时填写；Publisher 可填社团或出版社；Translator 只填实际译者，空值表示没有翻译资料。 |
+| 内容与分级 | Genre 为漫画、小说、CG集、画集、设定集、插画集；AgeRating 为 Everyone、MA15+、R18+；题材放普通 Tags。原作单值，角色多值。 |
+| 发行与平台 | 发行性质为同人发行、商业出版、个人独立发布；出版形态建议独立作品、单行本、合集、分卷、连载，可扩展。发布方式和发布平台都可多值。 |
+| 日期与阅读 | Year / Month / Day 按已知资料填写，语言可空；Manga 保留原生字段；Komga 阅读方向支持 LEFT_TO_RIGHT、RIGHT_TO_LEFT、VERTICAL、WEBTOON。 |
+| 简介与来源 | Summary 可选；Web 可多条完整链接；PageCount 以实际文件或服务器分析为准。 |
 
-每本作品明确选择“独立作品 One-Shot”或“多卷 / 连续系列”。
+发布方式只使用公开发布、单次购买、会员订阅、免费与付费并行。平台词库包含 Fantia、pixivFANBOX、Ci-en、Patreon、pixiv、BOOTH、DLsite、FANZA同人、DiGiket、Gumroad、Ko-fi、Melonbooks、Toranoana，也可新增。选择平台不会推断发行性质、获取方式、语言或年龄。
 
-| 编辑信息 | 独立作品 | 系列作品 |
+## 色彩与修正状态
+
+色彩为可空的独立分类：黑白、全彩、部分彩色。按正文判断，不计封面；未知时留空，不从页面缩略图或旧“非黑白”字段推断全彩。
+
+新生成 XML 不包含 BlackAndWhite。色彩保存在 `色彩:值` 标签，并可同步为 Komga `色彩` 实体。
+
+只有 R18+ 显示修正状态。默认有修正不生成记录，明确无修正才输出 `修正状态:无修正`。其他分级不输出该标签或实体。批量仅修改勾选字段；改年龄时保留未勾选的历史布尔值，但导出与同步副本按最终分级生成。
+
+## ComicInfo、Tags 与 Komga 的对应
+
+原生 XML 字段包括 Title、Series、Number、Count、Volume、Summary、Year、Month、Day、Writer、Translator、Penciller、Publisher、Genre、Tags、AgeRating、Web、PageCount、LanguageISO、Manga。独立作品省略不适用的 Series / Number / Count；有明确资料的 Volume 可以单独填写。
+
+自定义字段不增加 XML 子元素，统一生成以下前缀：
+
+| 字段 | Tags 前缀 | Komga 实体 kind |
 | --- | --- | --- |
-| 成品目录 | _oneshots/ | 同一 Series 的共同目录 |
-| Title | 作品名称 | 本册或章节名称 |
-| Series | XML 省略 | 实际系列名称 |
-| Number | XML 省略 | 本册 / 章节编号，整卷也使用此字段 |
-| Count | XML 省略 | 已知系列总册数 |
-| Volume | 本机旧值供核对 | 本机旧值供核对，导出省略 |
-| 系列别名与标签 | 暂存旧值 | 通过 API alternateTitles 补充 |
+| 原作 | 原作: | 原作 |
+| 角色 | 角色: | character |
+| 发行性质 | 发行性质: | 发行性质 |
+| 出版形态 | 出版形态: | 出版形态 |
+| 发布方式 | 发布方式: | 发布方式 |
+| 发布平台 | 发布平台: | 发布平台 |
+| 色彩 | 色彩: | 色彩 |
+| 修正状态 | 修正状态: | 修正状态 |
 
-Komga 按父文件夹组织系列。系列目录使用稳定标识区分清洗文件名后可能同名的系列，不按作者分别建立目录。独立作品需要在 Komga Library 的 One-Shots directory 设置为 /_oneshots。单独省略 XML Series 不会启用 One-Shot。
+多值逐条生成标签与实体，去除重复项。角色同时写入 ComicInfo Characters。Genre 与 AgeRating 的逐册 Komga 辅助实体仍可使用 `内容类型`、`年龄分级`，但它们不是新的核心自定义字段，也不生成同名前缀 Tags。
 
-切换组织方式保留本机原值。批量编辑只写勾选项，切换模式后需人工核对编号、系列与别名。旧库首次升级先自动备份，再撤销旧审核。
+不输出普通“汉化、全彩、黑白、无修正、同人志”等重复标签，不记录“生肉、有修正”默认状态；翻译只由 Translator 表达。
 
-## 字段映射
+Komga 不会把 API 修改自动写回 CBZ。远端直接编辑更新服务器资料；本地生成 CBZ 才会把 Tags 和 ComicInfo 写入文件。
 
-| 信息 | ComicInfo.xml | Komga 行为 |
-| --- | --- | --- |
-| 作者、译者、独立绘画者 | Writer、Translator、Penciller | Book 的对应作者角色 |
-| 发售日期 | Year、Month、Day | Book releaseDate，缺月日时 Komga 展示可能补为 1 |
-| 简介 | Summary | Book 简介 |
-| 出版方、内容类型、当前语言 | Publisher、Genre、LanguageISO | Series 汇总信息 |
-| 年龄分级 | Everyone、MA15+、R18+ | Series 的 0、15、18，同系列取最高值 |
-| 阅读方向 | Manga | YesAndRightToLeft 表示右向左 |
-| 多条来源 | 同一 Web 内用空格分隔 | Book links |
-| 页数 | PageCount 为实际图片数 | Komga 自行分析 media.pagesCount |
-| 黑白 / 彩色 | BlackAndWhite | 通过补充实体建立色彩筛选 |
-| 角色 | Characters 与独立的 角色: 标签 | Characters 自动进入 character 实体 |
-| 原作、发行性质、出版形态、修正状态 | Tags 命名空间 | 通过补充清单建立实体 |
+## 审核与批量编辑
 
-日期只填写已知部分，软件不在 XML 中虚构月日。BlackAndWhite=No 表示彩色或非黑白，不推断为全彩。未知色彩保持 Unknown。作者兼任绘画时只填 Writer。中文原创可以不填译者，未知汉化占位仍需人工核实。
+审核需要真实 Title、Writer、Genre、AgeRating，以及至少一条已确认的普通或自定义标签。没有可靠资料时保存草稿，不生成“无”之类占位标签。旧原作多值、旧固定词表不符合新规则时需要核对。
 
-Genre 保存内容类型，题材归入 Tags。汉化、全彩、年龄和普通无修正不重复生成标签。修正状态只用于 R18，默认有修正，只有无修正写入 修正状态:无修正。
+单本和批量都可编辑新字段；多值批量替换列表，勾选后留空表示清空。未勾选字段保持不变，实际改动撤销旧审核。题材属于普通 Tags，不作为 Genre。
 
-ComicInfo 中的封面标记继续保存，Komga 默认封面来自实际首图。改变该标记不会改变 Komga 的封面或图片顺序。旧 SeriesSort、SeriesGroup、StoryArc、AlternateSeries 及 Kavita 扩展 LocalizedSeries 在生成时清理，避免额外系列、合集或阅读清单。
+## Komga 远端工作副本
 
-## 连接与读取远端书库
+从左下角“Komga 连接设置”进入，配置并点击“保存并读取书库”。远端记录按服务器、书库、Book ID 隔离；刷新保留草稿，冲突需要选择保留本机修改或采用远端资料，再重新审核。
 
-在侧栏“Komga 连接设置”中保存服务器地址、管理员 API Key 和目标书库。支持部署子路径。测试连接成功后选择书库并保存。API Key 使用系统加密保存在本机，界面只显示已保存状态；更换地址时需填写新服务器密钥。
+Series 的 Genre、AgeRating、Publisher、Language 等共享资料单独展示。不能把共享类型或分级当成每册已经确认的事实；缺少逐册信息的作品保留待审核。
 
-在左下角“Komga 连接设置”中点击“保存并读取书库”，即可直接编辑远端作品，无需下载漫画后导入或生成 CBZ。每条工作副本绑定原服务器、书库和 Book ID。逐本编辑或选字段批量编辑，保存草稿后逐本预览、核对、审核，最后选中已审核作品“同步到 Komga”。
+远端只 PATCH 实际修改字段，无修改不写入；未编辑的原始角色、链接标签、锁和未知值保留。系列共享字段要求选全所有有效、已审核成员。Manga 和 Volume 没有对应的 Komga 元数据 API 编辑字段，远端视图只读；阅读方向通过原生 Series readingDirection 写入，不伪造 XML 字段或新标签。
 
-再次读取会保留已保存的草稿修改和已审核待同步资料。如果这些作品的远端资料也发生变化，会标记冲突并回到待审核；没有本机待同步修改的作品则更新为远端最新资料。冲突处理方式为：
+本地 XML 的 Manga 与 Komga 阅读方向分别保留，纵向和 Webtoon 不伪装成左右翻页。Volume 会进入本地 XML；Komga 库请关闭“将卷号附加到系列标题”，避免误建系列。
 
-- **保留本机修改**：将实际改过的字段合并到最新远端资料，未改字段跟随远端。
-- **采用远端资料**：采用整份最新远端资料，放弃尚未同步的本机修改。
+## 旧资料迁移
 
-两种处理都会重新建立草稿，需要再次核对审核。远端作品已删除或离开书库时会标记不可用。切换服务器或书库后，其他连接的缓存只读，需切回对应连接再编辑、预览、审核或同步。
+升级前自动备份本机资料库，迁移后需要重新核对审核。保留人工标题与历史名称，不用中文名覆盖原文；旧成品文件不自动改写。
 
-远端预览仅读取当前页，不改变阅读进度，也不调整封面和图片顺序。单页预览上限为 32 MiB；可通过“在 Komga 中查看”打开原作品。
+本地旧“同人志”内容类型转为“漫画”和“同人发行”；旧“同人 / 商业”性质转为“同人发行 / 商业出版”；“独立短篇”转为“独立作品”。旧 BlackAndWhite=Yes 可转换为黑白；No 不能区分全彩和部分彩色，除非另有明确全彩证据，否则留空并提示确认。旧原作多值保留以供核对，不截断丢失。
 
-## 远端工作副本同步
-
-远端工作副本只提交实际改过的字段。未编辑字段和软件无法识别的原始远端资料会保留；没有修改时，审核与同步不会重写元数据。作者只替换被编辑的职责，分类实体只替换本次编辑的类别，其余职责与类别保留。
-
-批量编辑只写勾选项，勾选可选字段后留空表示明确清空。已有的未知年龄、缺失作者等信息可以保持原样，审核只校验本次修改。远端作品的 One-Shot / 系列归属、封面及图片顺序为只读，归属调整需在 Komga 的源文件组织中处理。
-
-同步写回同一 Book ID，并设置对应元数据锁，避免旧 CBZ 自动刷新覆盖本次修改。同步前会再次核对远端资料；发生冲突时先处理并重新审核。
-
-## 系列共享信息
-
-系列名称、出版方、语言、阅读方向、总册数和系列别名是共享信息。Series 的年龄分级和类型也作为共享参考展示：只有本册的独立“年龄分级”“内容类型”实体才作为逐册事实；缺少独立信息时，本册保留 Unknown 或空值，不把系列最高年龄或类型并集当作每册资料。
-
-更新系列字段需要本次有效、已审核且成功处理的作品覆盖远端整个系列；只选部分作品仍可更新本册字段，系列字段会跳过并提示。远端工作副本只更新明确修改的共享项。逐册年龄或类型信息不足时，保留 Series 原有聚合值。
-
-本地成品流程仍按原规则聚合：年龄取最高值，类型取并集，总册数取已知最大值，出版方、语言和阅读方向取非空众数。平票或别名冲突时保留该字段并提示，其余明确字段继续更新。One-Shot 系列从本册派生标题、简介和总数。
-
-真实系列的同标签别名可以更新或清除，同时保留其他标签的别名。修改系列显示名称不会移动 Book 或合并文件目录，也不能改变 One-Shot 组织方式。
-
-## 本地成品同步与结果
-
-原有本地 / NAS 流程继续可用：导入、编辑、审核、生成 CBZ，待目标 Komga 书库扫描后同步。首次使用已生成 CBZ 路径或导入 CBZ 的路径精确匹配，之后保存服务器与书库隔离的 Book ID 映射，本地改名也可同步。
-
-本地流程同步当前已审核的可表达资料，包括标题、作者、简介、册号、完整发行日、标签、链接和分类实体。本机空的简介、标签、链接会清空远端对应字段，未管理的作者职责与实体类别保留。
-
-Komga API 只能表达完整发行日期。仅知部分年月日时，保留远端日期并提示；明确清空日期时才清空远端日期。非数值册号同步文本，但远端原有数值排序无法用 null 清除，结果会说明。
-
-结果分别显示作品与系列的成功、跳过、失败及字段提示。可以取消，已完成的更新保留，未完成项可重新选择后重试。连接与元数据请求不跟随重定向，API Key 不写入本机资料库、同步清单或结果。
-
-## 独立同步清单
-
-工作区信息中保留“导出 Komga 同步清单”，可用于独立 PowerShell 工作流。清单依据当前已生成 CBZ 的 XML 校对后生成。便携包附 resources/scripts/sync-komga.ps1，支持 -ManifestPath 与 -WhatIf。该脚本保留保守的别名合并规则，已有同标签别名的改名或删除需在 Komga 核对处理。
+远端的旧词和原始快照保留为待核对资料，不因升级自动产生同步请求。选择新词、审核并同步后，才更新对应服务器字段。
 
 ## 官方参考
 
-- [Komga 1.30.1](https://github.com/gotson/komga/releases/tag/1.30.1)
-- [ComicInfo 导入](https://komga.org/docs/guides/scan-analysis-refresh/)
-- [One-Shots](https://komga.org/docs/guides/oneshots/)
-- [Notable Entities](https://komga.org/docs/openapi/referential-metadata/)
-- [Book metadata API](https://komga.org/docs/openapi/update-book-metadata/)
-- [Series metadata API](https://komga.org/docs/openapi/update-series-metadata/)
+- [Komga 元数据与刷新](https://komga.org/docs/guides/scan-analysis-refresh/)
+- [Komga Book API 数据字段](https://github.com/gotson/komga/blob/1.30.1/komga/src/main/kotlin/org/gotson/komga/interfaces/api/rest/dto/BookDto.kt)
+- [Komga Series API 数据字段](https://github.com/gotson/komga/blob/1.30.1/komga/src/main/kotlin/org/gotson/komga/interfaces/api/rest/dto/SeriesDto.kt)

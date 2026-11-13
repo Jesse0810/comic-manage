@@ -97,7 +97,7 @@ class KomgaSyncTests(unittest.TestCase):
         (source / "1.jpg").write_bytes(b"image")
         snapshot = inspect_source(source)
         comic_id = self.service.repo.upsert_scan(snapshot)
-        values = {"title": f"新标题-{identity}", "authors": ["作者"], "age_rating": "Everyone",
+        values = {"title": f"新标题-{identity}", "authors": ["作者"], "genre": "漫画", "age_rating": "Everyone", "tags": ["日常"],
                   "series": series, "number": "1", "collection_mode": "oneshot" if oneshot else "series"}
         values.update(fields)
         metadata = Metadata(**values)
@@ -138,9 +138,9 @@ class KomgaSyncTests(unittest.TestCase):
         self.assertEqual(self.requests[0][3], self.key)
 
     def test_native_book_and_complete_series_sync_preserve_unmanaged_values(self):
-        comic = self.comic("first", summary="完整简介", characters=["本机角色"], publisher="发行方", genre="同人志",
+        comic = self.comic("first", summary="完整简介", characters=["本机角色"], publisher="发行方", genre="漫画",
                            web=["https://example.org/page"], translator="汉化组", year="2024", month="2", day="29",
-                           manga="YesAndRightToLeft", localized_series="新译名")
+                           manga="YesAndRightToLeft", reading_direction="RIGHT_TO_LEFT", localized_series="新译名")
         self.remote(comic, "b")
         response = self.sync(comic)
         self.assertEqual((response["updated"], response["seriesUpdated"]), (1, 1))
@@ -176,7 +176,7 @@ class KomgaSyncTests(unittest.TestCase):
         self.assertGreaterEqual(len([item for item in self.requests if item[0] == "POST"]), 4)
 
     def test_full_series_aggregates_mixed_age_genre_and_max_known_count(self):
-        first = self.comic("first", genre="同人志", count="2", publisher="发行方")
+        first = self.comic("first", genre="漫画", count="2", publisher="发行方")
         second = self.comic("second", number="2", genre="CG集", count="3", age_rating="R18+", publisher="")
         self.remote(first, "b1")
         self.remote(second, "b2")
@@ -184,7 +184,7 @@ class KomgaSyncTests(unittest.TestCase):
         self.assertEqual(response["seriesUpdated"], 1)
         payload = self.patches("series")[0]
         self.assertEqual(payload["ageRating"], 18)
-        self.assertEqual(payload["genres"], ["同人志", "CG集"])
+        self.assertEqual(payload["genres"], ["漫画", "CG集"])
         self.assertEqual(payload["totalBookCount"], 3)
         self.assertEqual(payload["publisher"], "发行方")
 
@@ -248,7 +248,7 @@ class KomgaSyncTests(unittest.TestCase):
     def test_direct_source_cbz_matches_path_even_after_local_title_changes(self):
         source = self.root / "imports" / "source.cbz"
         source.parent.mkdir()
-        metadata = Metadata(title="已改的新标题", authors=["作者"], age_rating="Everyone")
+        metadata = Metadata(title="已改的新标题", authors=["作者"], genre="漫画", age_rating="Everyone", tags=["日常"])
         with zipfile.ZipFile(source, "w") as archive:
             archive.writestr("1.jpg", b"image")
             archive.writestr("ComicInfo.xml", to_comicinfo(metadata, 1))
@@ -295,14 +295,14 @@ class KomgaSyncTests(unittest.TestCase):
         self.assertIn("部分日期", response["books"][0]["warnings"][1])
 
     def test_explicit_clears_and_repeated_sync_use_reviewed_values_and_saved_mapping(self):
-        comic = self.comic("first")
+        comic = self.comic("first", tags=[], color="黑白")
         self.remote(comic, "b")
         self.remote_books["b"]["metadata"].update(summary="旧简介", tags=["旧标签"], releaseDate="2020-01-01")
         response = self.sync(comic)
         self.assertEqual(response["updated"], 1)
         payload = self.patches("books")[0]
         self.assertEqual(payload["summary"], "")
-        self.assertEqual(payload["tags"], [])
+        self.assertEqual(payload["tags"], ["色彩:黑白"])
         self.assertEqual(payload["links"], [])
         self.assertIsNone(payload["releaseDate"])
         self.assertFalse(any(entity["kind"] == "character" for entity in payload["notableEntities"]))

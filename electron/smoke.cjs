@@ -98,7 +98,7 @@ async function run() {
     await click('知道了')
     await waitFor("![...document.querySelectorAll('.el-overlay')].some(e => e.getClientRects().length && getComputedStyle(e).display !== 'none' && getComputedStyle(e).visibility !== 'hidden')", 'result dialog dismissed')
   }
-  const metadata = { collection_mode: 'series', localized_series_label: 'zh-Hans', title: '春日旅途', series: '春の旅シリーズ', localized_series: '春日旅途系列', number: '1.5', count: '3', volume: '1', authors: ['森野'], pencillers: ['独立画师'], publisher: 'pink-noise', translator: '示例汉化组', genre: '同人志', tags: ['日常'], original_works: ['东方Project'], characters: ['博丽灵梦', '雾雨魔理沙'], release_type: '同人', publication_format: '独立短篇', uncensored: true, black_and_white: 'No', manga: 'YesAndRightToLeft', language: 'zh-Hans', age_rating: 'R18+', summary: '用于验证新界面的合成样本。', year: '2024', month: '2', day: '29', web: ['https://example.com/comic/A,B', 'https://example.org/book'], cover_index: 0, original_xml: '' }
+  const metadata = { collection_mode: 'series', localized_series_label: 'zh-Hans', title: '春日旅途', series: '春の旅シリーズ', localized_series: '春日旅途系列', number: '1.5', count: '3', volume: '1', authors: ['森野'], pencillers: ['独立画师'], publisher: 'pink-noise', translator: '示例汉化组', genre: '漫画', tags: ['日常'], original_works: ['东方Project'], characters: ['博丽灵梦', '雾雨魔理沙'], release_type: '同人发行', publication_format: '独立作品', uncensored: true, color: '黑白', release_methods: [], release_platforms: [], reading_direction: '', manga: 'YesAndRightToLeft', language: 'zh-Hans', age_rating: 'R18+', summary: '用于验证新界面的合成样本。', year: '2024', month: '2', day: '29', web: ['https://example.com/comic/A,B', 'https://example.org/book'], cover_index: 0, original_xml: '' }
   const call = (method, params = {}) => evaluate(`window.comic.invoke(${JSON.stringify(method)}, ${JSON.stringify(params)})`)
   const setInput = (placeholder, value) => evaluate(`(() => { const item = [...document.querySelectorAll('input')].find(x=>x.placeholder === ${JSON.stringify(placeholder)}); if(!item) throw new Error('Input missing'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(item,${JSON.stringify(value)}); item.dispatchEvent(new Event('input',{bubbles:true})); })()`)
   const toggle = testId => evaluate(`document.querySelector('[data-testid="'+${JSON.stringify(testId)}+'"]').click()`)
@@ -114,6 +114,15 @@ async function run() {
     await evaluate(`(() => { const item=document.querySelector('[data-testid="'+${JSON.stringify(testId)}+'"] .el-select__wrapper'); item.scrollIntoView({block:'center'}); item.click(); })()`)
     await waitFor(`[...document.querySelectorAll('.el-select-dropdown__item')].some(item=>item.getClientRects().length && item.textContent.trim()===${JSON.stringify(label)})`, `option ${label}`)
     await evaluate(`[...document.querySelectorAll('.el-select-dropdown__item')].find(item=>item.getClientRects().length && item.textContent.trim()===${JSON.stringify(label)}).click()`)
+  }
+  const chooseMany = async (testId, labels) => {
+    await evaluate(`(() => { const item=document.querySelector('[data-testid="'+${JSON.stringify(testId)}+'"] .el-select__wrapper'); item.scrollIntoView({block:'center'}); item.click() })()`)
+    for (const label of labels) {
+      await waitFor(`[...document.querySelectorAll('.el-select-dropdown__item')].some(item=>item.getClientRects().length && item.textContent.trim()===${JSON.stringify(label)})`, 'multi option ' + label)
+      await evaluate(`[...document.querySelectorAll('.el-select-dropdown__item')].find(item=>item.getClientRects().length && item.textContent.trim()===${JSON.stringify(label)}).click()`)
+    }
+    await evaluate("document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); document.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}))")
+    await waitFor("![...document.querySelectorAll('.el-select__popper')].some(item=>item.getClientRects().length)", 'multi dropdown closed')
   }
 
   await waitFor("document.body.innerText.includes('从第一本漫画开始')", 'empty state')
@@ -138,7 +147,7 @@ async function run() {
   await toggle('import-enable-authors')
   await selectValue('import-authors', '统一作者')
   await toggle('import-enable-genre')
-  await selectValue('import-genre', '同人志')
+  await chooseOption('import-genre', '漫画')
   await capture('ComicManage-Electron-import.png')
   window.setSize(1180, 800)
   await delay(200)
@@ -155,12 +164,12 @@ async function run() {
   const id = imported.id
   const secondId = catalog.comics.find(book => book.id !== id).id
   assert.deepEqual(imported.metadata.authors, ['统一作者'])
-  assert.equal(imported.metadata.genre, '同人志')
+  assert.equal(imported.metadata.genre, '漫画')
   assert.equal(imported.metadata.publisher, 'pink-noise')
   assert.equal(imported.metadata.translator, '未知汉化')
   assert.equal(imported.metadata.year, '2019')
   assert.equal(imported.metadata.month, '10')
-  assert.equal(imported.metadata.black_and_white, 'No')
+  assert.equal(imported.metadata.color, '全彩')
   await call('save', { id, metadata })
   await click('重新扫描')
   await waitFor("document.body.innerText.includes('已扫描 2 本作品')", 'rescan')
@@ -174,12 +183,17 @@ async function run() {
   await setField('localized-series', '春日旅途系列校订')
   await setField('number', '2.5')
   await setField('count', '4')
+  await setField('volume', '7')
+  await chooseOption('color', '部分彩色')
+  await chooseMany('release-methods', ['会员订阅', '单次购买'])
+  await chooseMany('release-platforms', ['Fantia', 'pixivFANBOX'])
+  await chooseOption('reading-direction', '纵向')
   await chooseOption('day', '28 日')
   await setField('web', 'https://example.com/comic/A,B\nhttps://example.org/book')
   await chooseOption('age-rating', '全年龄')
   assert.equal(await evaluate("!!document.querySelector('[data-testid=correction-field]')"), false)
   await chooseOption('age-rating', 'R18')
-  await toggle('uncensored')
+  assert.equal(await evaluate("document.querySelector('[data-testid=uncensored] input').checked"), true, 'Changing age keeps the unchecked historical correction flag')
   assert.equal(await evaluate("document.querySelector('.custom-tag-preview').textContent.includes('修正状态:无修正')"), true)
   await waitFor("document.querySelector('.details-panel .status-pill')?.textContent === '未保存'", 'dirty status')
   await click('保存草稿')
@@ -212,9 +226,9 @@ async function run() {
   await evaluate("[...document.querySelectorAll('.el-tabs__item')].find(x=>x.textContent === 'ComicInfo.xml').click()")
   await waitFor("document.querySelector('.xml-tab pre')?.textContent.includes('Image=\"1\"')", 'ComicInfo cover index')
   const exportedXml = await evaluate("document.querySelector('.xml-tab pre').textContent")
-  for (const fragment of ['<Title>春日旅途·封面校订</Title>', '<Series>春の旅シリーズ改訂</Series>', '<Number>2.5</Number>', '<Characters>博丽灵梦, 雾雨魔理沙</Characters>', '<Count>4</Count>', '<Day>28</Day>', '<Penciller>独立画师</Penciller>', '<AgeRating>R18+</AgeRating>', '<BlackAndWhite>No</BlackAndWhite>', '<Manga>YesAndRightToLeft</Manga>', '<PageCount>3</PageCount>', '角色:博丽灵梦', '角色:雾雨魔理沙', '原作:东方Project', '发行性质:同人', '出版形态:独立短篇', '修正状态:无修正', '<Web>https://example.com/comic/A,B https://example.org/book</Web>']) assert.ok(exportedXml.includes(fragment), fragment)
+  for (const fragment of ['<Title>春日旅途·封面校订</Title>', '<Series>春の旅シリーズ改訂</Series>', '<Number>2.5</Number>', '<Volume>7</Volume>', '<Characters>博丽灵梦, 雾雨魔理沙</Characters>', '<Count>4</Count>', '<Day>28</Day>', '<Penciller>独立画师</Penciller>', '<AgeRating>R18+</AgeRating>', '<Manga>YesAndRightToLeft</Manga>', '<PageCount>3</PageCount>', '角色:博丽灵梦', '角色:雾雨魔理沙', '原作:东方Project', '发行性质:同人发行', '出版形态:独立作品', '色彩:部分彩色', '发布方式:会员订阅', '发布方式:单次购买', '发布平台:Fantia', '发布平台:pixivFANBOX', '修正状态:无修正', '<Web>https://example.com/comic/A,B https://example.org/book</Web>']) assert.ok(exportedXml.includes(fragment), fragment)
   assert.equal(/<Tags>[^<]*(?:^|, )(?:汉化|全彩|无修正)(?:,|<)/.test(exportedXml), false)
-  assert.equal(exportedXml.includes('<Volume>') || exportedXml.includes('<LocalizedSeries>') || exportedXml.includes('<原作>'), false)
+  assert.equal(exportedXml.includes('<BlackAndWhite>') || exportedXml.includes('<LocalizedSeries>') || exportedXml.includes('<原作>') || exportedXml.includes('<色彩>'), false)
   picking = output
   await click('选择')
   await click('生成 CBZ')
@@ -284,6 +298,7 @@ async function run() {
   assert.ok(remoteBook.notableEntities.some(entity => entity.kind === 'team' && entity.name === '保留队伍'))
   assert.equal(remoteBook.notableEntities.some(entity => entity.name === '旧角色'), false)
   const remoteSeries = komgaFixture.series.get('remote-series').metadata
+  assert.equal(remoteSeries.readingDirection, 'VERTICAL')
   assert.equal(remoteSeries.publisher, 'pink-noise')
   assert.equal(remoteSeries.ageRating, 18)
   assert.ok(remoteSeries.alternateTitles.some(alias => alias.label === 'zh-Hans' && alias.title === '春日旅途系列校订'))
@@ -300,13 +315,14 @@ async function run() {
   await waitFor("document.querySelector('[data-testid=komga-url] input')?.value || document.querySelector('input[data-testid=komga-url]')?.value", 'saved connection reopened')
   assert.equal(await evaluate("document.querySelector('input[data-testid=komga-api-key]')?.value || document.querySelector('[data-testid=komga-api-key] input')?.value || ''"), '')
   await click('取消')
-  await call('approve', { id: secondId, metadata: { age_rating: 'Everyone', collection_mode: 'oneshot', series: '本地旧系列', number: '8', count: '9', volume: '3' } })
+  await call('approve', { id: secondId, metadata: { age_rating: 'Everyone', genre: '漫画', tags: ['日常'], collection_mode: 'oneshot', series: '本地旧系列', number: '8', count: '9', volume: '3' } })
   const oneShotPlan = await call('plan', { ids: [secondId], outputRoot: output })
   assert.equal(path.basename(path.dirname(oneShotPlan.items[0].destination)), '_oneshots')
   const oneShotResult = await call('export', { token: oneShotPlan.token })
   assert.deepEqual(oneShotResult.errors, [])
   const oneShotXml = (await call('xml', { id: secondId, metadata: {}, pageCount: 1 })).xml
-  for (const tag of ['Series','Number','Count','Volume','LocalizedSeries']) assert.equal(oneShotXml.includes('<'+tag+'>'), false, tag)
+  for (const tag of ['Series','Number','Count','LocalizedSeries','BlackAndWhite']) assert.equal(oneShotXml.includes('<'+tag+'>'), false, tag)
+  assert.ok(oneShotXml.includes('<Volume>3</Volume>'))
   catalog = await call('bootstrap')
 
   await evaluate("[...document.querySelectorAll('.table-area .el-table__header .el-checkbox')].find(item=>item.getClientRects().length).click()")
@@ -319,12 +335,17 @@ async function run() {
   const batchChanges = {
     collection_mode: 'series',
     series: '旅途系列',
-    release_type: '商业',
+    release_type: '商业出版',
     publication_format: '分卷',
     age_rating: 'MA15+',
+    color: '全彩',
+    release_methods: ['公开发布'],
+    release_platforms: ['BOOTH', 'DLsite'],
+    reading_direction: 'WEBTOON',
   }
   window.setSize(1180, 800)
   await click('批量编辑')
+  await toggle('batch-expand-all')
   assert.equal(await evaluate("[...document.querySelectorAll('.batch-edit-dialog .el-dialog__footer button')].find(b => b.textContent.trim() === '保存 2 本作品')?.disabled"), true)
   await toggle('batch-enable-collection-mode')
   await chooseOption('batch-collection-mode', '多卷系列 · Series')
@@ -336,6 +357,14 @@ async function run() {
   await chooseOption('batch-publication-format', batchChanges.publication_format)
   await toggle('batch-enable-age-rating')
   await chooseOption('batch-age-rating', 'MA15+')
+  await toggle('batch-enable-color')
+  await chooseOption('batch-color', '全彩')
+  await toggle('batch-enable-release-methods')
+  await chooseMany('batch-release-methods', ['公开发布'])
+  await toggle('batch-enable-release-platforms')
+  await chooseMany('batch-release-platforms', ['BOOTH', 'DLsite'])
+  await toggle('batch-enable-reading-direction')
+  await chooseOption('batch-reading-direction', 'Webtoon')
   assert.equal(await evaluate("document.querySelector('.batch-edit-dialog .el-dialog__footer').getBoundingClientRect().bottom <= window.innerHeight"), true)
   await capture('ComicManage-Electron-batch.png')
   await click('保存 2 本作品')
@@ -388,7 +417,7 @@ async function run() {
       metadata: { title, number, numberSort: 42, summary: '云端原始简介', isbn: '9780000000000',
         titleLock: false, tags: ['保留自定义标签'],
         authors: [{ name: '云端作者', role: 'writer' }, { name: '保留墨线人员', role: 'inker' }],
-        notableEntities: [{ kind: 'team', name: '保留远端队伍' }],
+        notableEntities: [{ kind: 'team', name: '保留远端队伍' }, { kind: '内容类型', name: '漫画' }, { kind: '年龄分级', name: 'Everyone' }],
         links: [{ label: '作者主页', url: 'https://example.org/cloud' }] },
     })
   }
@@ -427,8 +456,8 @@ async function run() {
   const cloudB = catalog.comics.find(book => book.remote?.bookId === 'cloud-b')
   assert.ok(cloudA && cloudB)
   assert.equal(cloudA.kind, 'komga')
-  assert.equal(cloudA.metadata.age_rating, 'Unknown')
-  assert.equal(cloudA.metadata.genre, '')
+  assert.equal(cloudA.metadata.age_rating, 'Everyone')
+  assert.equal(cloudA.metadata.genre, '漫画')
   assert.equal(cloudA.remote.sharedMetadata.ageRating, 17)
   assert.equal(catalog.comics.filter(book => book.kind === 'komga').length, 3)
   await selectRemote('云端卷一')
@@ -481,8 +510,8 @@ async function run() {
     assert.equal(edited.status, 'draft')
     assert.equal(edited.metadata.publisher, '云端批量出版方')
     assert.equal(edited.metadata.publication_format, '分卷')
-    assert.equal(edited.metadata.age_rating, 'Unknown')
-    assert.equal(edited.metadata.genre, '')
+    assert.equal(edited.metadata.age_rating, 'Everyone')
+    assert.equal(edited.metadata.genre, '漫画')
   }
   for (const title of ['云端卷一·校订', '云端卷二']) { await selectRemote(title); await approveRemote() }
   const beforeBatchSync = komgaFixture.patches.length

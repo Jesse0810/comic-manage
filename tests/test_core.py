@@ -30,7 +30,7 @@ class CoreTests(unittest.TestCase):
         self.comic_id = self.repo.upsert_scan(self.snapshot)
         self.metadata = Metadata(original_title="日本語の作品 & <原名>", chinese_title="完整中文名",
                                  authors=["作者甲", "作者乙"], translated=True, language="zh-Hans",
-                                 translator="测试汉化组", uncensored=True, full_color=True, age_rating="R18+")
+                                 translator="测试汉化组", uncensored=True, color="全彩", genre="漫画", age_rating="R18+")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -44,15 +44,15 @@ class CoreTests(unittest.TestCase):
         root = parse_xml(to_comicinfo(self.metadata, 3))
         self.assertIsNone(root.find("Series"))
         self.assertIsNone(root.find("LocalizedSeries"))
-        self.assertEqual(root.findtext("Title"), "完整中文名")
-        self.assertEqual(root.findtext("BlackAndWhite"), "No")
-        self.assertEqual(root.findtext("Tags"), "修正状态:无修正")
+        self.assertEqual(root.findtext("Title"), "日本語の作品 & <原名>")
+        self.assertIsNone(root.find("BlackAndWhite"))
+        self.assertEqual(root.findtext("Tags"), "色彩:全彩, 修正状态:无修正")
         self.assertEqual(root.findtext("Writer"), "作者甲, 作者乙")
         self.assertEqual(root.findtext("PageCount"), "3")
 
     def test_raw_omits_localized_and_reverse_tags(self):
         metadata = replace(self.metadata, title=self.metadata.original_title, translator="", translated=False, uncensored=False, full_color=False,
-                           language="ja", tags=["生肉", "有修正", "黑白", "校园"])
+                           language="ja", color="", tags=["生肉", "有修正", "黑白", "校园"])
         root = parse_xml(to_comicinfo(metadata, 3))
         self.assertIsNone(root.find("LocalizedSeries"))
         self.assertIsNone(root.find("Translator"))
@@ -60,7 +60,7 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(root.find("Series"))
 
     def test_import_preserves_unknown_fields_and_cover(self):
-        data = b'<ComicInfo><Series>Chinese</Series><LocalizedSeries>Japanese</LocalizedSeries><LanguageISO>zh-Hans</LanguageISO><Writer>A, B</Writer><Translator>Group</Translator><AgeRating>Everyone</AgeRating><Number>7</Number><Web>https://example.org</Web><Pages><Page Image="2" Type="FrontCover"/></Pages></ComicInfo>'
+        data = '<ComicInfo><Series>Chinese</Series><LocalizedSeries>Japanese</LocalizedSeries><LanguageISO>zh-Hans</LanguageISO><Writer>A, B</Writer><Translator>Group</Translator><Genre>漫画</Genre><Tags>日常</Tags><AgeRating>Everyone</AgeRating><Number>7</Number><Web>https://example.org</Web><Pages><Page Image="2" Type="FrontCover"/></Pages></ComicInfo>'.encode()
         metadata = from_comicinfo(data, "fallback")
         self.assertEqual(metadata.cover_index, 2)
         root = parse_xml(to_comicinfo(metadata, 3))

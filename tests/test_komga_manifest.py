@@ -23,7 +23,7 @@ class KomgaManifestTests(unittest.TestCase):
         preview = self.service.call("prepare_import", {"paths": [str(source)]})
         identity = preview["items"][0]["id"]
         self.service.call("commit_import", {"token": preview["token"], "ids": [identity]})
-        metadata = {"title": name, "authors": ["作者"], "age_rating": "Everyone", **fields}
+        metadata = {"title": name, "authors": ["作者"], "genre": "漫画", "age_rating": "Everyone", "tags": ["日常"], **fields}
         self.service.call("approve", {"id": identity, "metadata": metadata})
         plan = self.service.call("plan", {"ids": [identity], "outputRoot": str(self.root / "output")})
         result = self.service.call("export", {"token": plan["token"]})
@@ -34,7 +34,8 @@ class KomgaManifestTests(unittest.TestCase):
         return self.service.call("export_komga", {"ids": identities, "path": str(self.destination)})
 
     def test_manifest_contains_portable_paths_and_api_only_supplements(self):
-        one = self.generated("独立作品", characters=["角色甲"], original_works=["东方Project"])
+        one = self.generated("独立作品", characters=["角色甲"], original_works=["东方Project"],
+                             color="部分彩色", release_methods=["会员订阅"], release_platforms=["Fantia"])
         first = self.generated("第一卷", collection_mode="series", series="连续系列", number="1",
                                localized_series="系列译名", localized_series_label="zh-Hans")
         second = self.generated("第二卷", collection_mode="series", series="连续系列", number="2",
@@ -47,6 +48,10 @@ class KomgaManifestTests(unittest.TestCase):
         self.assertEqual(document["books"][1]["relativePath"].split("/")[0],
                          document["books"][2]["relativePath"].split("/")[0])
         self.assertIn({"kind": "原作", "name": "东方Project"}, document["books"][0]["notableEntities"])
+        self.assertIn({"kind": "发布平台", "name": "Fantia"}, document["books"][0]["notableEntities"])
+        self.assertIn({"kind": "发布方式", "name": "会员订阅"}, document["books"][0]["notableEntities"])
+        self.assertIn({"kind": "色彩", "name": "部分彩色"}, document["books"][0]["notableEntities"])
+        self.assertTrue({"发布平台", "发布方式", "色彩"}.issubset(document["managedEntityKinds"]))
         self.assertEqual(document["series"][0]["alternateTitles"], [{"label": "zh-Hans", "title": "系列译名"}])
 
     def test_changed_draft_cannot_replace_existing_manifest(self):

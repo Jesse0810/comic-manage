@@ -11,9 +11,6 @@ from .komga import komga_metadata
 
 SUPPORTED_ROLES = frozenset({"writer", "penciller", "translator"})
 AGE_VALUES = {"Everyone": 0, "MA15+": 15, "R18+": 18}
-DIRECTIONS = {"No": "LEFT_TO_RIGHT", "YesAndRightToLeft": "RIGHT_TO_LEFT"}
-
-
 def _records(value, fields: tuple[str, ...]) -> list[dict]:
     if value is None:
         return []
@@ -47,7 +44,7 @@ def book_payload(metadata: Metadata, current: dict) -> tuple[dict, list[str]]:
                          ("authors", authors), ("tags", metadata.all_tags), ("links", links)):
         _locked(payload, field, value)
     warnings = []
-    if metadata.collection_mode == "series":
+    if metadata.collection_mode == "series" and metadata.number.strip():
         _locked(payload, "number", metadata.number.strip())
         try:
             number = float(metadata.number)
@@ -57,6 +54,8 @@ def book_payload(metadata: Metadata, current: dict) -> tuple[dict, list[str]]:
             _locked(payload, "numberSort", number)
         else:
             warnings.append("册号已同步，非数值或超出范围的册号无法直接重置 Komga 排序值。")
+    elif metadata.collection_mode == "series":
+        warnings.append("本机未填写 Number，Komga API 不接受空册号，已保留远端编号与排序值。")
     if metadata.year and metadata.month and metadata.day:
         _locked(payload, "releaseDate", f"{int(metadata.year):04d}-{int(metadata.month):02d}-{int(metadata.day):02d}")
     elif not any((metadata.year, metadata.month, metadata.day)):
@@ -96,7 +95,7 @@ def series_payload(metadata: list[Metadata], current: dict) -> tuple[dict, list[
     for field, values, label in (
         ("publisher", [item.publisher.strip() for item in metadata], "出版方"),
         ("language", [item.language.strip() for item in metadata], "语言"),
-        ("readingDirection", [DIRECTIONS.get(item.manga, "") for item in metadata], "阅读方向"),
+        ("readingDirection", [item.reading_direction for item in metadata], "阅读方向"),
     ):
         value, warning = _majority(values, label)
         if warning:
@@ -134,11 +133,12 @@ def series_payload(metadata: list[Metadata], current: dict) -> tuple[dict, list[
 ENTITY_FIELDS = {
     "original_works": "原作", "characters": "character", "release_type": "发行性质",
     "publication_format": "出版形态", "uncensored": "修正状态", "age_rating": "年龄分级",
-    "genre": "内容类型", "black_and_white": "色彩",
+    "genre": "内容类型", "color": "色彩", "release_methods": "发布方式", "release_platforms": "发布平台",
 }
 TAG_FIELDS = {"原作": "original_works", "角色": "characters", "发行性质": "release_type",
               "出版形态": "publication_format", "修正状态": "uncensored", "内容类型": "genre",
-              "年龄分级": "age_rating", "年龄等级": "age_rating", "汉化状态": "translator"}
+              "年龄分级": "age_rating", "年龄等级": "age_rating", "汉化状态": "translator",
+              "发布方式": "release_methods", "发布平台": "release_platforms", "色彩": "color"}
 
 
 def _tag_field(tag: str) -> str | None:
@@ -147,8 +147,8 @@ def _tag_field(tag: str) -> str | None:
         return TAG_FIELDS[prefix.strip()]
     if tag in ("汉化", "生肉"):
         return "translator"
-    if tag in ("全彩", "黑白"):
-        return "black_and_white"
+    if tag in ("全彩", "黑白", "部分彩色"):
+        return "color"
     if tag in ("无修正", "有修正"):
         return "uncensored"
     if tag in ("全年龄", "R15", "R18", "R18+", "MA15+", "Everyone"):
@@ -209,7 +209,7 @@ def remote_book_payload(metadata: Metadata, current: dict, fields: set[str]) -> 
         if "character" in changed_kinds:
             entities.extend({"kind": "character", "name": name} for name in metadata.characters)
         _locked(payload, "notableEntities", entities)
-    tag_owners = set(TAG_FIELDS.values()) | {"black_and_white", "age_rating"}
+    tag_owners = set(TAG_FIELDS.values()) | {"color", "age_rating"}
     if effective_tag_fields & (tag_owners | {"tags"}):
         existing_tags = existing.get("tags") or []
         if not isinstance(existing_tags, list) or any(not isinstance(tag, str) for tag in existing_tags):
@@ -234,7 +234,7 @@ def remote_series_payload(records: list[tuple[Metadata, dict]], current: dict) -
         "series": ("title", lambda item: item.series),
         "publisher": ("publisher", lambda item: item.publisher),
         "language": ("language", lambda item: item.language),
-        "manga": ("readingDirection", lambda item: DIRECTIONS.get(item.manga)),
+        "reading_direction": ("readingDirection", lambda item: item.reading_direction or None),
         "count": ("totalBookCount", lambda item: int(item.count) if item.count else None),
     }
     for field, (target, convert) in conversions.items():

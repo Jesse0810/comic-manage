@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m unittest tests.test_core tests.test_service tests.test_filename_parser tests.test_import tests.test_metadata_rules tests.test_komga tests.test_komga_manifest tests.test_komga_sync tests.test_komga_remote tests.test_komga_media -v
+      - run: python -m unittest tests.test_core tests.test_service tests.test_filename_parser tests.test_import tests.test_metadata_rules tests.test_metadata_v12 tests.test_komga tests.test_komga_manifest tests.test_komga_sync tests.test_komga_remote tests.test_komga_media tests.test_komga_v12 -v
   desktop:
     runs-on: windows-latest
     steps:

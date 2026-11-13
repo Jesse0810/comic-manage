@@ -60,8 +60,8 @@ class ServiceTests(unittest.TestCase):
         self.progress = []
         self.service = ComicService(self.data, self.progress.append)
         self.identity = self.service.repo.upsert_scan(inspect_source(self.book))
-        self.metadata = Metadata(original_title="春の旅", chinese_title="春日旅途", authors=["作者甲", "作者乙"],
-                                 translated=True, language="zh-Hans", tags=["日常"], full_color=True, translator="测试汉化组", age_rating="Everyone")
+        self.metadata = Metadata(title="春の旅", original_title="春の旅", chinese_title="春日旅途", authors=["作者甲", "作者乙"],
+                                 translated=True, language="zh-Hans", genre="漫画", tags=["日常"], color="全彩", translator="测试汉化组", age_rating="Everyone")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -102,7 +102,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(self.service.call("bootstrap")["comics"]), 1)
 
     def test_invalid_metadata_types_are_rejected_but_incomplete_drafts_save(self):
-        for value in [{"authors": "wrong"}, {"translated": 1}, {"cover_index": True}, {"tags": [3]}, {"year": 2025}]:
+        for value in [{"authors": "wrong"}, {"translated": 1}, {"cover_index": True}, {"tags": [3]}, {"year": 2025},
+                      {"release_methods": "会员订阅"}, {"release_platforms": [3]}]:
             with self.subTest(value=value), self.assertRaises(ServiceError):
                 self.service.call("save", {"id": self.identity, "metadata": value})
         saved = self.service.call("save", {"id": self.identity, "metadata": {"original_title": ""}})
@@ -129,7 +130,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_xml_preview_does_not_change_saved_metadata(self):
         self.service.call("save", {"id": self.identity, "metadata": self.metadata.to_dict()})
-        result = self.service.call("xml", {"id": self.identity, "metadata": {"chinese_title": "预览中的名称"}})
+        result = self.service.call("xml", {"id": self.identity, "metadata": {"title": "预览中的名称"}})
         self.assertIn("<Title>预览中的名称</Title>", result["xml"])
         self.assertNotIn("<Series>", result["xml"])
         self.assertEqual(self.service.repo.get(self.identity).metadata.chinese_title, "春日旅途")
@@ -145,7 +146,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         with zipfile.ZipFile(result["completed"][0]) as archive:
             self.assertEqual(archive.read("pages/00001.png"), b"first-page")
-            self.assertIn("<Title>春日旅途</Title>", archive.read("ComicInfo.xml").decode())
+            self.assertIn("<Title>春の旅</Title>", archive.read("ComicInfo.xml").decode())
             self.assertNotIn("<LocalizedSeries>", archive.read("ComicInfo.xml").decode())
         self.assertEqual((self.book / "1.png").read_bytes(), b"first-page")
         self.assertEqual(self.service.repo.get(self.identity).status, "packaged")

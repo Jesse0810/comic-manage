@@ -16,8 +16,8 @@ from .metadata import AGE_RATINGS, Metadata, title_key
 from .sources import Cancelled, check_cancel
 from .komga_payloads import remote_book_payload, remote_series_payload
 
-READ_ONLY_FIELDS = frozenset({"collection_mode", "cover_index", "original_xml", "original_title", "chinese_title", "translated", "full_color", "volume"})
-SERIES_FIELDS = frozenset({"series", "publisher", "language", "manga", "count", "localized_series", "localized_series_label"})
+READ_ONLY_FIELDS = frozenset({"collection_mode", "cover_index", "original_xml", "original_title", "chinese_title", "translated", "full_color", "black_and_white", "manga", "volume"})
+SERIES_FIELDS = frozenset({"series", "publisher", "language", "reading_direction", "count", "localized_series", "localized_series_label"})
 DATE_FIELDS = frozenset({"year", "month", "day"})
 
 
@@ -44,6 +44,16 @@ def snapshot_fingerprint(snapshot: dict) -> str:
         metadata = entity.get("metadata") or {}
         for field in ("created", "lastModified", "createdDate", "lastModifiedDate"):
             metadata.pop(field, None)
+        # Match Komga domain normalization, rather than treating a server's own
+        # trim/lowercase operations as a concurrent edit after our PATCH.
+        for field in ("title", "summary", "number", "publisher"):
+            if isinstance(metadata.get(field), str):
+                metadata[field] = metadata[field].strip()
+        if isinstance(metadata.get("language"), str):
+            metadata["language"] = metadata["language"].strip().lower()
+        for field in ("tags", "genres", "sharingLabels"):
+            if isinstance(metadata.get(field), list):
+                metadata[field] = sorted({item.strip().lower() for item in metadata[field] if isinstance(item, str) and item.strip()})
         for field in list_fields:
             if isinstance(metadata.get(field), list):
                 metadata[field].sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
@@ -80,15 +90,15 @@ def metadata_from_remote(book: dict, series: dict, preferred_alias_label: str = 
     ordinary = []
     for tag in tags:
         prefix, separator, name = tag.replace("：", ":", 1).partition(":")
-        if separator and prefix.strip() in ("原作", "角色", "发行性质", "出版形态", "修正状态", "内容类型", "年龄分级"):
+        if separator and prefix.strip() in ("原作", "角色", "发行性质", "出版形态", "发布方式", "发布平台", "色彩", "修正状态", "内容类型", "年龄分级", "汉化状态"):
             namespaced.setdefault(prefix.strip(), []).append(name.strip())
         else:
             ordinary.append(tag)
     one = lambda key: (grouped.get(key) or namespaced.get(key) or [""])[0]
     known_ages = list(dict.fromkeys(grouped.get("年龄分级", [])))
     age = known_ages[0] if len(known_ages) == 1 and known_ages[0] in AGE_RATINGS else "Unknown"
-    known_colors = grouped.get("色彩", [])
-    color = "Yes" if known_colors == ["黑白"] else "No" if len(known_colors) == 1 and known_colors[0] in ("全彩", "彩色", "彩色/非黑白", "彩色 / 非黑白") else "Unknown"
+    known_colors = list(dict.fromkeys(grouped.get("色彩") or namespaced.get("色彩", [])))
+    color = known_colors[0] if len(known_colors) == 1 and known_colors[0] in ("黑白", "全彩", "部分彩色") else ""
     title = raw.get("title") or book.get("name") or ""
     if not isinstance(title, str):
         raise ValueError("远端作品名称格式无效。")
@@ -104,6 +114,12 @@ def metadata_from_remote(book: dict, series: dict, preferred_alias_label: str = 
         warnings.append("逐册年龄分级尚无独立实体，共享系列分级仅供参考。")
     if not grouped.get("内容类型"):
         warnings.append("逐册内容类型尚无独立实体，共享系列类型仅供参考。")
+    if any(genre not in ("漫画", "小说", "CG集", "画集", "设定集", "插画集") for genre in grouped.get("内容类型", [])):
+        warnings.append("逐册内容类型含旧词或未支持词汇，请按 v1.2 选择内容类型后重新审核。")
+    if one("发行性质") and one("发行性质") not in ("同人发行", "商业出版", "个人独立发布"):
+        warnings.append("发行性质保留了远端旧值，请明确选择 v1.2 词汇后再同步。")
+    if known_colors and not color:
+        warnings.append("远端旧色彩无法准确区分全彩与部分彩色，原始实体仍保留，请人工确认。")
     oneshot = bool(book.get("oneshot"))
     alias = next((item for item in aliases if item["label"].casefold() == preferred_alias_label.casefold()),
                  next((item for item in aliases if item["label"].casefold() == "zh-hans"), aliases[0] if aliases else None))
@@ -119,12 +135,14 @@ def metadata_from_remote(book: dict, series: dict, preferred_alias_label: str = 
         "pencillers": [item["name"] for item in authors if item["role"].casefold() == "penciller"],
         "translator": ", ".join(item["name"] for item in authors if item["role"].casefold() == "translator"),
         "publisher": shared.get("publisher") or "", "language": shared.get("language") or "",
-        "manga": {"RIGHT_TO_LEFT": "YesAndRightToLeft", "LEFT_TO_RIGHT": "No"}.get(shared.get("readingDirection"), "Unknown"),
-        "genre": ", ".join(grouped.get("内容类型", [])), "age_rating": age, "black_and_white": color,
+        "manga": "Unknown", "reading_direction": shared.get("readingDirection") if shared.get("readingDirection") in ("LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL", "WEBTOON") else "",
+        "genre": ", ".join(grouped.get("内容类型", [])), "age_rating": age, "color": color,
         "summary": raw.get("summary") or "", "web": list(dict.fromkeys(item["url"] for item in links)),
         "original_works": grouped.get("原作") or namespaced.get("原作", []),
         "characters": grouped.get("character") or namespaced.get("角色", []),
         "release_type": one("发行性质"), "publication_format": one("出版形态"),
+        "release_methods": grouped.get("发布方式") or namespaced.get("发布方式", []),
+        "release_platforms": grouped.get("发布平台") or namespaced.get("发布平台", []),
         "uncensored": one("修正状态") == "无修正", "tags": ordinary,
         "year": year, "month": month, "day": day,
     }
@@ -195,7 +213,17 @@ def finalize_sync(repo, comic, client: KomgaClient, library_id: str, book_patch:
     refreshed = Metadata.from_dict({**base.to_dict(), **{field: current[field] for field in fields}})
     if "age_rating" in fields and "uncensored" not in fields:
         refreshed.uncensored = current["uncensored"]
-    remaining = sorted(field for field in fields if getattr(refreshed, field) != getattr(base, field))
+    def differs(field):
+        local, remote = getattr(refreshed, field), getattr(base, field)
+        if field == "tags":
+            return {tag.strip().lower() for tag in local} != {tag.strip().lower() for tag in remote}
+        if field == "language":
+            return local.strip().lower() != remote.strip().lower()
+        return local != remote
+    remaining = sorted(field for field in fields if differs(field))
+    for field in fields - set(remaining):
+        if field in ("tags", "language"):
+            setattr(refreshed, field, getattr(base, field))
     repo.rebase_komga(comic.id, refreshed, base, snapshot, snapshot_fingerprint(snapshot), remaining,
                       action="komga_sync_snapshot", synced=True)
 
@@ -211,7 +239,9 @@ def approve_remote(repo, identity: str, url: str, api_key: str, library_id: str,
         raise KomgaError("远端资料已变化，请选择保留本机编辑或使用远端资料，再重新审核。", "KOMGA_CONFLICT")
     if source["conflict"]:
         raise KomgaError("请先处理此记录的远端冲突，再重新审核。", "KOMGA_CONFLICT")
-    validate_changes(repo.get(identity).metadata, set(source["dirty_fields"]))
+    metadata = repo.get(identity).metadata
+    metadata.validate_review()
+    validate_changes(metadata, set(source["dirty_fields"]))
     check_cancel(cancel)
     repo.approve_komga(identity)
 

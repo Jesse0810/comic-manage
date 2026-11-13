@@ -14,7 +14,7 @@ from threading import Event, Lock, Thread
 import time
 from typing import Callable, TextIO
 
-from .metadata import AGE_RATINGS, Metadata, to_comicinfo
+from .metadata import AGE_RATINGS, GENRES, Metadata, to_comicinfo
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
@@ -29,15 +29,16 @@ MAX_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_CHARS = 8 * 1024 * 1024
 PLAN_TTL_SECONDS = 15 * 60
 BATCH_TEXT_FIELDS = frozenset({
-    "series", "localized_series", "number", "count", "translator", "genre",
+    "series", "localized_series", "number", "count", "volume", "translator", "genre",
     "publication_format", "year", "month", "day", "language", "localized_series_label", "publisher",
 })
-BATCH_LIST_FIELDS = frozenset({"pencillers", "original_works", "characters", "web"})
+BATCH_LIST_FIELDS = frozenset({"pencillers", "original_works", "characters", "web", "tags", "release_methods", "release_platforms"})
 BATCH_CHOICES = {
     "collection_mode": ("oneshot", "series"),
-    "release_type": ("", "同人", "商业"),
+    "release_type": ("", "同人发行", "商业出版", "个人独立发布"),
     "age_rating": AGE_RATINGS,
-    "black_and_white": ("Unknown", "Yes", "No"),
+    "color": ("", "黑白", "全彩", "部分彩色"),
+    "reading_direction": ("", "LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL", "WEBTOON"),
     "manga": ("Unknown", "Yes", "No", "YesAndRightToLeft"),
 }
 PAGE_MIMES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -90,7 +91,7 @@ def _metadata(value, previous: Metadata | None = None) -> Metadata:
     for key, item in value.items():
         if key not in merged:
             continue
-        if key in ("authors", "tags", "pencillers", "web", "original_works", "characters"):
+        if key in ("authors", "tags", "pencillers", "web", "original_works", "characters", "release_methods", "release_platforms"):
             if not isinstance(item, list) or len(item) > 10_000 or any(not isinstance(v, str) for v in item):
                 raise ServiceError(f"{key} 必须是文本列表。")
         elif key in ("translated", "uncensored", "full_color"):
@@ -122,8 +123,8 @@ def _import_defaults(value) -> dict:
         result["authors"] = _batch_authors(value["authors"])
     if "genre" in value:
         genre = _string(value["genre"], "类型").strip()
-        if len(genre) > 200:
-            raise ServiceError("类型名称过长。")
+        if genre not in GENRES:
+            raise ServiceError("内容类型请选择漫画、小说、CG集、画集、设定集或插画集；发行性质与题材请分别填写。")
         result["genre"] = genre
     return result
 
@@ -158,11 +159,8 @@ def _batch_changes(value) -> dict:
         else:
             raise ServiceError(f"不支持批量编辑字段 {field}。")
     if result.get("genre"):
-        # Accept legacy content types without setting a second field as a side effect.
-        normalized = Metadata(genre=result["genre"])
-        if normalized.tags or not normalized.genre:
-            raise ServiceError("请填写内容类型。普通题材请在作品标签中编辑。")
-        result["genre"] = normalized.genre
+        if result["genre"] not in GENRES:
+            raise ServiceError("内容类型请选择漫画、小说、CG集、画集、设定集或插画集。普通题材请在标签中编辑。")
     return result
 
 
@@ -510,8 +508,8 @@ class ComicService:
         self.plans.clear()
         before = comic.metadata.to_dict()
         explicit = {key for key, value in params.get("metadata", {}).items() if key in before and before[key] != value}
-        if comic.kind == "komga" and "genre" in explicit and Metadata(genre=params["metadata"]["genre"]).tags:
-            raise ServiceError("普通题材请在标签中编辑，内容类型使用同人志、漫画等分类。")
+        if "genre" in explicit and params["metadata"]["genre"] and params["metadata"]["genre"] not in GENRES:
+            raise ServiceError("内容类型请选择漫画、小说、CG集、画集、设定集或插画集。普通题材请在标签中编辑。")
         self.repo.save(identity, metadata, fields=explicit)
         if approve:
             check_cancel(cancel)
