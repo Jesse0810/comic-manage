@@ -16,6 +16,7 @@ const fieldLabels: Record<string, string> = {
   translator: '译者', publisher: '出版方', genre: '内容类型', age_rating: '年龄分级', tags: '题材与属性',
   original_works: '原作', characters: '角色', release_type: '发行性质', publication_format: '出版形态',
   release_methods: '发布方式', release_platforms: '发布平台', color: '色彩', uncensored: '修正状态',
+  work_group: '作品组', text_version: '文字版本',
   language: '语言', manga: 'ComicInfo Manga', reading_direction: '阅读方向',
   year: '发行年', month: '发行月', day: '发行日', summary: '简介', web: '来源链接', cover_index: '封面标记',
 }

@@ -4,14 +4,15 @@ from __future__ import annotations
 from .metadata import Metadata, split_values, title_key
 
 
-MANAGED_ENTITY_KINDS = frozenset({"原作", "发行性质", "出版形态", "发布方式", "发布平台", "修正状态", "年龄分级", "色彩", "内容类型"})
+MANAGED_ENTITY_KINDS = frozenset({"原作", "发行性质", "出版形态", "发布方式", "发布平台", "作品组", "文字版本", "修正状态", "年龄分级", "色彩", "内容类型"})
 
 
 def komga_metadata(metadata: Metadata) -> dict:
     """Describe the supplementary book entities and the real series' alternate title."""
     value = Metadata.from_dict(metadata.to_dict())
     entities = [{"kind": "原作", "name": name} for name in value.original_works]
-    for kind, name in (("发行性质", value.release_type), ("出版形态", value.publication_format)):
+    for kind, name in (("发行性质", value.release_type), ("出版形态", value.publication_format),
+                       ("作品组", value.work_group), ("文字版本", value.text_version)):
         if name.strip():
             entities.append({"kind": kind, "name": name.strip()})
     for kind, names in (("发布方式", value.release_methods), ("发布平台", value.release_platforms)):

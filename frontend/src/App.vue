@@ -11,7 +11,7 @@ import BatchReviewResultDialog from './components/BatchReviewResultDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
 import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult } from './types'
-import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres } from './types'
+import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres, versionLabels } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
@@ -79,7 +79,7 @@ const filtered = computed(() => {
   const term = search.value.trim().normalize('NFKC').toLocaleLowerCase()
   return sourceComics.value.filter(c => {
     const m = c.metadata
-    const searchable = [m.title, m.series, m.localized_series, m.localized_series_label, m.collection_mode, m.original_title, m.chinese_title, ...m.authors, ...m.pencillers, m.publisher, m.translator, m.genre, ...m.tags, ...customTags(m), m.summary, ...m.web, m.number, m.volume, m.year, c.remote?.libraryName].join(' ').normalize('NFKC').toLocaleLowerCase()
+    const searchable = [m.title, m.series, m.localized_series, m.localized_series_label, m.collection_mode, m.work_group, m.text_version, m.original_title, m.chinese_title, ...m.authors, ...m.pencillers, m.publisher, m.translator, m.genre, ...m.tags, ...customTags(m), m.summary, ...m.web, m.number, m.volume, m.year, c.remote?.libraryName].join(' ').normalize('NFKC').toLocaleLowerCase()
     return (section.value === 'all' || c.status === section.value)
       && (!author.value || m.authors.includes(author.value)) && (!term || searchable.includes(term))
   })
@@ -595,7 +595,7 @@ onBeforeUnmount(() => unsubscribe?.())
           <div class="table-area" v-loading="loading">
             <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
               <el-table-column type="selection" width="43" :reserve-selection="true" :selectable="(comic: Comic) => !disabled && canEditComic(comic)" />
-              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'komga' ? Connection : scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else-if="scope.row.kind !== 'komga'" class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span><span v-if="scope.row.kind === 'komga'" class="comic-source remote-source-label" :title="scope.row.remote?.serverUrl">Komga · {{ scope.row.remote?.libraryName || '远端书库' }}{{ !canEditComic(scope.row) ? ' · 只读缓存' : scope.row.remote?.conflict ? ' · 存在冲突' : (scope.row.remote?.hasLocalChanges || scope.row.remote?.pendingSync) ? ' · 待同步' : '' }}</span></div></div></template></el-table-column>
+              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'komga' ? Connection : scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><div v-if="versionLabels(scope.row.metadata).length" class="version-badges" data-testid="book-version-labels"><span v-for="label in versionLabels(scope.row.metadata)" :key="label" :title="label">{{ label }}</span></div><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else-if="scope.row.kind !== 'komga'" class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span><span v-if="scope.row.kind === 'komga'" class="comic-source remote-source-label" :title="scope.row.remote?.serverUrl">Komga · {{ scope.row.remote?.libraryName || '远端书库' }}{{ !canEditComic(scope.row) ? ' · 只读缓存' : scope.row.remote?.conflict ? ' · 存在冲突' : (scope.row.remote?.hasLocalChanges || scope.row.remote?.pendingSync) ? ' · 待同步' : '' }}</span></div></div></template></el-table-column>
               <el-table-column label="作者" min-width="105" show-overflow-tooltip><template #default="scope"><span :class="{ 'muted-text': !scope.row.metadata.authors.length }">{{ scope.row.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
               <el-table-column label="页数" width="60" align="center"><template #default="scope"><span class="page-count">{{ scope.row.page_count }}</span></template></el-table-column>
               <el-table-column label="状态" width="92"><template #default="scope"><span class="status-pill" :class="scope.row.status">{{ statusLabels[scope.row.status as ComicStatus] }}</span></template></el-table-column>
@@ -635,5 +635,7 @@ onBeforeUnmount(() => unsubscribe?.())
 .remote-output-info .output-copy > span:last-child { color: #6c8676; font-size: 11px; }
 .comic-file-icon.komga { color: #5b8d87; background: #edf6f3; }
 .library-batch-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px 12px; }
+.version-badges { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.version-badges > span { max-width: 100%; padding: 1px 5px; border: 1px solid #dfe8d7; border-radius: 4px; background: #f2f7ed; color: #6d8662; font-size: 10px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 1300px) { .library-source-bar { gap: 8px; padding: 12px 14px 0; }.library-source-bar > span { display: none; }.library-source-bar > .el-select { flex: 1; } }
 </style>

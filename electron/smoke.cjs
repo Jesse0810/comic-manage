@@ -184,6 +184,8 @@ async function run() {
   await setField('number', '2.5')
   await setField('count', '4')
   await setField('volume', '7')
+  await setField('work-group', 'Main Variant Group（森野）')
+  await chooseOption('text-version', '无文字')
   await chooseOption('color', '部分彩色')
   await chooseMany('release-methods', ['会员订阅', '单次购买'])
   await chooseMany('release-platforms', ['Fantia', 'pixivFANBOX'])
@@ -228,7 +230,9 @@ async function run() {
   const exportedXml = await evaluate("document.querySelector('.xml-tab pre').textContent")
   for (const fragment of ['<Title>春日旅途·封面校订</Title>', '<Series>春の旅シリーズ改訂</Series>', '<Number>2.5</Number>', '<Volume>7</Volume>', '<Characters>博丽灵梦, 雾雨魔理沙</Characters>', '<Count>4</Count>', '<Day>28</Day>', '<Penciller>独立画师</Penciller>', '<AgeRating>R18+</AgeRating>', '<Manga>YesAndRightToLeft</Manga>', '<PageCount>3</PageCount>', '角色:博丽灵梦', '角色:雾雨魔理沙', '原作:东方Project', '发行性质:同人发行', '出版形态:独立作品', '色彩:部分彩色', '发布方式:会员订阅', '发布方式:单次购买', '发布平台:Fantia', '发布平台:pixivFANBOX', '修正状态:无修正', '<Web>https://example.com/comic/A,B https://example.org/book</Web>']) assert.ok(exportedXml.includes(fragment), fragment)
   assert.equal(/<Tags>[^<]*(?:^|, )(?:汉化|全彩|无修正)(?:,|<)/.test(exportedXml), false)
-  assert.equal(exportedXml.includes('<BlackAndWhite>') || exportedXml.includes('<LocalizedSeries>') || exportedXml.includes('<原作>') || exportedXml.includes('<色彩>'), false)
+  assert.ok(exportedXml.includes('作品组:Main Variant Group（森野）'))
+  assert.ok(exportedXml.includes('文字版本:无文字'))
+  assert.equal(exportedXml.includes('<BlackAndWhite>') || exportedXml.includes('<LocalizedSeries>') || exportedXml.includes('<原作>') || exportedXml.includes('<色彩>') || exportedXml.includes('<作品组>') || exportedXml.includes('<文字版本>'), false)
   picking = output
   await click('选择')
   await click('生成 CBZ')
@@ -342,6 +346,8 @@ async function run() {
     release_methods: ['公开发布'],
     release_platforms: ['BOOTH', 'DLsite'],
     reading_direction: 'WEBTOON',
+    work_group: '批量作品组（统一作者）',
+    text_version: '有文字',
   }
   window.setSize(1180, 800)
   await click('批量编辑')
@@ -351,6 +357,10 @@ async function run() {
   await chooseOption('batch-collection-mode', '多卷系列 · Series')
   await toggle('batch-enable-series')
   await setField('batch-series', batchChanges.series)
+  await toggle('batch-enable-work-group')
+  await setField('batch-work-group', batchChanges.work_group)
+  await toggle('batch-enable-text-version')
+  await chooseOption('batch-text-version', '有文字')
   await toggle('batch-enable-release-type')
   await chooseOption('batch-release-type', batchChanges.release_type)
   await toggle('batch-enable-publication-format')
@@ -583,6 +593,63 @@ async function run() {
   assert.equal(komgaFixture.patches.length,beforeStaleReview,'A remote change after preview cannot be approved or overwritten')
   await toggle('batch-review-done')
   await waitFor("!document.querySelector('[data-testid=batch-review-results]')", 'stale review result closed')
+  for (const [bookId, version] of [['variant-with', '有文字'], ['variant-without', '无文字']]) {
+    const seriesId = bookId + '-series'
+    const remotePath = '/remote/_oneshots/' + bookId + '.cbz'
+    komgaFixture.books.set(bookId, {
+      id: bookId, libraryId: 'test-library', seriesId, oneshot: true, name: bookId + '.cbz',
+      url: remotePath, media: { pagesCount: 1 }, readProgress: { page: 1, completed: false },
+      metadata: { title: '同一作品', number: '1', numberSort: 1, summary: '各版本独立资料',
+        authors: [{ name: '作者甲', role: 'writer' }, { name: '保留职责', role: 'inker' }],
+        tags: version === '有文字' ? ['日常', '无字版'] : ['日常'],
+        notableEntities: [{ kind: '内容类型', name: '漫画' }, { kind: '年龄分级', name: 'Everyone' },
+          { kind: '作品组', name: '版本作品（作者甲）' }, { kind: '文字版本', name: version }, { kind: 'team', name: '保留队伍' }],
+        links: [] },
+    })
+    komgaFixture.series.set(seriesId, {
+      id: seriesId, libraryId: 'test-library', oneshot: true, booksCount: 1, url: remotePath,
+      metadata: { title: '同一作品', ageRating: 0, genres: ['漫画'], language: '', readingDirection: 'LEFT_TO_RIGHT', alternateTitles: [] },
+    })
+  }
+  const originalOtherVersion = structuredClone(komgaFixture.books.get('variant-without'))
+  const originalVariantSeries = structuredClone(komgaFixture.series.get('variant-with-series'))
+  await readKomgaLibrary()
+  await waitFor("document.querySelectorAll('[data-testid=book-version-labels]').length >= 2 && !document.querySelector('.table-disabled')", 'separate version labels')
+  catalog = await call('bootstrap')
+  const variants = catalog.comics.filter(book => ['variant-with', 'variant-without'].includes(book.remote?.bookId))
+  assert.equal(variants.length, 2)
+  assert.notEqual(variants[0].id, variants[1].id)
+  for (const book of variants) {
+    assert.equal(book.metadata.collection_mode, 'oneshot')
+    assert.equal(book.metadata.series, '')
+    assert.equal(book.metadata.number, '')
+    assert.equal(book.metadata.work_group, '版本作品（作者甲）')
+  }
+  await setInput('搜索作品、系列、作者或分类', '版本作品（作者甲）')
+  await waitFor("document.querySelectorAll('.table-area .el-table__row').length === 2", 'search versions by work group')
+  await evaluate("(() => { const row=[...document.querySelectorAll('.table-area .el-table__row')].find(row=>row.textContent.includes('有文字')); row.querySelector('.el-checkbox').click(); row.querySelector('.comic-titles').click() })()")
+  await waitFor("document.querySelector('.selected-summary h2')?.textContent === '同一作品'", 'independent version selected')
+  await chooseOption('text-version', '无文字')
+  await click('保存草稿')
+  await waitFor("document.querySelector('.details-panel .status-pill')?.textContent === '待审核'", 'version draft saved')
+  const beforeVersionSync = komgaFixture.patches.length
+  await toggle('batch-review-sync')
+  await waitFor("document.querySelector('[data-testid=batch-review-preview-table]')?.textContent.includes('文字版本')", 'version field review label')
+  await toggle('batch-review-confirm')
+  await waitFor("document.querySelector('[data-testid=batch-review-submit]')?.disabled === false", 'version review confirmed')
+  await toggle('batch-review-submit')
+  await waitFor("document.querySelector('[data-testid=batch-review-results]')", 'version review sync result')
+  const versionPatches = komgaFixture.patches.slice(beforeVersionSync)
+  assert.deepEqual(versionPatches.map(item=>[item.kind,item.id,Object.keys(item.body).sort()]), [['books','variant-with',['notableEntities','notableEntitiesLock','tags','tagsLock']]])
+  assert.ok(komgaFixture.books.get('variant-with').metadata.notableEntities.some(item=>item.kind==='文字版本' && item.name==='无文字'))
+  assert.ok(komgaFixture.books.get('variant-with').metadata.tags.includes('文字版本:无文字'))
+  assert.equal(komgaFixture.books.get('variant-with').metadata.tags.includes('无字版'), false)
+  assert.equal(komgaFixture.books.get('variant-with').metadata.number, '1')
+  assert.deepEqual(komgaFixture.books.get('variant-without'), originalOtherVersion)
+  assert.deepEqual(komgaFixture.series.get('variant-with-series'), originalVariantSeries)
+  assert.deepEqual(komgaFixture.books.get('variant-with').readProgress, { page: 1, completed: false })
+  await toggle('batch-review-done')
+  await waitFor("!document.querySelector('[data-testid=batch-review-results]')", 'version sync result closed')
   window.setSize(1180, 800)
   await delay(200)
   assert.equal(await evaluate("document.querySelector('.review-footer').getBoundingClientRect().bottom <= window.innerHeight"), true)
@@ -591,7 +658,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

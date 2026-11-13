@@ -9,7 +9,7 @@ const path = require('node:path')
 const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync'])
 const BATCH_TEXT_FIELDS = new Set([
-  'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher',
+  'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
   'age_rating', 'color', 'reading_direction', 'manga', 'collection_mode', 'localized_series_label',
 ])
@@ -21,6 +21,7 @@ const BATCH_ENUMS = {
   age_rating: ['Unknown', 'Everyone', 'MA15+', 'R18+'],
   color: ['', '黑白', '全彩', '部分彩色'],
   reading_direction: ['', 'LEFT_TO_RIGHT', 'RIGHT_TO_LEFT', 'VERTICAL', 'WEBTOON'],
+  text_version: ['', '有文字', '无文字'],
   manga: ['Unknown', 'Yes', 'No', 'YesAndRightToLeft'],
 }
 

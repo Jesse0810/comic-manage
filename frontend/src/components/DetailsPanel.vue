@@ -2,7 +2,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { ArrowLeft, ArrowRight, Document, FolderOpened, Picture, Reading, Check, ZoomIn } from '@element-plus/icons-vue'
 import type { Comic, Metadata } from '../types'
-import { displayTitle, statusLabels, errorMessage, comicGenres, publicationFormats, releaseTypes, releaseMethods, releasePlatforms, colors, readingDirections, ageRatings, customTags, classificationValues, collectionMode, collectionModes, aliasLanguages } from '../types'
+import { displayTitle, statusLabels, errorMessage, comicGenres, publicationFormats, releaseTypes, releaseMethods, releasePlatforms, colors, textVersions, readingDirections, ageRatings, customTags, classificationValues, collectionMode, collectionModes, aliasLanguages } from '../types'
 import { invoke } from '../api'
 const props = defineProps<{ comic: Comic | null; modelValue: Metadata | null; busy: boolean; dirty: boolean; reviewed: boolean; library?: Comic[]; readOnly?: boolean }>()
 const emit = defineEmits<{
@@ -52,6 +52,7 @@ const legacyNames = computed(() => {
     .filter(item => item.value && item.value.trim() !== m.title.trim())
 })
 const exportedTags = computed(() => props.modelValue ? customTags(props.modelValue) : [])
+const displayedTags = computed(() => (props.modelValue?.tags || []).filter(tag => !(props.modelValue?.text_version === '无文字' && tag.trim() === '无字版')))
 const duplicatePencillers = computed(() => props.modelValue?.pencillers.filter(name => props.modelValue?.authors.some(author => author.trim() === name.trim())) || [])
 const legacyOriginalWorks = computed(() => (props.modelValue?.original_works.length || 0) > 1)
 const originalWork = computed(() => props.modelValue?.original_works.length === 1 ? props.modelValue.original_works[0] : '')
@@ -190,6 +191,12 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
                   <el-form-item label="独立卷号 · Volume"><el-input data-testid="volume" :model-value="modelValue.volume" @update:model-value="update('volume', $event)" :readonly="isRemote" :disabled="isRemote" clearable placeholder="来源明确提供卷号时填写，可留空" /><p class="metadata-help">{{ isRemote ? 'Komga 没有独立 Volume 编辑接口，此处只保留本机值。' : '与 Number 含义不同，不自动重复填写。Komga 专用库应关闭“将卷号附加到系列标题”。' }}</p></el-form-item>
                   <el-form-item label="系列别名"><el-input data-testid="localized-series" :model-value="modelValue.localized_series" @update:model-value="update('localized_series', $event)" :disabled="!isSeries" placeholder="系列的另一种语言名称" /><p class="metadata-help">仅多卷系列使用。别名与标签保存在本机，供 Komga alternateTitles API 使用，不写入 ComicInfo.xml。导入 CBZ 不会自动创建此别名。</p></el-form-item>
                   <el-form-item label="别名标签" :required="isSeries && !!modelValue.localized_series.trim()"><el-select data-testid="localized-series-label" :model-value="modelValue.localized_series_label" @update:model-value="update('localized_series_label', $event)" :disabled="!isSeries" filterable allow-create clearable placeholder="例如 zh-Hans、zh-Hant 或原名"><el-option v-for="language in aliasLanguages" :key="language.value" :label="language.label" :value="language.value" /></el-select><p class="metadata-help">用于标识此别名的语言或用途，与当前卷册的语言独立。</p><p v-if="isRemote && (comic.remote?.sharedMetadata?.alternateTitles?.length || 0) > 1" class="metadata-help">远端另有其他系列别名；未编辑的别名会保留。</p></el-form-item>
+                  <div class="version-link-fields" data-testid="version-association">
+                    <h4>版本关联 <span>可选</span></h4>
+                    <p class="metadata-help">仅在需要关联同一作品的不同版本时填写。作品组不是 Series，文字版本不是卷号；不会修改真实系列、编号、语言、译者或色彩。</p>
+                    <el-form-item label="作品组"><el-input data-testid="work-group" :model-value="modelValue.work_group || ''" @update:model-value="update('work_group', $event)" clearable placeholder="同一作品的各版本使用完全一致的组名" /><p class="metadata-help">可用稳定的作品原名；同名但不同作者、社团的作品请补充标识。没有版本关联需求时留空。</p></el-form-item>
+                    <el-form-item label="文字版本"><el-select data-testid="text-version" :model-value="modelValue.text_version || ''" @update:model-value="update('text_version', $event)" clearable placeholder="无版本区分需求时留空"><el-option v-for="version in textVersions" :key="version" :label="version" :value="version" /></el-select><p class="metadata-help">区分是否保留对白、旁白等画面文字。日文原版和中文汉化版都可有文字；不默认选择，也不跟随其他字段变化。</p></el-form-item>
+                  </div>
                 </el-collapse-item>
                 <el-collapse-item name="creators">
                   <template #title><span class="section-number">02</span><span class="collapse-title" data-testid="section-creators">作者与出版</span></template>
@@ -204,17 +211,17 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
                     <el-form-item label="内容类型 · Genre" required><el-select data-testid="genre" :model-value="modelValue.genre" @update:model-value="update('genre', $event)" clearable placeholder="请选择内容类型"><el-option v-if="legacyGenre" :label="`待核对：${modelValue.genre}`" :value="modelValue.genre" disabled /><el-option v-for="genre in comicGenres" :key="genre" :label="genre" :value="genre" /></el-select></el-form-item>
                     <el-form-item label="年龄分级 · AgeRating" required><el-select data-testid="age-rating" :model-value="modelValue.age_rating" @update:model-value="update('age_rating', $event)"><el-option v-for="rating in ageRatings" :key="rating.value" :label="rating.label" :value="rating.value" /></el-select></el-form-item>
                   </div>
-                  <p v-if="legacyGenre" class="metadata-inline-warning" data-testid="legacy-genre-warning">旧内容类型“{{ modelValue.genre }}”不属于 v1.2 六类。请核对后选择；保存其他字段时保留此旧值。</p>
+                  <p v-if="legacyGenre" class="metadata-inline-warning" data-testid="legacy-genre-warning">旧内容类型“{{ modelValue.genre }}”不属于规范中的六类。请核对后选择；保存其他字段时保留此旧值。</p>
                   <p v-if="isRemote" class="metadata-help section-help" data-testid="komga-remote-field-origin">远端的出版方、语言、总数和阅读方向是系列共享资料。内容类型与分级读取逐册辅助实体；没有逐册记录时保留空白或未确认，不把系列值当作本册值。</p>
                   <p v-if="isRemote && comic.remote?.sharedMetadata" class="metadata-help section-help" data-testid="komga-shared-series">系列共享值（仅供参考）：年龄 {{ sharedSeriesRating }}；类型 {{ comic.remote.sharedMetadata.genres?.join('、') || '未设置' }}。</p>
                   <p class="metadata-help section-help" data-testid="komga-series-aggregation">Komga 的内容类型和年龄分级属于系列：同系列类型合并，年龄取最高值。本机保留每本作品各自的资料；逐册筛选需要另通过 API 建立实体。</p>
                   <p v-if="mixedRatings.length > 1 || mixedGenres.length > 1" class="metadata-inline-warning" data-testid="komga-mixed-series">本机同系列检测到{{ mixedRatings.length > 1 ? '不同年龄分级' : '' }}{{ mixedRatings.length > 1 && mixedGenres.length > 1 ? '、' : '' }}{{ mixedGenres.length > 1 ? '多种内容类型' : '' }}；Komga 系列展示会汇总这些值。</p>
                   <div v-if="modelValue.age_rating === 'R18+'" class="correction-field" data-testid="correction-field"><div><strong>修正状态</strong><p>{{ modelValue.uncensored ? '导出为“修正状态:无修正”标签' : '默认有修正，不生成额外标签' }}</p></div><el-checkbox data-testid="uncensored" :model-value="modelValue.uncensored" @update:model-value="update('uncensored', Boolean($event))">无修正</el-checkbox></div>
                   <el-form-item label="色彩"><el-select data-testid="color" :model-value="modelValue.color" @update:model-value="update('color', $event)" clearable placeholder="未确认可留空"><el-option v-for="color in colors" :key="color" :label="color" :value="color" /></el-select><p class="metadata-help">以正文判断，封面不参与；正文兼有黑白和彩色页时选“部分彩色”。</p></el-form-item>
-                  <el-form-item label="题材与属性标签 · Tags" required><el-select data-testid="tags" :model-value="modelValue.tags" @update:model-value="update('tags', $event)" multiple filterable allow-create default-first-option :reserve-keyword="false" placeholder="如恋爱、奇幻、日常，按 Enter 添加" class="full-width" /><p class="metadata-help">普通标签与下方已确认分类生成的标签合计至少一条。未知信息保留草稿，不填写“无”来凑数。</p></el-form-item>
+                  <el-form-item label="题材与属性标签 · Tags" required><el-select data-testid="tags" :model-value="displayedTags" @update:model-value="update('tags', $event)" multiple filterable allow-create default-first-option :reserve-keyword="false" placeholder="如恋爱、奇幻、日常，按 Enter 添加" class="full-width" /><p class="metadata-help">普通标签与下方已确认分类生成的标签合计至少一条。未知信息保留草稿，不填写“无”来凑数。文字版本为“无文字”时不重复显示普通“无字版”。</p></el-form-item>
                   <el-form-item label="原作"><el-input data-testid="original-work" :model-value="originalWork" @update:model-value="updateOriginalWork" clearable :placeholder="legacyOriginalWorks ? '填写后将旧列表替换为一个原作' : '如东方Project；没有或无法确认时留空'" /><p v-if="legacyOriginalWorks" class="metadata-inline-warning" data-testid="legacy-original-works-warning">旧资料包含多个原作：{{ modelValue.original_works.join('、') }}。请核对并改为一个；修改其他字段不会截断此列表。<el-button link data-testid="clear-legacy-original-works" :disabled="editDisabled" @click="update('original_works', [])">清空旧原作列表</el-button></p></el-form-item>
                   <el-form-item label="角色"><el-select data-testid="characters" :model-value="modelValue.characters" @update:model-value="update('characters', $event)" multiple filterable allow-create default-first-option :reserve-keyword="false" placeholder="每个角色分别添加，可用顿号分隔" class="full-width" /><p class="metadata-help">写入 Characters，供 Komga 1.29+ 自动导入角色实体；同时保留“角色:”标签副本。</p></el-form-item>
-                  <div class="custom-tag-preview" data-testid="custom-tag-preview"><span>已确认分类生成的可移植标签，与普通标签一同保存</span><div v-if="exportedTags.length"><el-tag v-for="tag in exportedTags" :key="tag" size="small" effect="plain">{{ tag }}</el-tag></div><p v-else>填写适用的原作、角色、发行、平台或色彩信息后显示。</p></div>
+                  <div class="custom-tag-preview" data-testid="custom-tag-preview"><span>已确认分类生成的可移植标签，与普通标签一同保存</span><div v-if="exportedTags.length"><el-tag v-for="tag in exportedTags" :key="tag" size="small" effect="plain">{{ tag }}</el-tag></div><p v-else>填写适用的原作、角色、版本关联、发行、平台或色彩信息后显示。</p></div>
                 </el-collapse-item>
                 <el-collapse-item name="release">
                   <template #title><span class="section-number">04</span><span class="collapse-title" data-testid="section-release">发行与平台</span></template>
@@ -282,4 +289,8 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
 .remote-conflict-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: -5px 0 15px; }
 .remote-conflict-actions .el-button + .el-button { margin-left: 0; }
 .source-badges > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.version-link-fields { margin-top: 17px; padding-top: 14px; border-top: 1px solid #e3eadf; }
+.version-link-fields h4 { margin: 0 0 8px; color: #526d48; font-size: 12px; font-weight: 600; }
+.version-link-fields h4 span { margin-left: 7px; color: #91a086; font-size: 10px; font-weight: 400; }
+.version-link-fields > .metadata-help { margin-bottom: 13px; }
 </style>

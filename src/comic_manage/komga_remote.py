@@ -12,9 +12,9 @@ from typing import Callable
 from urllib.parse import quote
 
 from .komga_client import KomgaClient, KomgaError, normalize_url, server_path
-from .metadata import AGE_RATINGS, Metadata, title_key
+from .metadata import AGE_RATINGS, Metadata, read_variant_fields, title_key
 from .sources import Cancelled, check_cancel
-from .komga_payloads import remote_book_payload, remote_series_payload
+from .komga_payloads import _tag_field, remote_book_payload, remote_series_payload
 
 READ_ONLY_FIELDS = frozenset({"collection_mode", "cover_index", "original_xml", "original_title", "chinese_title", "translated", "full_color", "black_and_white", "manga", "volume"})
 SERIES_FIELDS = frozenset({"series", "publisher", "language", "reading_direction", "count", "localized_series", "localized_series_label"})
@@ -90,7 +90,7 @@ def metadata_from_remote(book: dict, series: dict, preferred_alias_label: str = 
     ordinary = []
     for tag in tags:
         prefix, separator, name = tag.replace("：", ":", 1).partition(":")
-        if separator and prefix.strip() in ("原作", "角色", "发行性质", "出版形态", "发布方式", "发布平台", "色彩", "修正状态", "内容类型", "年龄分级", "汉化状态"):
+        if separator and prefix.strip() in ("原作", "角色", "发行性质", "出版形态", "发布方式", "发布平台", "作品组", "文字版本", "色彩", "修正状态", "内容类型", "年龄分级", "汉化状态"):
             namespaced.setdefault(prefix.strip(), []).append(name.strip())
         else:
             ordinary.append(tag)
@@ -104,6 +104,8 @@ def metadata_from_remote(book: dict, series: dict, preferred_alias_label: str = 
         raise ValueError("远端作品名称格式无效。")
     year = month = day = ""
     warnings = []
+    variants, variant_warnings = read_variant_fields(entities, tags)
+    warnings.extend(variant_warnings)
     if raw.get("releaseDate"):
         try:
             released = date.fromisoformat(raw["releaseDate"])
@@ -143,6 +145,7 @@ def metadata_from_remote(book: dict, series: dict, preferred_alias_label: str = 
         "release_type": one("发行性质"), "publication_format": one("出版形态"),
         "release_methods": grouped.get("发布方式") or namespaced.get("发布方式", []),
         "release_platforms": grouped.get("发布平台") or namespaced.get("发布平台", []),
+        "work_group": variants["work_group"], "text_version": variants["text_version"],
         "uncensored": one("修正状态") == "无修正", "tags": ordinary,
         "year": year, "month": month, "day": day,
     }
@@ -213,9 +216,18 @@ def finalize_sync(repo, comic, client: KomgaClient, library_id: str, book_patch:
     refreshed = Metadata.from_dict({**base.to_dict(), **{field: current[field] for field in fields}})
     if "age_rating" in fields and "uncensored" not in fields:
         refreshed.uncensored = current["uncensored"]
+    keep_text_tag = "无字版" in current["tags"] and "tags" not in fields and (
+        "text_version" in fields or "无字版" not in base.tags)
+    variant_evidence = [tag for tag in current["tags"] if _tag_field(tag) in ("work_group", "text_version")]
+    if "tags" not in fields and (keep_text_tag or variant_evidence):
+        # Removing this portable duplicate is derived from the version edit;
+        # the unselected ordinary-tags field keeps its local value, including
+        # across subsequent no-op acknowledgements.
+        refreshed.tags = list(current["tags"])
     def differs(field):
         local, remote = getattr(refreshed, field), getattr(base, field)
         if field == "tags":
+            local = [tag for tag in refreshed.all_tags if _tag_field(tag) is None]
             return {tag.strip().lower() for tag in local} != {tag.strip().lower() for tag in remote}
         if field == "language":
             return local.strip().lower() != remote.strip().lower()
@@ -224,6 +236,10 @@ def finalize_sync(repo, comic, client: KomgaClient, library_id: str, book_patch:
     for field in fields - set(remaining):
         if field in ("tags", "language"):
             setattr(refreshed, field, getattr(base, field))
+            if field == "tags":
+                refreshed.tags = list(dict.fromkeys([*refreshed.tags, *variant_evidence]))
+                if current["text_version"] == "无文字" and "无字版" in current["tags"] and "无字版" not in refreshed.tags:
+                    refreshed.tags = [*refreshed.tags, "无字版"]
     repo.rebase_komga(comic.id, refreshed, base, snapshot, snapshot_fingerprint(snapshot), remaining,
                       action="komga_sync_snapshot", synced=True)
 

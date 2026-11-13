@@ -134,11 +134,13 @@ ENTITY_FIELDS = {
     "original_works": "原作", "characters": "character", "release_type": "发行性质",
     "publication_format": "出版形态", "uncensored": "修正状态", "age_rating": "年龄分级",
     "genre": "内容类型", "color": "色彩", "release_methods": "发布方式", "release_platforms": "发布平台",
+    "work_group": "作品组", "text_version": "文字版本",
 }
 TAG_FIELDS = {"原作": "original_works", "角色": "characters", "发行性质": "release_type",
               "出版形态": "publication_format", "修正状态": "uncensored", "内容类型": "genre",
               "年龄分级": "age_rating", "年龄等级": "age_rating", "汉化状态": "translator",
-              "发布方式": "release_methods", "发布平台": "release_platforms", "色彩": "color"}
+              "发布方式": "release_methods", "发布平台": "release_platforms", "色彩": "color",
+              "作品组": "work_group", "文字版本": "text_version"}
 
 
 def _tag_field(tag: str) -> str | None:
@@ -216,8 +218,13 @@ def remote_book_payload(metadata: Metadata, current: dict, fields: set[str]) -> 
             raise ValueError("远端标签格式无效，本次已保留原值。")
         tags = [tag for tag in existing_tags if ((_tag_field(tag) is None and "tags" not in effective_tag_fields)
                 or (_tag_field(tag) is not None and _tag_field(tag) not in effective_tag_fields))]
+        if "text_version" in fields and metadata.text_version == "无文字":
+            tags = [tag for tag in tags if tag.strip() != "无字版"]
         if "tags" in fields:
-            tags.extend(metadata.tags)
+            # The model retains imported version-prefix tags as evidence.
+            # Ordinary-tag edits must not resend that evidence as an unchecked
+            # custom-field edit, nor recreate a derived textless duplicate.
+            tags.extend(tag for tag in metadata.all_tags if _tag_field(tag) is None)
         tags.extend(tag for tag in metadata.all_tags if _tag_field(tag) in effective_tag_fields)
         _locked(payload, "tags", list(dict.fromkeys(tags)))
     return payload, warnings

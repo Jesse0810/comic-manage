@@ -18,6 +18,8 @@ RELEASE_METHODS = ("公开发布", "单次购买", "会员订阅", "免费与付
 READING_DIRECTIONS = ("", "LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL", "WEBTOON")
 RELEASE_PLATFORMS = ("Fantia", "pixivFANBOX", "Ci-en", "Patreon", "pixiv", "BOOTH", "DLsite", "FANZA同人", "DiGiket", "Gumroad", "Ko-fi", "Melonbooks", "Toranoana")
 V12_FIELDS = frozenset({"color", "release_methods", "release_platforms", "reading_direction"})
+V13_FIELDS = frozenset({"work_group", "text_version"})
+TEXT_VERSIONS = ("", "有文字", "无文字")
 THEMES = {"恋爱", "奇幻", "日常", "悬疑", "纯爱", "猎奇", "NTR"}
 UNKNOWN_TRANSLATORS = {"未知汉化", "未知漢化", "中国翻訳", "中国翻译", "中國翻譯", "未知翻译"}
 AGE_ALIASES = {"全年龄": "Everyone", "R15": "MA15+", "R18": "R18+", "Adults Only 18+": "R18+"}
@@ -40,6 +42,39 @@ def unique(values: list[str]) -> list[str]:
             result.append(value)
             seen.add(key)
     return result
+
+
+def unique_tags(values: list[str]) -> list[str]:
+    """Work-group keys are exact names, unlike ordinary case-insensitive tags."""
+    result, seen = [], set()
+    for value in values:
+        value = value.strip()
+        prefix = value.replace("：", ":", 1).partition(":")[0].strip()
+        key = ("exact", value) if prefix == "作品组" else ("ordinary", title_key(value))
+        if value and key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result
+
+
+def read_variant_fields(entities: list[dict], tags: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Read explicit v1.3 evidence without deriving grouping or version defaults."""
+    result, warnings = {}, []
+    for kind, field_name in (("作品组", "work_group"), ("文字版本", "text_version")):
+        matching_entities = [item for item in entities if isinstance(item, dict) and isinstance(item.get("kind"), str) and item["kind"].strip() == kind]
+        entity_values = [item["name"].strip() if isinstance(item.get("name"), str) else "" for item in matching_entities]
+        tag_values = [tag.replace("：", ":", 1).partition(":")[2].strip() for tag in tags
+                      if isinstance(tag, str) and tag.replace("：", ":", 1).partition(":")[0].strip() == kind]
+        candidates = list(dict.fromkeys(entity_values if matching_entities else tag_values))
+        if len(candidates) == 1 and candidates[0] and (field_name != "text_version" or candidates[0] in TEXT_VERSIONS[1:]):
+            result[field_name] = candidates[0]
+        else:
+            result[field_name] = ""
+            if candidates:
+                warnings.append(f"{kind}存在多个值或无效值，原始证据已保留，请人工核对：{' / '.join(candidates)}。")
+        if matching_entities and tag_values and any(value not in entity_values and value not in [name.lower() for name in entity_values] for value in tag_values):
+            warnings.append(f"{kind}实体与标签副本不一致，按明确实体读取，原始标签仍保留供核对。")
+    return result, warnings
 
 
 def classification_values(values: list[str]) -> list[str]:
@@ -129,6 +164,8 @@ def migrate_legacy_values(value: dict) -> dict:
 
 def migration_warnings(value: dict) -> list[str]:
     warnings = []
+    _, variant_warnings = read_variant_fields([], value.get("tags", []))
+    warnings.extend(variant_warnings)
     converted = migrate_legacy_values(value)
     if len(value.get("original_works", [])) > 1:
         warnings.append("旧记录包含多个原作，值已完整保留，请核对后只选择一个原作。")
@@ -173,6 +210,8 @@ class Metadata:
     publication_format: str = ""
     release_methods: list[str] = field(default_factory=list)
     release_platforms: list[str] = field(default_factory=list)
+    work_group: str | None = None
+    text_version: str | None = None
     color: str | None = None
     uncensored: bool = False
     language: str = ""
@@ -189,6 +228,11 @@ class Metadata:
     original_xml: str = ""
 
     def __post_init__(self):
+        variants, _ = read_variant_fields([], self.tags)
+        if self.work_group is None:
+            self.work_group = variants["work_group"]
+        if self.text_version is None:
+            self.text_version = variants["text_version"]
         if self.title is None:
             self.title = (self.original_title or self.chinese_title).strip()
         if self.color is None:
@@ -199,6 +243,8 @@ class Metadata:
 
     def normalize(self) -> None:
         """Resolve authority once, retaining only ordinary themes in tags."""
+        self.work_group = self.work_group.strip()
+        self.text_version = self.text_version.strip()
         self.age_rating = AGE_ALIASES.get(self.age_rating, self.age_rating)
         if self.age_rating not in AGE_RATINGS:
             self.age_rating = "Unknown"
@@ -231,6 +277,10 @@ class Metadata:
             elif separator and prefix == "出版形态":
                 if value and not self.publication_format:
                     self.publication_format = value
+            elif separator and prefix in ("作品组", "文字版本"):
+                # Retain source evidence. Only all_tags emits the canonical copy,
+                # so changing a version field never changes unchecked raw tags.
+                ordinary.append(tag)
             elif separator and prefix in ("发布方式", "发布平台"):
                 target = self.release_methods if prefix == "发布方式" else self.release_platforms
                 if value:
@@ -261,7 +311,7 @@ class Metadata:
             else:
                 genres.append(genre)
         self.genre = ", ".join(unique(genres))
-        self.tags = unique(tag for tag in ordinary if tag != self.genre and not (tag in ("同人志", "同人誌") and self.release_type == "同人发行"))
+        self.tags = unique_tags(tag for tag in ordinary if tag != self.genre and not (tag in ("同人志", "同人誌") and self.release_type == "同人发行"))
         if self.localized_series.strip() == self.series.strip():
             self.localized_series = ""
 
@@ -279,11 +329,18 @@ class Metadata:
             custom.append(f"出版形态:{value.publication_format.strip()}")
         custom.extend(f"发布方式:{item}" for item in value.release_methods)
         custom.extend(f"发布平台:{item}" for item in value.release_platforms)
+        if value.work_group:
+            custom.append(f"作品组:{value.work_group}")
+        if value.text_version:
+            custom.append(f"文字版本:{value.text_version}")
         if value.color:
             custom.append(f"色彩:{value.color}")
         if value.age_rating == "R18+" and value.uncensored:
             custom.append("修正状态:无修正")
-        return unique(custom + value.tags)
+        ordinary = [tag for tag in value.tags
+                    if tag.replace("：", ":", 1).partition(":")[0].strip() not in ("作品组", "文字版本")
+                    and not (value.text_version == "无文字" and tag == "无字版")]
+        return unique_tags(custom + ordinary)
 
     def validate_review(self) -> None:
         if not self.display_title:
@@ -297,7 +354,7 @@ class Metadata:
         unknown_translator = any(t in UNKNOWN_TRANSLATORS for t in split_values(self.translator))
         if unknown_translator:
             raise ValueError("已确认有翻译的作品请补录实际译者或汉化组；未知汉化信息仍需人工确认。")
-        self.validate_fields({"original_works", "release_type", "release_methods", "color"})
+        self.validate_fields({"original_works", "release_type", "release_methods", "color", "work_group", "text_version"})
         if not self.all_tags:
             raise ValueError("请填写至少一条真实已确认的题材或自定义标签，未知时先保存草稿。")
 
@@ -330,6 +387,8 @@ class Metadata:
             raise ValueError("原作只允许一个值，旧多值已保留，请人工核对。")
         if "color" in fields and self.color not in COLORS:
             raise ValueError("色彩请填写黑白、全彩、部分彩色，未知时留空。")
+        if "text_version" in fields and self.text_version not in TEXT_VERSIONS:
+            raise ValueError("文字版本请使用有文字、无文字，未知或不适用时留空。")
         if "release_type" in fields and self.release_type not in RELEASE_TYPES:
             raise ValueError("发行性质请填写同人发行、商业出版或个人独立发布，未知时留空。")
         if "release_methods" in fields and any(item not in RELEASE_METHODS for item in self.release_methods):
@@ -350,7 +409,7 @@ class Metadata:
             values = value if isinstance(value, list) else [value]
             if any(isinstance(v, str) and re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", v) for v in values):
                 raise ValueError("元数据中含有 XML 不支持的字符。")
-            if field_name in {"original_works", "characters", "release_type", "publication_format", "release_methods", "release_platforms", "color", "tags"}:
+            if field_name in {"original_works", "characters", "release_type", "publication_format", "release_methods", "release_platforms", "work_group", "text_version", "color", "tags"}:
                 if any(re.search(r"[,，;；\n]", v) for v in values):
                     raise ValueError("每个标签值请单独填写，不能包含逗号、分号或换行。")
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .metadata import COLORS, READING_DIRECTIONS, V12_FIELDS, Metadata, legacy_color, migration_warnings
+from .metadata import COLORS, READING_DIRECTIONS, V12_FIELDS, V13_FIELDS, Metadata, legacy_color, migration_warnings, read_variant_fields
 from .sources import Snapshot, check_cancel, source_id
 
 
@@ -76,6 +76,69 @@ class Repository:
                 PRAGMA user_version = 1;
             """)
         self._migrate_metadata()
+        self._migrate_variants()
+
+    def _migrate_variants(self) -> None:
+        """Add optional v1.3 fields without resetting previously reviewed copies."""
+        with self.connect() as db:
+            remotes = {row["comic_id"]: dict(row) for row in db.execute("SELECT * FROM komga_sources")}
+            records = [(dict(row), json.loads(row["metadata"])) for row in db.execute("SELECT * FROM comics")
+                       if not V13_FIELDS.issubset(json.loads(row["metadata"]))
+                       or (row["id"] in remotes and not V13_FIELDS.issubset(json.loads(remotes[row["id"]]["base_metadata"])))]
+        if not records:
+            if self.setting("metadata_rules") == "1.2":
+                self.set_setting("metadata_rules", "1.3")
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = self.path.with_name(f"{self.path.stem}.before-metadata-v1_3-{stamp}.sqlite3")
+        self.backup(backup)
+        with self.connect() as db:
+            for row, previous in records:
+                remote = remotes.get(row["id"])
+                values = dict(previous)
+                warnings = []
+                if remote:
+                    base = json.loads(remote["base_metadata"])
+                    base_tag_variants, _ = read_variant_fields([], base.get("tags") or [])
+                    raw = (json.loads(remote["snapshot"]).get("book") or {}).get("metadata") or {}
+                    variants, warnings = read_variant_fields(raw.get("notableEntities") or [], raw.get("tags") or [])
+                    local_variants, local_warnings = read_variant_fields([], previous.get("tags") or [])
+                    dirty = set(json.loads(remote["dirty_fields"]))
+                    for field in V13_FIELDS:
+                        if field not in base:
+                            base[field] = variants[field]
+                        if field not in values:
+                            values[field] = base[field]
+                            # A pre-v1.3 tag draft must remain visible, rather than
+                            # being turned into an inferred new-field PATCH.
+                            if "tags" in dirty and local_variants[field] != base_tag_variants[field]:
+                                warnings.append("本机未同步标签与远端作品组或文字版本不一致，原标签及草稿已保留，请明确选择正确字段后重新审核。")
+                    warnings.extend(local_warnings)
+                    db.execute("UPDATE komga_sources SET base_metadata=? WHERE comic_id=?", (json.dumps(base, ensure_ascii=False), row["id"]))
+                else:
+                    variants, warnings = read_variant_fields([], previous.get("tags") or [])
+                    for field in V13_FIELDS:
+                        values.setdefault(field, variants[field])
+                try:
+                    Metadata.from_dict(values).validate_fields(V13_FIELDS)
+                except ValueError as error:
+                    warnings.append(str(error))
+                # Raw managed tags stay in metadata as evidence, while exported
+                # copies are derived from canonical fields. Only ambiguity or an
+                # actual export change requires renewed human review.
+                old_tags = Metadata.from_dict({**previous, "work_group": "", "text_version": ""}).all_tags
+                old_tags.extend(tag for tag in previous.get("tags", []) if tag.replace("：", ":", 1).partition(":")[0].strip() in ("作品组", "文字版本"))
+                new_tags = Metadata.from_dict(values).all_tags
+                if not remote and set(old_tags) != set(new_tags):
+                    warnings.append("作品组或文字版本的标签输出需要更新，请核对后重新审核；源文件、成品及其他元数据保持原样。")
+                warning = " ".join(filter(None, [row["warning"], *dict.fromkeys(warnings)]))
+                db.execute("UPDATE comics SET metadata=?,status=?,warning=? WHERE id=?",
+                           (json.dumps(values, ensure_ascii=False), "draft" if warnings else row["status"], warning, row["id"]))
+                audit = {"backup": str(backup), "previous": previous, "reviewRevoked": bool(warnings)}
+                if remote:
+                    audit["previousRemote"] = remote
+                self._event(db, row["id"], "metadata_v13_fields", json.dumps(audit, ensure_ascii=False))
+            db.execute("INSERT INTO settings VALUES ('metadata_rules','1.3') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
 
     def _migrate_metadata(self) -> None:
         required = {"title", "collection_mode", "localized_series_label"} | V12_FIELDS
@@ -133,6 +196,10 @@ class Repository:
                 values[field] = previous[field]
         raw = (snapshot.get("book") or {}).get("metadata") or {}
         entities = raw.get("notableEntities") or []
+        variants, _ = read_variant_fields(entities, raw.get("tags") or [])
+        for field in V13_FIELDS:
+            if field not in previous:
+                values[field] = variants[field]
         names = lambda kind: [item["name"] for item in entities if item.get("kind", "").strip() == kind and isinstance(item.get("name"), str)]
         if "color" not in previous and not dirty.intersection({"black_and_white", "full_color"}):
             colors = list(dict.fromkeys(names("色彩")))

@@ -229,6 +229,9 @@ test('request boundary rejects arbitrary methods, malformed records and unsafe n
     ['batch_edit', {ids:['book'],changes:{genre:'同人志'}}],
     ['batch_edit', {ids:['book'],changes:{original_works:['原作甲','原作乙']}}],
     ['batch_edit', {ids:['book'],changes:{release_methods:['平台推测的方式']}}],
+    ['batch_edit', {ids:['book'],changes:{work_group:['不得多值']}}],
+    ['batch_edit', {ids:['book'],changes:{text_version:'未知'}}],
+    ['batch_edit', {ids:['book'],changes:{text_version:[]}}],
     ['batch_edit', {ids:['book'],changes:{age_rating:'R18'}}],
     ['remove', {ids:['book',null]}],
     ['bootstrap', null],
@@ -253,6 +256,7 @@ test('staged import and batch actions cross the same restricted bridge', async t
       publication_format:'单行本', year:'2024', month:'2', day:'29',
       language:'zh-Hans', age_rating:'R18+', color:'部分彩色',
       release_methods:['会员订阅','单次购买'], release_platforms:['Fantia','自定义平台'], tags:['日常'],
+      work_group:'My Work (作者甲)', text_version:'无文字',
       manga:'YesAndRightToLeft', reading_direction:'WEBTOON', uncensored:true, web:['https://example.org/comic'],
     }}],
     ['batch_edit', {ids:['one','two'],changes:{
@@ -260,6 +264,7 @@ test('staged import and batch actions cross the same restricted bridge', async t
       localized_series_label:'', translator:'', pencillers:[],
       original_works:[], characters:[], release_type:'', publication_format:'',
       web:[], tags:[], language:'', color:'', reading_direction:'', release_methods:[], release_platforms:[], uncensored:false,
+      work_group:'', text_version:'',
     }}],
     ['remove', {ids:['one']}],
   ]

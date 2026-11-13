@@ -220,6 +220,59 @@ class ImportTests(unittest.TestCase):
                 self.service.call("batch_edit", {"ids": [identity], "changes": changes})
             self.assertEqual(self.service.repo.get(identity).metadata.to_dict(), before)
 
+    def test_v13_work_group_and_text_version_are_independent_checked_fields(self):
+        self.commit(self.preview())
+        identities = [source_id(self.first), source_id(self.second)]
+        for index, identity in enumerate(identities):
+            self.service.call("save", {"id": identity, "metadata": {
+                "title": "同名作品", "authors": [f"作者{index}"], "genre": "漫画", "tags": ["日常"],
+                "collection_mode": "oneshot", "text_version": "有文字" if index == 0 else "无文字",
+                "language": "ja" if index == 0 else "", "translator": "译者" if index == 0 else "",
+            }})
+        before = {identity: self.service.repo.get(identity).metadata.to_dict() for identity in identities}
+        group = "My Work (作者甲)"
+        result = self.service.call("batch_edit", {"ids": identities, "changes": {"work_group": group}})
+        self.assertEqual(result["count"], 2)
+        for comic in result["comics"]:
+            self.assertEqual(comic["metadata"], {**before[comic["id"]], "work_group": group})
+            self.assertEqual(comic["metadata"]["series"], "")
+            self.assertEqual(comic["metadata"]["number"], "")
+        changed = self.service.call("batch_edit", {"ids": [identities[1]], "changes": {"text_version": "有文字"}})
+        self.assertEqual(changed["comics"][0]["metadata"], {**before[identities[1]], "work_group": group, "text_version": "有文字"})
+        cleared = self.service.call("batch_edit", {"ids": identities, "changes": {"work_group": "", "text_version": ""}})
+        for comic in cleared["comics"]:
+            self.assertEqual(comic["metadata"], {**before[comic["id"]], "work_group": "", "text_version": ""})
+        for changes in ({"work_group": ["不得多值"]}, {"text_version": "有字版"}, {"text_version": []}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.service.call("batch_edit", {"ids": identities, "changes": changes})
+
+    def test_v13_same_title_versions_export_as_two_independent_oneshots(self):
+        self.commit(self.preview())
+        identities = [source_id(self.first), source_id(self.second)]
+        for identity, version in zip(identities, ("有文字", "无文字")):
+            self.service.call("approve", {"id": identity, "metadata": {
+                "title": "同名作品", "authors": ["同一作者"], "genre": "漫画", "tags": ["日常"],
+                "age_rating": "Everyone", "collection_mode": "oneshot", "work_group": "同名作品（同一作者）", "text_version": version,
+            }})
+        plan = self.service.call("plan", {"ids": identities, "outputRoot": str(self.root / "versions")})
+        destinations = [Path(item["destination"]) for item in plan["items"]]
+        self.assertEqual(len(set(destinations)), 2)
+        self.assertEqual({path.parent.name for path in destinations}, {"_oneshots"})
+        result = self.service.call("export", {"token": plan["token"]})
+        self.assertEqual(len(result["completed"]), 2)
+        self.assertEqual(result["errors"], [])
+        versions = set()
+        for output in result["completed"]:
+            with zipfile.ZipFile(output) as archive:
+                xml = archive.read("ComicInfo.xml").decode("utf-8")
+                self.assertIn("<Title>同名作品</Title>", xml)
+                self.assertIn("作品组:同名作品（同一作者）", xml)
+                self.assertNotIn("<Series>", xml)
+                self.assertNotIn("<Number>", xml)
+                self.assertNotIn("<作品组>", xml)
+                versions.add("有文字" if "文字版本:有文字" in xml else "无文字")
+        self.assertEqual(versions, {"有文字", "无文字"})
+
     def test_batch_conflict_rolls_back_earlier_changes_in_same_batch(self):
         self.commit(self.preview())
         identities = [source_id(self.first), source_id(self.second)]

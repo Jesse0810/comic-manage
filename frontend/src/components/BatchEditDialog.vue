@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check } from '@element-plus/icons-vue'
 import type { CollectionMode, Metadata } from '../types'
-import { ageRatings, aliasLanguages, classificationValues, collectionModes, comicGenres, colors, errorMessage, publicationFormats, readingDirections, releaseMethods, releasePlatforms, releaseTypes } from '../types'
+import { ageRatings, aliasLanguages, classificationValues, collectionModes, comicGenres, colors, errorMessage, publicationFormats, readingDirections, releaseMethods, releasePlatforms, releaseTypes, textVersions } from '../types'
 import { invoke } from '../api'
 
 const props = defineProps<{ modelValue: boolean; ids: string[]; authors: string[]; modes?: CollectionMode[]; ratings?: string[]; hasRemote?: boolean }>()
@@ -15,7 +15,7 @@ const emit = defineEmits<{
 
 type BatchKey = 'authors' | 'genre' | 'collection_mode' | 'series' | 'localized_series' | 'localized_series_label' | 'number' | 'count' | 'volume'
   | 'pencillers' | 'translator' | 'publisher' | 'original_works' | 'characters' | 'release_type' | 'publication_format'
-  | 'age_rating' | 'year' | 'month' | 'day' | 'language' | 'color' | 'manga' | 'reading_direction' | 'release_methods' | 'release_platforms' | 'tags' | 'web' | 'uncensored'
+  | 'age_rating' | 'year' | 'month' | 'day' | 'language' | 'color' | 'manga' | 'reading_direction' | 'release_methods' | 'release_platforms' | 'work_group' | 'text_version' | 'tags' | 'web' | 'uncensored'
 type BatchValues = Pick<Metadata, BatchKey>
 type MultiKey = 'authors' | 'pencillers' | 'characters' | 'release_methods' | 'release_platforms' | 'tags'
 type TextKey = Exclude<BatchKey, MultiKey | 'original_works' | 'web' | 'uncensored'>
@@ -39,6 +39,8 @@ const groups: { id: string; label: string; fields: Field[] }[] = [
     { key: 'number', label: '册编号 · Number', kind: 'text', clearable: true, placeholder: '系列内的编号或顺序', hint: '填写后所选作品使用同一编号；连续编号请逐本编辑，不从 Volume 推测。' },
     { key: 'count', label: '系列总数 · Count', kind: 'text', clearable: true, placeholder: '已知时填写总册数' },
     { key: 'volume', label: '独立卷号 · Volume', kind: 'text', clearable: true, placeholder: '来源明确提供独立卷号时填写', hint: '仅本地作品可编辑，不自动重复 Number；Komga 没有独立 Volume 编辑接口。' },
+    { key: 'work_group', label: '作品组', kind: 'text', clearable: true, wide: true, placeholder: '同一作品的不同版本使用完全一致的组名', hint: '仅有版本关联需求时填写。只修改作品组，不改文字版本、Series、Number 或其他资料；留空可清空。' },
+    { key: 'text_version', label: '文字版本', kind: 'select', options: options(textVersions), clearable: true, placeholder: '没有版本区分需求时留空', hint: '独立选择有文字或无文字，不默认选择；不由译者、语言或色彩推断。' },
   ] },
   { id: 'creators', label: '作者与出版', fields: [
     { key: 'authors', label: '作者', kind: 'multi', allowCreate: true, placeholder: '输入原文姓名后按 Enter，可添加多位', hint: '作者至少填写一位；填写后将替换原作者列表。' },
@@ -78,7 +80,7 @@ function initialValues(): BatchValues {
   return {
     authors: [], genre: '', collection_mode: 'oneshot', series: '', localized_series: '', localized_series_label: 'zh-Hans', number: '', count: '', volume: '', pencillers: [], translator: '', publisher: '',
     original_works: [], characters: [], release_type: '', publication_format: '', age_rating: 'Unknown',
-    year: '', month: '', day: '', language: '', color: '', manga: 'Unknown', reading_direction: '', release_methods: [], release_platforms: [], tags: [], web: [], uncensored: false,
+    year: '', month: '', day: '', language: '', color: '', manga: 'Unknown', reading_direction: '', release_methods: [], release_platforms: [], work_group: '', text_version: '', tags: [], web: [], uncensored: false,
   }
 }
 const values = reactive<BatchValues>(initialValues())
@@ -132,7 +134,7 @@ async function save() {
   if (busy.value || !props.ids.length || !selectedFields.value.length) return
   error.value = ''
   if (enabled.authors && !values.authors.some(name => name.trim())) { fieldError('authors', '请输入至少一位作者，按 Enter 添加'); return }
-  const managedPrefixes = new Set(['原作', '角色', '发行性质', '出版形态', '发布方式', '发布平台', '色彩', '修正状态', '内容类型', '年龄分级', '汉化状态'])
+  const managedPrefixes = new Set(['原作', '角色', '发行性质', '出版形态', '发布方式', '发布平台', '作品组', '文字版本', '色彩', '修正状态', '内容类型', '年龄分级', '汉化状态'])
   if (enabled.tags && values.tags.some(tag => /[:：]/.test(tag) && managedPrefixes.has(tag.split(/[:：]/, 1)[0].trim()))) {
     fieldError('tags', '题材与属性中只填写普通标签；请勾选对应分类字段填写原作、发行、平台、色彩等信息'); return
   }

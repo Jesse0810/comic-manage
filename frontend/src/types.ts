@@ -2,12 +2,14 @@ export type ComicStatus = 'draft' | 'approved' | 'packaged'
 export type CollectionMode = 'oneshot' | 'series'
 export type Color = '' | '黑白' | '全彩' | '部分彩色'
 export type ReadingDirection = '' | 'LEFT_TO_RIGHT' | 'RIGHT_TO_LEFT' | 'VERTICAL' | 'WEBTOON'
+export type TextVersion = '' | '有文字' | '无文字'
 export interface Metadata {
   title: string; series: string; localized_series: string; localized_series_label: string; collection_mode: CollectionMode
   number: string; count: string; volume: string
   pencillers: string[]; web: string[]; day: string; black_and_white: 'Unknown' | 'Yes' | 'No'
   manga: 'Unknown' | 'Yes' | 'No' | 'YesAndRightToLeft'
   color: Color; release_methods: string[]; release_platforms: string[]; reading_direction: ReadingDirection
+  work_group: string; text_version: TextVersion
   original_works: string[]; characters: string[]; release_type: string; publication_format: string
   original_title: string; chinese_title: string; authors: string[]; publisher: string; translator: string
   genre: string; tags: string[]; translated: boolean; uncensored: boolean; full_color: boolean
@@ -56,6 +58,7 @@ export const publicationFormats = ['独立作品', '单行本', '合集', '分�
 export const releaseMethods = ['公开发布', '单次购买', '会员订阅', '免费与付费并行']
 export const releasePlatforms = ['Fantia', 'pixivFANBOX', 'Ci-en', 'Patreon', 'pixiv', 'BOOTH', 'DLsite', 'FANZA同人', 'DiGiket', 'Gumroad', 'Ko-fi', 'Melonbooks', 'Toranoana']
 export const colors = ['黑白', '全彩', '部分彩色']
+export const textVersions = ['有文字', '无文字']
 export const readingDirections = [{ label: '从左向右', value: 'LEFT_TO_RIGHT' }, { label: '从右向左', value: 'RIGHT_TO_LEFT' }, { label: '纵向', value: 'VERTICAL' }, { label: 'Webtoon', value: 'WEBTOON' }]
 export const ageRatings = [{ label: '未确认', value: 'Unknown' }, { label: '全年龄', value: 'Everyone' }, { label: 'MA15+', value: 'MA15+' }, { label: 'R18', value: 'R18+' }]
 export const colorLabels: Record<string, string> = { '': '色彩待确认', 黑白: '黑白', 全彩: '全彩', 部分彩色: '部分彩色' }
@@ -80,8 +83,13 @@ export function customTags(metadata: Metadata): string[] {
   for (const method of metadata.release_methods || []) if (method.trim()) tags.push(`发布方式:${method.trim()}`)
   for (const platform of metadata.release_platforms || []) if (platform.trim()) tags.push(`发布平台:${platform.trim()}`)
   if (metadata.color) tags.push(`色彩:${metadata.color}`)
+  if (metadata.work_group?.trim()) tags.push(`作品组:${metadata.work_group.trim()}`)
+  if (metadata.text_version) tags.push(`文字版本:${metadata.text_version}`)
   if (metadata.age_rating === 'R18+' && metadata.uncensored) tags.push('修正状态:无修正')
   return [...new Set(tags.filter(value => !value.endsWith(':')))]
+}
+export function versionLabels(metadata: Metadata): string[] {
+  return [metadata.work_group?.trim() ? `作品组：${metadata.work_group}` : '', metadata.text_version || ''].filter(Boolean)
 }
 export interface ExportPlan {
   token: string; totalBytes: number

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import re
 import unicodedata
 
-from .metadata import COLORS, GENRES, RELEASE_METHODS, RELEASE_PLATFORMS, RELEASE_TYPES, Metadata, split_values
+from .metadata import COLORS, GENRES, RELEASE_METHODS, RELEASE_PLATFORMS, RELEASE_TYPES, TEXT_VERSIONS, Metadata, read_variant_fields, split_values
 
 
 @dataclass(frozen=True)
@@ -128,6 +128,7 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
     translators: list[str] = []
     plain_author_seen = False
     colors_seen: set[str] = set()
+    variant_tags: list[str] = []
 
     for group in groups:
         value = group.value
@@ -159,7 +160,12 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
                 warnings.append(f"发售年月仅从名称开头的 [YYYY.MM] 提取，已保留原文：{value}")
             continue
 
-        if label in ("无修正", "無修正", "无修正版", "無修正版"):
+        variant_prefix, separator, variant_value = value.replace("：", ":", 1).partition(":")
+        if label in TEXT_VERSIONS[1:] or label == "无字版":
+            variant_tags.append("文字版本:" + ("无文字" if label == "无字版" else label))
+        elif separator and variant_prefix.strip() in ("作品组", "文字版本"):
+            variant_tags.append(value)
+        elif label in ("无修正", "無修正", "无修正版", "無修正版"):
             metadata.uncensored = True
         elif label in COLORS[1:]:
             colors_seen.add(label)
@@ -227,6 +233,12 @@ def parse_filename(name: str) -> tuple[Metadata, list[str]]:
     metadata.title = metadata.original_title
     metadata.authors = list(dict.fromkeys(metadata.authors))
     metadata.tags = list(dict.fromkeys(metadata.tags))
+    variants, variant_warnings = read_variant_fields([], variant_tags)
+    metadata.work_group = variants["work_group"]
+    metadata.text_version = variants["text_version"]
+    warnings.extend(variant_warnings)
+    if variant_warnings:
+        metadata.tags.extend(variant_tags)
     metadata.publisher = ", ".join(publishers)
     metadata.translator = ", ".join(translators)
     if len(publishers) > 1:

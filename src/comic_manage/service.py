@@ -30,7 +30,7 @@ MAX_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_CHARS = 8 * 1024 * 1024
 PLAN_TTL_SECONDS = 15 * 60
 BATCH_TEXT_FIELDS = frozenset({
-    "series", "localized_series", "number", "count", "volume", "translator", "genre",
+    "series", "localized_series", "number", "count", "volume", "translator", "genre", "work_group",
     "publication_format", "year", "month", "day", "language", "localized_series_label", "publisher",
 })
 BATCH_LIST_FIELDS = frozenset({"pencillers", "original_works", "characters", "web", "tags", "release_methods", "release_platforms"})
@@ -40,6 +40,7 @@ BATCH_CHOICES = {
     "age_rating": AGE_RATINGS,
     "color": ("", "黑白", "全彩", "部分彩色"),
     "reading_direction": ("", "LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL", "WEBTOON"),
+    "text_version": ("", "有文字", "无文字"),
     "manga": ("Unknown", "Yes", "No", "YesAndRightToLeft"),
 }
 PAGE_MIMES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
