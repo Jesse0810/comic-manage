@@ -1,3 +1,3 @@
 """Comic Manage — local-first comic library tools."""
 
-__version__ = "1.11.0"
+__version__ = "1.11.1"

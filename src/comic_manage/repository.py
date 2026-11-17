@@ -392,6 +392,103 @@ class Repository:
         with self.connect() as db:
             return db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (comic_id,)).fetchone() is not None
 
+    @staticmethod
+    def _variant_manual_fields(db, comic_id: str) -> tuple[set[str], bool, bool]:
+        """Use recorded field provenance; old undifferentiated edits stay conservative."""
+        events = list(db.execute("SELECT action,detail FROM events WHERE comic_id=? ORDER BY id", (comic_id,)))
+        fields, unknown, reviewed = set(), False, False
+        for index, event in enumerate(events):
+            action, detail = event["action"], event["detail"]
+            if action in {"approve", "batch_review", "package_verified"}:
+                reviewed = True
+            if action == "field_edit":
+                try:
+                    value = json.loads(detail)
+                    if isinstance(value, dict) and isinstance(value.get("fields"), list):
+                        fields.update(field for field in value["fields"] if isinstance(field, str))
+                except (ValueError, TypeError):
+                    unknown = True
+            elif action in {"edit", "batch_edit"}:
+                try:
+                    value = json.loads(detail)
+                    if isinstance(value, dict) and isinstance(value.get("fields"), list) and all(isinstance(field, str) for field in value["fields"]):
+                        fields.update(value["fields"])
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                if index + 1 < len(events) and events[index + 1]["action"] == "field_edit":
+                    continue
+                legacy_batch = re.fullmatch(r"批量修改 (.*?)。需要重新审核。", detail)
+                if legacy_batch:
+                    fields.update(field.strip() for field in legacy_batch[1].split(",") if field.strip())
+                elif action == "batch_edit" and detail == "导入时批量更新作者或类型":
+                    fields.update({"authors", "genre"})
+                else:
+                    unknown = True
+        return fields, unknown, reviewed
+
+    @staticmethod
+    def _edit_event(db, comic_id: str, action: str, message: str, fields) -> None:
+        Repository._event(db, comic_id, action, json.dumps({"message": message, "fields": sorted(fields)}, ensure_ascii=False))
+
+    def _variant_repair_candidate(self, db, snapshot: Snapshot, previous: Comic,
+                                  hints: Metadata, hint_warning: str) -> tuple[Metadata, str, list[str]]:
+        """Repair only the old automatic version-label title, never general metadata."""
+        old = previous.metadata
+        unchanged = (old, previous.warning, [])
+        context = getattr(snapshot, "metadata_context", None)
+        if (snapshot.kind != "folder" or previous.kind != "folder" or snapshot.xml or not isinstance(context, dict)
+                or context.get("version") not in {"有文字", "无文字"} or not context.get("parent_title")):
+            return unchanged
+        generic = {snapshot.path.name.strip(), context["version"]}
+        generic_title = old.title in generic and old.original_title in generic
+        empty_title = not old.title and not old.original_title
+        if ((not generic_title and not empty_title)
+                or (old.chinese_title and old.chinese_title not in generic)
+                or old.collection_mode != "oneshot" or old.series
+                or hints.title in generic or not hints.title or hints.text_version != context["version"]):
+            return unchanged
+        if db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (previous.id,)).fetchone():
+            return unchanged
+        protected, unknown_edits, reviewed = self._variant_manual_fields(db, previous.id)
+        if previous.status != "draft" or previous.output or reviewed:
+            note = "已识别父作品下的文字版本目录；此记录有审核或成品历史，原资料保持不变，请另行核对。"
+            return old, " ".join(filter(None, [previous.warning, note])), []
+        if protected & {"title", "original_title"} or (empty_title and unknown_edits):
+            note = "已识别文字版本目录；现有标题曾人工修改，未自动替换，请核对父作品名称和文字版本。"
+            return old, " ".join(filter(None, [previous.warning, note])), []
+        before, suggested = old.to_dict(), hints.to_dict()
+        changes = {"title": hints.title, "original_title": hints.original_title}
+        optional = {"authors", "publisher", "translator", "genre", "tags", "original_works", "characters",
+                    "release_type", "publication_format", "release_methods", "release_platforms", "work_group",
+                    "text_version", "color", "language", "year", "month", "day", "web", "summary"}
+        for field in optional - protected:
+            if not before[field] and suggested[field] and (not unknown_edits or field in {"work_group", "text_version"}):
+                changes[field] = suggested[field]
+        # Filling an author must not erase an independently edited penciller, nor
+        # may normalization alter any other field outside this narrow repair.
+        candidate = Metadata.from_dict({**before, **changes})
+        actual = {key for key, value in candidate.to_dict().items() if value != before[key]}
+        if actual - changes.keys():
+            changes = {key: value for key, value in changes.items() if key in {"title", "original_title", "work_group", "text_version"}}
+            candidate = Metadata.from_dict({**before, **changes})
+            actual = {key for key, value in candidate.to_dict().items() if value != before[key]}
+            if actual - changes.keys():
+                return unchanged
+        if not actual:
+            return unchanged
+        notes = [previous.warning, hint_warning, "已按父作品目录修正文字版本子目录误识别，请核对后审核。"]
+        if unknown_edits:
+            notes.append("旧记录缺少逐字段编辑历史；本次仅修正版本目录名称及空的版本关联，其他空值和人工资料已保留。")
+        return candidate, " ".join(dict.fromkeys(filter(None, notes))), sorted(actual)
+
+    def preview_variant_repair(self, snapshot: Snapshot, previous: Comic) -> tuple[Metadata, str, list[str]]:
+        """Read-only import preview of exactly the repair used by upsert_scan."""
+        hints, warning = snapshot.initial_metadata()
+        warning = " ".join(filter(None, [warning, *migration_warnings(hints.to_dict())]))
+        with self.connect() as db:
+            return self._variant_repair_candidate(db, snapshot, previous, hints, warning)
+
     def upsert_scan(self, snapshot: Snapshot, *, restore: bool = False,
                     defaults: dict | None = None, overwrite_existing: bool = False) -> str | None:
         comic_id = source_id(snapshot.path)
@@ -404,6 +501,8 @@ class Repository:
                 return None
             previous = db.execute("SELECT * FROM comics WHERE id=?", (comic_id,)).fetchone()
             if previous:
+                repaired, repair_warning, repair_fields = self._variant_repair_candidate(
+                    db, snapshot, self._decode(previous), metadata, warning)
                 if previous["fingerprint"] != snapshot.fingerprint:
                     db.execute("""UPDATE comics SET fingerprint=?, page_count=?, status='draft',
                         warning=?, updated_at=? WHERE id=?""", (
@@ -414,13 +513,25 @@ class Repository:
                     db.execute("DELETE FROM removed_comics WHERE comic_id=?", (comic_id,))
                     db.execute("UPDATE comics SET status='draft', updated_at=? WHERE id=?", (now(), comic_id))
                     self._event(db, comic_id, "restore", str(snapshot.path))
+                if repair_fields:
+                    stored = json.loads(previous["metadata"])
+                    updated = {**stored, **{field: repaired.to_dict()[field] for field in repair_fields}}
+                    note = ("源文件已变化，请重新预览并审核。" if previous["fingerprint"] != snapshot.fingerprint else "") + repair_warning
+                    db.execute("UPDATE comics SET metadata=?,status='draft',warning=?,updated_at=? WHERE id=?",
+                               (json.dumps(updated, ensure_ascii=False), note, now(), comic_id))
+                    self._event(db, comic_id, "version_folder_repair", json.dumps({
+                        "previous": {field: stored.get(field) for field in repair_fields},
+                        "fields": repair_fields, "parent": str(snapshot.path.parent),
+                    }, ensure_ascii=False))
                 if defaults and overwrite_existing:
-                    metadata = Metadata.from_dict(json.loads(previous["metadata"]))
+                    metadata = repaired
+                    before = metadata.to_dict()
                     for key, value in defaults.items():
                         setattr(metadata, key, value)
                     db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
                         json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
-                    self._event(db, comic_id, "batch_edit", "导入时批量更新作者或类型")
+                    self._edit_event(db, comic_id, "batch_edit", "导入时批量更新作者或类型",
+                                     {key for key, value in metadata.to_dict().items() if before[key] != value})
                 return comic_id
             for key, value in defaults.items():
                 setattr(metadata, key, value)
@@ -481,7 +592,7 @@ class Repository:
                 self._record_komga_edit(db, comic_id, before, metadata.to_dict(), fields)
                 db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
                     json.dumps({**stored, **actual}, ensure_ascii=False), now(), comic_id))
-                self._event(db, comic_id, "batch_edit", f"批量修改 {', '.join(actual)}。需要重新审核。")
+                self._edit_event(db, comic_id, "batch_edit", f"批量修改 {', '.join(actual)}。需要重新审核。", actual.keys())
                 count += 1
         return count
 
@@ -514,7 +625,8 @@ class Repository:
             self._record_komga_edit(db, comic_id, before, after, explicit)
             db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
                 json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
-            self._event(db, comic_id, "edit", "人工修改元数据")
+            self._edit_event(db, comic_id, "edit", "人工修改元数据",
+                             {key for key, value in after.items() if before.get(key) != value})
 
     def approve(self, comic_id: str, snapshot: Snapshot) -> None:
         comic = self.get(comic_id)

@@ -361,8 +361,7 @@ class ComicService:
             metadata, warning = snapshot.initial_metadata()
             status = "new" if previous is None else ("removed" if self.repo.is_removed(identity) else "existing")
             if previous:
-                metadata = previous.metadata
-                warning = previous.warning
+                metadata, warning, _ = self.repo.preview_variant_repair(snapshot, previous)
                 if previous.fingerprint != snapshot.fingerprint:
                     warning = "源文件已变化，导入后需要重新审核。" + warning
             items.append({"id": identity, "source": str(snapshot.path), "kind": snapshot.kind,
@@ -427,8 +426,9 @@ class ComicService:
                     if _folder_link(snapshot.path):
                         raise ServiceError("源目录已变为链接，请重新选择并预览。", "SOURCE_CHANGED")
                     fresh = inspect_source(snapshot.path)
-                    if source_id(fresh.path) != identity or fresh.fingerprint != snapshot.fingerprint:
-                        raise ServiceError("源文件在预览后已变化，请重新预览后导入。", "SOURCE_CHANGED")
+                    if (source_id(fresh.path) != identity or fresh.fingerprint != snapshot.fingerprint
+                            or fresh.metadata_context_fingerprint != snapshot.metadata_context_fingerprint):
+                        raise ServiceError("来源或目录识别信息在预览后已变化，请重新预览后导入。", "SOURCE_CHANGED")
                     check_cancel(cancel)
                     try:
                         previous = self.repo.get(identity, include_removed=True)
@@ -437,7 +437,8 @@ class ComicService:
                     removed = self.repo.is_removed(identity)
                     self.repo.upsert_scan(fresh, restore=True, defaults=defaults, overwrite_existing=overwrite)
                     if (previous is not None and not removed and not (defaults and overwrite)
-                            and previous.fingerprint == fresh.fingerprint):
+                            and previous.fingerprint == fresh.fingerprint
+                            and previous.metadata.to_dict() == self.repo.get(identity).metadata.to_dict()):
                         skipped += 1
                     else:
                         completed.append(identity)

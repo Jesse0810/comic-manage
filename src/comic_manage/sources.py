@@ -15,6 +15,7 @@ import zipfile
 
 from .metadata import MAX_XML_BYTES, Metadata, from_comicinfo
 from .filename_parser import parse_filename
+from .folder_variants import apply_variant_context, read_variant_context
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"})
 MAX_MEMBER_BYTES = 512 * 1024 * 1024
@@ -72,6 +73,11 @@ class Snapshot:
     extras: list[Member] = field(default_factory=list)
     xml: bytes = b""
     fingerprint: str = ""
+    metadata_context: dict = field(default_factory=dict)
+
+    @property
+    def metadata_context_fingerprint(self) -> str:
+        return self.metadata_context.get("signature", "")
 
     @contextmanager
     def reader(self):
@@ -96,12 +102,20 @@ class Snapshot:
         xml_warning = ""
         if self.xml:
             try:
-                return from_comicinfo(self.xml, title), ""
+                fallback = self.metadata_context.get("parent_title") or title
+                metadata = from_comicinfo(self.xml, fallback)
+                if self.metadata_context:
+                    metadata, warnings = apply_variant_context(metadata, self.metadata_context, xml=self.xml)
+                    return metadata, "；".join(warnings)
+                return metadata, ""
             except (ValueError, UnicodeError) as exc:
                 xml_warning = f"原 ComicInfo 未读取：{exc}"
             except Exception as exc:
                 xml_warning = f"原 ComicInfo 格式错误：{exc}"
         metadata, warnings = parse_filename(title)
+        if self.metadata_context:
+            metadata, context_warnings = apply_variant_context(metadata, self.metadata_context)
+            warnings = context_warnings + ([] if self.metadata_context.get("parent_title") else warnings)
         return metadata, "；".join(([xml_warning] if xml_warning else []) + warnings)
 
 
@@ -189,6 +203,8 @@ def inspect_source(path: Path) -> Snapshot:
     result.fingerprint = hashlib.sha256(json.dumps(
         [signature, hashlib.sha256(result.xml).hexdigest()], ensure_ascii=False
     ).encode("utf-8")).hexdigest()
+    if result.kind == "folder":
+        result.metadata_context = read_variant_context(result.path)
     return result
 
 

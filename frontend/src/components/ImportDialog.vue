@@ -152,7 +152,7 @@ watch(mode, clearPreview)
     <div class="import-dialog-scroll">
       <template v-if="!preview">
         <div class="import-source-heading"><el-radio-group v-model="mode" :disabled="busy"><el-radio-button value="folder">图片文件夹</el-radio-button><el-radio-button value="cbz">已有 CBZ</el-radio-button></el-radio-group><el-button v-if="mode === 'folder'" :icon="FolderAdd" :disabled="busy" @click="addLocations">选择多个文件夹</el-button><el-button v-else :icon="DocumentAdd" :disabled="busy" @click="addFiles">选择多个 CBZ</el-button></div>
-        <p v-if="mode === 'folder'" class="import-help">可添加多个位置后自由勾选。勾选父文件夹会读取其中所有作品；只导入部分时，请展开并仅勾选目标子文件夹。</p>
+        <p v-if="mode === 'folder'" class="import-help">可添加多个位置后自由勾选。勾选父文件夹会读取其中所有作品；只导入部分时，请展开并仅勾选目标子文件夹。作品目录内的“有文字／无文字”子文件夹会按父目录识别作品名和版本，分别保留为独立作品。</p>
         <p v-else class="import-help">可多选 CBZ 文件，也可以分多次添加。确认前会先解析并展示作品资料。</p>
         <div v-if="mode === 'folder'" class="folder-picker" :class="{ 'picker-disabled': busy }">
           <el-tree v-if="locations.length" ref="tree" data-testid="import-tree" :data="locations" node-key="path" :props="treeProps" lazy :load="loadFolders" show-checkbox check-strictly :expand-on-click-node="false" :check-on-click-node="false" :default-checked-keys="checkedPaths" @check="checkedChanged"><template #default="{ node, data }"><div class="folder-tree-node" :title="data.path"><el-icon><Folder /></el-icon><span>{{ node.level === 1 ? data.path : data.name }}</span><el-button v-if="node.level === 1" link :icon="Close" :disabled="busy" aria-label="移除此来源位置" @click.stop="removeLocation(data.path)" /></div></template></el-tree>
