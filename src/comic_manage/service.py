@@ -5,16 +5,19 @@ import argparse
 import base64
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import secrets
+import sqlite3
 import sys
 from threading import Event, Lock, Thread
 import time
 from typing import Callable, TextIO
 
-from .metadata import AGE_RATINGS, GENRES, Metadata, to_comicinfo
+from .metadata import AGE_RATINGS, GENRES, METADATA_RULES_VERSION, Metadata, to_comicinfo
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
@@ -30,6 +33,7 @@ from .sources import (SKIP_DIRS, Cancelled, Snapshot, check_cancel, discover, in
 MAX_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_CHARS = 8 * 1024 * 1024
 PLAN_TTL_SECONDS = 15 * 60
+LEGACY_VARIANT_CHECK_SECONDS = 5.0
 BATCH_TEXT_FIELDS = frozenset({
     "series", "localized_series", "number", "count", "volume", "translator", "genre", "work_group",
     "publication_format", "year", "month", "day", "language", "localized_series_label", "publisher",
@@ -185,6 +189,79 @@ class ComicService:
         self.imports: OrderedDict[str, PreparedImport] = OrderedDict()
         self.reviews = BatchReview(self.repo, self.progress)
         self.jobs = KomgaJobs(self.repo)
+        self._legacy_variants_checked = False
+
+    def _repair_legacy_variants(self, cancel: Event) -> None:
+        """Backfill unreviewed legacy folder labels once, before the editor loads.
+
+        Candidate selection excludes removed/protected records. A changed or
+        unreadable source is left for the regular scan/review flow. Backup and
+        revision checks precede every catalog edit; source files are read only.
+        """
+        snapshots, expected = [], {}
+        candidates = self.repo.variant_repair_sources()
+        states = {comic.id: self.repo.review_state(comic.id) for comic in candidates}
+        if candidates:
+            self.progress("正在核对旧文字版本目录资料…")
+            results: Queue = Queue()
+            stopped = Event()
+
+            def read_sources():
+                # NAS system calls may block even after cancellation. This
+                # daemon only reads sources, never accesses or edits the DB.
+                try:
+                    for comic in candidates:
+                        if stopped.is_set() or cancel.is_set():
+                            return
+                        fresh = None
+                        try:
+                            source = Path(comic.source)
+                            if not _folder_link(source):
+                                fresh = inspect_source(source)
+                        except (OSError, ValueError):
+                            pass
+                        if stopped.is_set() or cancel.is_set():
+                            return
+                        results.put((comic, fresh))
+                finally:
+                    results.put(None)
+
+            Thread(target=read_sources, name="legacy-variant-source-check", daemon=True).start()
+            deadline = time.monotonic() + LEGACY_VARIANT_CHECK_SECONDS
+            try:
+                while (remaining := deadline - time.monotonic()) > 0:
+                    check_cancel(cancel)
+                    try:
+                        result = results.get(timeout=min(0.1, remaining))
+                    except Empty:
+                        continue
+                    if result is None:
+                        break
+                    comic, fresh = result
+                    if (fresh is None or fresh.fingerprint != comic.fingerprint
+                            or len(fresh.pages) != comic.page_count):
+                        continue
+                    _, _, fields = self.repo.preview_variant_repair(fresh, comic)
+                    if fields:
+                        snapshots.append(fresh)
+                        expected[comic.id] = states[comic.id]
+            finally:
+                # Late results after the startup deadline cannot mutate data.
+                stopped.set()
+        check_cancel(cancel)
+        if snapshots:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            backup = self.repo.path.with_name(f"{self.repo.path.stem}.before-version-folder-repair-{stamp}.sqlite3")
+            try:
+                self.repo.backup(backup)
+                repaired = self.repo.apply_variant_backfill(
+                    snapshots, backup_path=backup, expected=expected, cancel=cancel)
+                if repaired:
+                    self.progress(f"已备份并修正 {len(repaired)} 个旧文字版本目录，请核对后审核。")
+            except (OSError, ValueError, sqlite3.Error):
+                # Failed backup/revision validation keeps the original catalog.
+                self.progress("旧版本目录资料暂未修正，原资料已保留，可重新扫描核对。")
+        self._legacy_variants_checked = True
 
     @staticmethod
     def serialize(comic: Comic) -> dict:
@@ -201,10 +278,16 @@ class ComicService:
         if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync", "komga_pull", "prepare_review_sync", "commit_review_sync"):
             check_cancel(cancel)
         if method == "bootstrap":
+            if not self._legacy_variants_checked:
+                try:
+                    self._repair_legacy_variants(cancel)
+                except (OSError, ValueError, sqlite3.Error):
+                    self._legacy_variants_checked = True
+                    self.progress("旧版本目录资料暂未修正，原资料已保留，可重新扫描核对。")
             return {"comics": [self.serialize(c) for c in self.repo.all()],
                     "roots": self.repo.setting("roots").splitlines(),
                     "outputRoot": self.repo.setting("output_root"), "dataDir": str(self.data_dir),
-                    "autoSyncJobs": list_jobs(self.repo)}
+                    "autoSyncJobs": list_jobs(self.repo), "metadataRules": METADATA_RULES_VERSION}
         if method == "komga_jobs":
             if params:
                 raise ServiceError("同步任务列表不接受额外参数。")
@@ -361,7 +444,7 @@ class ComicService:
             metadata, warning = snapshot.initial_metadata()
             status = "new" if previous is None else ("removed" if self.repo.is_removed(identity) else "existing")
             if previous:
-                metadata, warning, _ = self.repo.preview_variant_repair(snapshot, previous)
+                metadata, warning, _ = self.repo.preview_variant_repair(snapshot, previous, allow_removed=True)
                 if previous.fingerprint != snapshot.fingerprint:
                     warning = "源文件已变化，导入后需要重新审核。" + warning
             items.append({"id": identity, "source": str(snapshot.path), "kind": snapshot.kind,

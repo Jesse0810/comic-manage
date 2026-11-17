@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, Document, FolderOpened, Picture, Reading, Check,
 import type { Comic, Metadata } from '../types'
 import { displayTitle, statusLabels, errorMessage, comicGenres, publicationFormats, releaseTypes, releaseMethods, releasePlatforms, colors, textVersions, readingDirections, ageRatings, customTags, classificationValues, collectionMode, collectionModes, aliasLanguages } from '../types'
 import { invoke } from '../api'
-const props = defineProps<{ comic: Comic | null; modelValue: Metadata | null; busy: boolean; dirty: boolean; reviewed: boolean; library?: Comic[]; readOnly?: boolean }>()
+const props = defineProps<{ comic: Comic | null; modelValue: Metadata | null; busy: boolean; dirty: boolean; reviewed: boolean; library?: Comic[]; readOnly?: boolean; metadataRules?: string }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: Metadata): void
   (e: 'update:reviewed', value: boolean): void
@@ -30,6 +30,15 @@ let xmlTimer: ReturnType<typeof setTimeout> | undefined
 const title = computed(() => props.modelValue ? displayTitle(props.modelValue) : '')
 const isRemote = computed(() => props.comic?.kind === 'komga')
 const editDisabled = computed(() => props.busy || !!props.readOnly)
+const rulesVersion = computed(() => props.metadataRules?.trim().replace(/^v\s*/i, '') || '')
+const rulesLabel = computed(() => rulesVersion.value ? `元数据规范 v${rulesVersion.value}` : '元数据规范版本未读取')
+const warningText = computed(() => (props.comic?.warning || '').replaceAll(
+  '元数据规范已升级到 v1.2，原资料已自动备份。',
+  '历史升级记录（v1.2）：原资料当时已自动备份。',
+).replaceAll(
+  '旧内容类型已保留或转换，请按 v1.2 六类内容类型重新核对。',
+  '历史分类迁移提示（v1.2）：旧内容类型已保留或转换，请按当前元数据规范核对六类内容类型。',
+))
 const remoteReadOnlyMessage = computed(() => props.comic?.remote?.unavailable === true ? '远端作品当前不可用，仅可查看已缓存资料。请检查 Komga 后重新读取书库。' : '此作品来自其他 Komga 连接，目前仅可查看已缓存资料。请切回对应服务器与书库后编辑、审核或同步。')
 const sharedSeriesRating = computed(() => {
   const rating = props.comic?.remote?.sharedMetadata?.ageRating
@@ -143,7 +152,7 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
 <template>
   <aside class="details-panel" :class="{ 'details-empty': !comic }">
     <div class="panel-heading">
-      <div class="panel-label"><el-icon><Document /></el-icon><span>作品资料</span></div>
+      <div class="panel-label"><el-icon><Document /></el-icon><span>作品资料</span><span class="metadata-rules-version" data-testid="metadata-rules-version" :data-rules-version="rulesVersion || undefined" :title="rulesVersion ? '当前软件采用的元数据字段规则，与软件版本及历史迁移记录分别显示' : '等待读取当前元数据规则版本'">{{ rulesLabel }}</span></div>
       <span v-if="comic" class="status-pill" :class="dirty ? 'edited' : comic.status">{{ dirty ? '未保存' : statusLabels[comic.status] }}</span>
       <span v-else class="quiet-label">未选择</span>
     </div>
@@ -173,7 +182,7 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
             <el-alert v-if="readOnly" :title="remoteReadOnlyMessage" type="info" :closable="false" show-icon class="source-warning" data-testid="komga-inactive-scope" />
             <el-alert v-if="isRemote && (comic.remote?.hasLocalChanges || comic.remote?.pendingSync)" :title="comic.remote?.conflict ? '本机修改与远端更新发生冲突；读取书库已保留本机修改，请先核对提示。' : '有待同步的本机修改；再次读取书库会保留这些修改。'" type="warning" :closable="false" show-icon class="source-warning" data-testid="komga-local-changes" />
             <div v-if="isRemote && comic.remote?.conflict && !readOnly" class="remote-conflict-actions" data-testid="komga-conflict-actions"><el-button data-testid="komga-keep-local" size="small" :disabled="busy" @click="emit('resolve', 'keep_local')">保留本机修改并重新核对</el-button><el-button data-testid="komga-use-remote" size="small" :disabled="busy" @click="emit('resolve', 'use_remote')">采用远端资料</el-button></div>
-            <el-alert v-if="comic.warning" :title="comic.warning" type="warning" :closable="false" show-icon class="source-warning" />
+            <el-alert v-if="warningText" :title="warningText" type="warning" :closable="false" show-icon class="source-warning" data-testid="metadata-record-warning" />
             <div v-if="legacyNames.length" class="legacy-name-note"><strong>旧版名称 · 供核对</strong><p v-for="item in legacyNames" :key="item.label">{{ item.label }}：{{ item.value }}</p></div>
             <div class="metadata-tools"><span>按实际资料填写，未知内容留待确认</span><el-button link data-testid="expand-metadata" :disabled="busy" @click="expanded = expanded.length === sections.length ? ['identity'] : [...sections]">{{ expanded.length === sections.length ? '收起分组' : '展开全部' }}</el-button></div>
             <el-form label-position="top" class="metadata-form" :disabled="editDisabled">
@@ -286,6 +295,7 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
 </template>
 
 <style scoped>
+.metadata-rules-version { margin-left: 2px; color: #7a8f72; font-size: 10px; font-weight: 400; white-space: nowrap; }
 .remote-conflict-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: -5px 0 15px; }
 .remote-conflict-actions .el-button + .el-button { margin-left: 0; }
 .source-badges > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

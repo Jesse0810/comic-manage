@@ -432,7 +432,8 @@ class Repository:
         Repository._event(db, comic_id, action, json.dumps({"message": message, "fields": sorted(fields)}, ensure_ascii=False))
 
     def _variant_repair_candidate(self, db, snapshot: Snapshot, previous: Comic,
-                                  hints: Metadata, hint_warning: str) -> tuple[Metadata, str, list[str]]:
+                                  hints: Metadata, hint_warning: str, *,
+                                  allow_removed: bool = False) -> tuple[Metadata, str, list[str]]:
         """Repair only the old automatic version-label title, never general metadata."""
         old = previous.metadata
         unchanged = (old, previous.warning, [])
@@ -448,7 +449,7 @@ class Repository:
                 or old.collection_mode != "oneshot" or old.series
                 or hints.title in generic or not hints.title or hints.text_version != context["version"]):
             return unchanged
-        if db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (previous.id,)).fetchone():
+        if not allow_removed and db.execute("SELECT 1 FROM removed_comics WHERE comic_id=?", (previous.id,)).fetchone():
             return unchanged
         protected, unknown_edits, reviewed = self._variant_manual_fields(db, previous.id)
         if previous.status != "draft" or previous.output or reviewed:
@@ -482,12 +483,104 @@ class Repository:
             notes.append("旧记录缺少逐字段编辑历史；本次仅修正版本目录名称及空的版本关联，其他空值和人工资料已保留。")
         return candidate, " ".join(dict.fromkeys(filter(None, notes))), sorted(actual)
 
-    def preview_variant_repair(self, snapshot: Snapshot, previous: Comic) -> tuple[Metadata, str, list[str]]:
+    def preview_variant_repair(self, snapshot: Snapshot, previous: Comic, *,
+                               allow_removed: bool = False) -> tuple[Metadata, str, list[str]]:
         """Read-only import preview of exactly the repair used by upsert_scan."""
         hints, warning = snapshot.initial_metadata()
         warning = " ".join(filter(None, [warning, *migration_warnings(hints.to_dict())]))
         with self.connect() as db:
-            return self._variant_repair_candidate(db, snapshot, previous, hints, warning)
+            return self._variant_repair_candidate(db, snapshot, previous, hints, warning,
+                                                   allow_removed=allow_removed)
+
+    def variant_repair_sources(self) -> list[Comic]:
+        """List plausible visible legacy labels without touching their source paths."""
+        from .folder_variants import recognize_version_folder
+
+        candidates = []
+        with self.connect() as db:
+            rows = db.execute("""SELECT * FROM comics
+                WHERE kind='folder' AND status='draft' AND output=''
+                AND id NOT IN (SELECT comic_id FROM removed_comics)
+                ORDER BY updated_at,id""").fetchall()
+            for row in rows:
+                comic = self._decode(row)
+                metadata = comic.metadata
+                leaf = Path(comic.source).name.strip()
+                version = recognize_version_folder(leaf)
+                if not version:
+                    continue
+                generic = {leaf, version}
+                generic_title = metadata.title in generic and metadata.original_title in generic
+                empty_title = not metadata.title and not metadata.original_title
+                if (not (generic_title or empty_title)
+                        or (metadata.chinese_title and metadata.chinese_title not in generic)
+                        or metadata.collection_mode != 'oneshot' or metadata.series
+                        or metadata.original_xml):
+                    continue
+                protected, unknown_edits, reviewed = self._variant_manual_fields(db, comic.id)
+                if reviewed or protected & {'title', 'original_title'} or (empty_title and unknown_edits):
+                    continue
+                candidates.append(comic)
+        return candidates
+
+    def apply_variant_backfill(self, snapshots: list[Snapshot], *, expected: dict[str, dict],
+                               backup_path: Path, cancel=None) -> list[str]:
+        """Repair only the checked legacy revisions; never act as an implicit scan.
+
+        The service owns read-only source inspection and the database backup. Its
+        frozen revisions are rechecked for the entire batch before any write.
+        """
+        backup_path = Path(backup_path).resolve()
+        if backup_path == self.path.resolve() or not backup_path.is_file():
+            raise ValueError('修复前的资料库备份不存在，未修改任何记录。')
+        if not isinstance(expected, dict):
+            raise ValueError('版本目录修复的资料版本无效。')
+        check_cancel(cancel)
+        ready = []
+        seen = set()
+        by_source = {state.get('source'): identity for identity, state in expected.items()
+                     if isinstance(state, dict) and state.get('id') == identity}
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for snapshot in snapshots:
+                check_cancel(cancel)
+                # Snapshot.path was already resolved by the bounded read-only
+                # inspector. Resolving a UNC path again here could block startup.
+                identity = by_source.get(str(snapshot.path))
+                if identity is None:
+                    raise ValueError('本机资料在识别期间发生变化，未修改任何记录，请重新检查。')
+                if identity in seen:
+                    raise ValueError('版本目录修复候选重复，未修改任何记录。')
+                seen.add(identity)
+                state = self._review_state(db, identity)
+                if identity not in expected or state != expected[identity]:
+                    raise ValueError('本机资料在识别期间发生变化，未修改任何记录，请重新检查。')
+                if (state['kind'] != 'folder' or snapshot.kind != 'folder' or state['status'] != 'draft'
+                        or state['output'] or str(snapshot.path) != state['source']
+                        or snapshot.fingerprint != state['fingerprint'] or len(snapshot.pages) != state['page_count']):
+                    raise ValueError('来源或审核状态在识别期间发生变化，未修改任何记录。')
+                row = db.execute('SELECT * FROM comics WHERE id=?', (identity,)).fetchone()
+                hints, warning = snapshot.initial_metadata()
+                warning = ' '.join(filter(None, [warning, *migration_warnings(hints.to_dict())]))
+                candidate, note, fields = self._variant_repair_candidate(
+                    db, snapshot, self._decode(row), hints, warning)
+                if fields:
+                    ready.append((snapshot, dict(row), candidate, note, fields))
+            for snapshot, previous, candidate, note, fields in ready:
+                check_cancel(cancel)
+                stored = json.loads(previous['metadata'])
+                values = candidate.to_dict()
+                updated = {**stored, **{field: values[field] for field in fields}}
+                db.execute('UPDATE comics SET metadata=?,warning=?,updated_at=? WHERE id=?',
+                           (json.dumps(updated, ensure_ascii=False), note, now(), previous['id']))
+                self._event(db, previous['id'], 'version_folder_repair', json.dumps({
+                    'trigger': 'startup_legacy_backfill', 'backup': str(backup_path),
+                    'previous': {field: stored.get(field) for field in fields},
+                    'previous_metadata': stored, 'previous_warning': previous['warning'],
+                    'fields': fields, 'parent': str(snapshot.path.parent),
+                }, ensure_ascii=False))
+            check_cancel(cancel)
+        return [previous['id'] for _, previous, _, _, _ in ready]
 
     def upsert_scan(self, snapshot: Snapshot, *, restore: bool = False,
                     defaults: dict | None = None, overwrite_existing: bool = False) -> str | None:
@@ -502,7 +595,7 @@ class Repository:
             previous = db.execute("SELECT * FROM comics WHERE id=?", (comic_id,)).fetchone()
             if previous:
                 repaired, repair_warning, repair_fields = self._variant_repair_candidate(
-                    db, snapshot, self._decode(previous), metadata, warning)
+                    db, snapshot, self._decode(previous), metadata, warning, allow_removed=restore)
                 if previous["fingerprint"] != snapshot.fingerprint:
                     db.execute("""UPDATE comics SET fingerprint=?, page_count=?, status='draft',
                         warning=?, updated_at=? WHERE id=?""", (

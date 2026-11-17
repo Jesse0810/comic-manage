@@ -20,7 +20,7 @@ export interface Comic {
   metadata: Metadata; status: ComicStatus; output: string; warning: string; updated_at: string
   remote?: { serverUrl: string; libraryId: string; libraryName: string; bookId: string; seriesId: string; scope: string; hasLocalChanges: boolean; conflict: boolean; syncedAt?: string; unavailable?: boolean; pendingSync?: boolean; dirtyFields?: string[]; sharedMetadata?: { ageRating?: number | null; genres?: string[]; readingDirection?: string; alternateTitles?: { label: string; title: string }[]; [key: string]: unknown } }
 }
-export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string; autoSyncJobs?: KomgaAutoSyncJob[] }
+export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string; autoSyncJobs?: KomgaAutoSyncJob[]; metadataRules?: string }
 export interface ImportCandidate {
   id: string; source: string; kind: 'folder' | 'cbz'; page_count: number; metadata: Metadata
   import_status: 'new' | 'existing' | 'removed'; warning: string

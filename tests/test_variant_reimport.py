@@ -172,6 +172,9 @@ class VariantReimportTests(unittest.TestCase):
 
     def test_removed_restore_metadata_is_unchanged(self):
         path, identity = self.book()
+        metadata = self.repo.get(identity).metadata
+        metadata.title = '人工确认的作品名'
+        self.repo.save(identity, metadata, fields={'title'})
         before = self.values(identity)
         self.repo.remove([identity])
         self.assertIsNone(self.repo.upsert_scan(self.fresh(path)))

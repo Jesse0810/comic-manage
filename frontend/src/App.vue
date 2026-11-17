@@ -23,6 +23,7 @@ const roots = ref<string[]>([])
 const outputRoot = ref('')
 const dataDir = ref('')
 const version = ref('')
+const metadataRules = ref('')
 const selectedId = ref('')
 const form = ref<Metadata | null>(null)
 const savedMetadata = ref('')
@@ -149,6 +150,7 @@ function replaceComic(comic: Comic) {
 
 async function refresh(preferId = selectedId.value) {
   const data = await invoke<Bootstrap>('bootstrap')
+  metadataRules.value = data.metadataRules || ''
   komgaScope.value = data.komgaScope || ''
   komgaLibraryName.value = data.komgaLibraryName || ''
   autoSyncJobs.value = data.autoSyncJobs || []
@@ -649,7 +651,7 @@ onBeforeUnmount(() => unsubscribe?.())
           <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
         </section>
 
-        <DetailsPanel :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @resolve="resolveRemoteConflict" @error="showError" />
+        <DetailsPanel :metadata-rules="metadataRules" :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @resolve="resolveRemoteConflict" @error="showError" />
       </div>
 
       <div v-if="busy && !importVisible && !batchVisible && !komgaSettingsVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>

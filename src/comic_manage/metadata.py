@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 
 MAX_XML_BYTES = 2 * 1024 * 1024
+METADATA_RULES_VERSION = "1.3"
 POSITIVE_TAGS = ("汉化", "无修正", "全彩")  # Legacy import aliases only.
 AGE_RATINGS = ("Unknown", "Everyone", "MA15+", "R18+")
 GENRES = ("漫画", "小说", "CG集", "画集", "设定集", "插画集")
