@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { TableInstance } from 'element-plus'
-import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, Files, ArrowRight, CopyDocument, Edit, Remove, Connection, Setting } from '@element-plus/icons-vue'
+import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, ArrowRight, CopyDocument, Edit, Remove, Connection, Setting } from '@element-plus/icons-vue'
 import DetailsPanel from './components/DetailsPanel.vue'
+import LibraryTable from './components/LibraryTable.vue'
+import { buildLibraryEntries } from './library-groups'
 import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
 import BatchReviewDialog from './components/BatchReviewDialog.vue'
@@ -12,7 +13,7 @@ import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
 import KomgaJobsDialog from './components/KomgaJobsDialog.vue'
 import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs } from './types'
-import { clone, displayTitle, statusLabels, errorMessage, customTags, collectionMode, comicGenres, versionLabels, komgaAutoSyncLabels } from './types'
+import { clone, errorMessage, customTags, collectionMode, comicGenres, komgaAutoSyncLabels } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
@@ -27,7 +28,7 @@ const form = ref<Metadata | null>(null)
 const savedMetadata = ref('')
 const reviewed = ref(false)
 const selectedIds = ref<string[]>([])
-const libraryTable = ref<TableInstance>()
+const libraryTable = ref<{ clearSelection: () => void }>()
 const section = ref<Section>('all')
 const sourceFilter = ref<SourceFilter>('all')
 const komgaScope = ref('')
@@ -96,6 +97,11 @@ const filtered = computed(() => {
       && (!author.value || m.authors.includes(author.value)) && (!term || searchable.includes(term))
   })
 })
+const libraryWorkCount = computed(() => buildLibraryEntries(filtered.value, sourceComics.value).length)
+const revealMatches = computed(() => !!search.value.trim() || !!author.value || section.value !== 'all')
+const revealKey = computed(() => JSON.stringify([search.value.trim(), author.value, section.value]))
+const filteredIds = computed(() => new Set(filtered.value.map(comic => comic.id)))
+const checkedOutsideFilter = computed(() => selectedIds.value.filter(id => !filteredIds.value.has(id)).length)
 const sectionTitle = computed(() => ({ all: '我的漫画库', draft: '待审核作品', approved: '已审核作品', packaged: '已生成作品' })[section.value])
 const exportIds = computed(() => selectedIds.value.length ? selectedIds.value : (selectedId.value ? [selectedId.value] : []))
 const disabled = computed(() => busy.value || loading.value || !available.value)
@@ -108,6 +114,10 @@ const checkedSelectionHasInactive = computed(() => selectedIds.value.some(id => 
 }))
 const currentReadOnly = computed(() => !!current.value && !canEditComic(current.value))
 function canEditComic(comic: Comic) { return comic.kind !== 'komga' || (!!komgaScope.value && comic.remote?.scope === komgaScope.value && comic.remote?.unavailable !== true) }
+function clearLibrarySelection() {
+  selectedIds.value = []
+  libraryTable.value?.clearSelection()
+}
 async function changeSource(value: SourceFilter) {
   if (disabled.value || value === sourceFilter.value || !await resolveEdits()) return
   sourceFilter.value = value
@@ -621,7 +631,7 @@ onBeforeUnmount(() => unsubscribe?.())
     </aside>
 
     <main class="workspace">
-      <header class="workspace-header"><div><div class="eyebrow">LIBRARY / 漫画管理</div><h1>{{ sectionTitle }}<span class="heading-count">{{ counts[section] }}</span></h1><p>整理作品，保留完整的故事。</p></div><div class="header-actions"><el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button><el-dropdown trigger="click" :disabled="disabled" @command="(command: string) => command === 'folder' ? addDirectory() : importCbz()"><el-button type="primary" :icon="Plus" :disabled="disabled">添加漫画<el-icon class="dropdown-arrow"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="folder" :icon="FolderAdd">选择图片文件夹</el-dropdown-item><el-dropdown-item command="cbz" :icon="DocumentAdd">导入已有 CBZ</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
+      <header class="workspace-header"><div><div class="eyebrow">LIBRARY / 漫画管理</div><h1>{{ sectionTitle }}<span class="heading-count" title="按独立版本计数">{{ counts[section] }}</span></h1><p>整理作品，保留完整的故事。</p></div><div class="header-actions"><el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button><el-dropdown trigger="click" :disabled="disabled" @command="(command: string) => command === 'folder' ? addDirectory() : importCbz()"><el-button type="primary" :icon="Plus" :disabled="disabled">添加漫画<el-icon class="dropdown-arrow"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="folder" :icon="FolderAdd">选择图片文件夹</el-dropdown-item><el-dropdown-item command="cbz" :icon="DocumentAdd">导入已有 CBZ</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
 
       <el-alert v-if="startupError" :title="startupError" description="请关闭并重新打开桌面程序。漫画源文件和本机资料库不会被删除。" type="error" :closable="false" show-icon class="startup-error" />
 
@@ -629,16 +639,10 @@ onBeforeUnmount(() => unsubscribe?.())
         <section class="library-panel">
           <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
-          <div class="library-summary"><span>{{ filtered.length }} 本作品<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
+          <div class="library-summary"><span class="library-count-summary">{{ libraryWorkCount }} 部作品 · {{ filtered.length }} 个版本<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span><span v-if="checkedOutsideFilter" class="hidden-selection-count">（筛选外 {{ checkedOutsideFilter }} 本）</span><el-button v-if="selectedIds.length" data-testid="clear-library-selection" link :disabled="disabled" @click="clearLibrarySelection">取消勾选</el-button></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
-            <el-table v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :data="filtered" row-key="id" :current-row-key="selectedId" highlight-current-row height="100%" :class="{ 'table-disabled': disabled }" @row-click="selectComic" @selection-change="(rows: Comic[]) => selectedIds = rows.map(row => row.id)" empty-text="没有匹配的漫画">
-              <el-table-column type="selection" width="43" :reserve-selection="true" :selectable="(comic: Comic) => !disabled && canEditComic(comic)" />
-              <el-table-column label="作品" min-width="240"><template #default="scope"><div class="comic-cell"><div class="comic-file-icon" :class="scope.row.kind"><el-icon :size="21"><component :is="scope.row.kind === 'komga' ? Connection : scope.row.kind === 'cbz' ? Files : Reading" /></el-icon></div><div class="comic-titles"><strong>{{ displayTitle(scope.row.metadata) }}</strong><div v-if="versionLabels(scope.row.metadata).length" class="version-badges" data-testid="book-version-labels"><span v-for="label in versionLabels(scope.row.metadata)" :key="label" :title="label">{{ label }}</span></div><span v-if="collectionMode(scope.row.metadata) === 'series' && scope.row.metadata.series && scope.row.metadata.series !== scope.row.metadata.title">{{ scope.row.metadata.series }}</span><span v-else-if="scope.row.kind !== 'komga'" class="comic-source" :title="scope.row.source">{{ scope.row.kind === 'cbz' ? 'CBZ 文件' : '本地图片目录' }}</span><span v-if="scope.row.kind !== 'komga' && autoSyncLabel(scope.row)" class="comic-auto-sync-label" data-testid="comic-auto-sync-status">Komga · {{ autoSyncLabel(scope.row) }}</span><span v-if="scope.row.kind === 'komga'" class="comic-source remote-source-label" :title="scope.row.remote?.serverUrl">Komga · {{ scope.row.remote?.libraryName || '远端书库' }}{{ !canEditComic(scope.row) ? ' · 只读缓存' : scope.row.remote?.conflict ? ' · 存在冲突' : (scope.row.remote?.hasLocalChanges || scope.row.remote?.pendingSync) ? ' · 待同步' : '' }}</span></div></div></template></el-table-column>
-              <el-table-column label="作者" min-width="105" show-overflow-tooltip><template #default="scope"><span :class="{ 'muted-text': !scope.row.metadata.authors.length }">{{ scope.row.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
-              <el-table-column label="页数" width="60" align="center"><template #default="scope"><span class="page-count">{{ scope.row.page_count }}</span></template></el-table-column>
-              <el-table-column label="状态" width="92"><template #default="scope"><span class="status-pill" :class="scope.row.status">{{ statusLabels[scope.row.status as ComicStatus] }}</span></template></el-table-column>
-            </el-table>
+            <LibraryTable v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :comics="filtered" :all-comics="sourceComics" :selected-ids="selectedIds" :current-id="selectedId" :disabled="disabled" :can-select="canEditComic" :auto-sync-label="autoSyncLabel" :reveal-matches="revealMatches" :reveal-key="revealKey" @row-click="selectComic" @selection-change="(ids: string[]) => selectedIds = ids" />
             <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><p>请从左下角“Komga 连接设置”读取书库。</p></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><span class="empty-eyebrow">让你的漫画库井然有序</span><h2>从第一本漫画开始</h2><p>勾选多个本地或 NAS 文件夹，也可以导入已有 CBZ。<br />先预览解析资料，再确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button><button class="empty-import-link" :disabled="disabled" @click="importCbz">或导入已有 CBZ<el-icon><ArrowRight /></el-icon></button></template></div>
           </div>
 
@@ -676,6 +680,10 @@ onBeforeUnmount(() => unsubscribe?.())
 .comic-file-icon.komga { color: #5b8d87; background: #edf6f3; }
 .comic-auto-sync-label { color: #64856d; font-size: 10px; line-height: 1.6; margin-top: 4px; }
 .sidebar-job-count { margin-left: auto; min-width: 19px; padding: 1px 5px; border-radius: 6px; font-size: 10px; background: #365e4d; color: #d4e8d6; }
+.library-count-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; }
+.library-count-summary .selected-count { margin-left: 0; }
+.hidden-selection-count { color: #879580; }
+.library-count-summary .el-button { font-size: 11px; }
 .library-batch-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px 12px; }
 .version-badges { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .version-badges > span { max-width: 100%; padding: 1px 5px; border: 1px solid #dfe8d7; border-radius: 4px; background: #f2f7ed; color: #6d8662; font-size: 10px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
