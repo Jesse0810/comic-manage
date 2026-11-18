@@ -169,7 +169,7 @@ async function mainProcessFixture(options = {}) {
   }
 
   const fakeElectron = {
-    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:{}, safeStorage:{},
+    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:options.dialog || {}, safeStorage:{},
     shell: {
       async openExternal(url) { externalUrls.push(url) },
       async openPath(directory) { localPaths.push(directory); return '' },
@@ -193,7 +193,7 @@ async function mainProcessFixture(options = {}) {
     setInterval: callback => { intervals.push(callback); return {unref() {}} },
     clearInterval() {},
   }, {filename:'main.cjs'})
-  const desktop = await module.exports.createApplication({dataDir:'fixture-data', show:false})
+  const desktop = await module.exports.createApplication({dataDir:options.dataDir || 'fixture-data', show:false})
   const event = {sender:desktop.window.webContents, senderFrame:desktop.window.webContents.mainFrame}
   return {
     calls, credentials, config, externalUrls, localPaths, statPaths, sentEvents, tick:() => intervals[0](),
@@ -202,6 +202,56 @@ async function mainProcessFixture(options = {}) {
     invoke: (channel, ...args) => handlers.get(channel)(event, ...args),
   }
 }
+
+test('folder selection remembers the parent across launches and ignores cancellation', async t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comic-picker-'))
+  const locationFile = path.join(dataDir, 'last-import-location.json')
+  t.after(() => { fs.unlinkSync(locationFile); fs.rmdirSync(dataDir) })
+  fs.writeFileSync(locationFile, '{broken')
+  const library = process.platform === 'win32' ? '\\\\synthetic-host\\书库\\入库' : '/test-share/书库/入库'
+  const selections = [path.join(library, '作品甲'), path.join(library, '作品乙')]
+  const openOptions = []
+  let reply = { canceled:false, filePaths:selections }
+  const dialog = { async showOpenDialog(_window, options) { openOptions.push(options); return reply } }
+  const initial = await mainProcessFixture({dataDir, dialog})
+  assert.deepEqual(await initial.invoke('comic:choose-directories'), selections)
+  assert.equal(openOptions[0].defaultPath, undefined, 'An invalid preference uses the system picker location')
+  assert.deepEqual([...openOptions[0].properties], ['openDirectory', 'multiSelections'])
+  assert.equal(JSON.parse(fs.readFileSync(locationFile, 'utf8')), library)
+
+  const restarted = await mainProcessFixture({dataDir, dialog})
+  reply = { canceled:true, filePaths:[] }
+  assert.deepEqual([...(await restarted.invoke('comic:choose-directories'))], [])
+  assert.equal(openOptions[1].defaultPath, path.join(library, path.sep))
+  assert.equal(JSON.parse(fs.readFileSync(locationFile, 'utf8')), library)
+
+  const next = path.join(dataDir, '另一个书库', '作品丙')
+  reply = { canceled:false, filePaths:[next] }
+  assert.deepEqual(await restarted.invoke('comic:choose-directories'), [next])
+  assert.equal(openOptions[2].defaultPath, path.join(library, path.sep))
+  assert.equal(JSON.parse(fs.readFileSync(locationFile, 'utf8')), path.dirname(next))
+
+  reply = { canceled:true, filePaths:[] }
+  await restarted.invoke('comic:choose-directory')
+  assert.equal(openOptions[3].defaultPath, undefined, 'Output chooser has its own location')
+})
+
+test('a failed preference write still returns selected folders and remembers in this session', async t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comic-picker-'))
+  const locationFile = path.join(dataDir, 'last-import-location.json')
+  fs.mkdirSync(locationFile)
+  t.after(() => { fs.rmdirSync(locationFile); fs.rmdirSync(dataDir) })
+  const selected = path.join(dataDir, '漫画库', '作品甲')
+  const openOptions = []
+  const dialog = { async showOpenDialog(_window, options) {
+    openOptions.push(options)
+    return { canceled:false, filePaths:[selected] }
+  } }
+  const main = await mainProcessFixture({dataDir, dialog})
+  assert.deepEqual(await main.invoke('comic:choose-directories'), [selected])
+  assert.deepEqual(await main.invoke('comic:choose-directories'), [selected])
+  assert.equal(openOptions[1].defaultPath, path.join(path.dirname(selected), path.sep))
+})
 
 test('request boundary rejects arbitrary methods, malformed records and unsafe numeric indexes', () => {
   const invalid = [

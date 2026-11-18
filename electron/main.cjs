@@ -1,7 +1,7 @@
 'use strict'
 
 const { app, BrowserWindow, ipcMain, dialog, shell, protocol, safeStorage } = require('electron')
-const { readFile, realpath, stat } = require('node:fs/promises')
+const { readFile, realpath, stat, writeFile } = require('node:fs/promises')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
 const { createHash } = require('node:crypto')
@@ -51,6 +51,8 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
 
   const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
   const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
+  const importLocationFile = path.join(dataDir, 'last-import-location.json')
+  let lastImportLocation
   let requestQueue = Promise.resolve()
   let pendingServiceRequests = 0
   const callService = (method, params = {}) => {
@@ -197,8 +199,26 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     return result.canceled ? null : result.filePaths[0]
   })
   handle('comic:choose-directories', async () => {
-    const result = await dialog.showOpenDialog(window, { title: '选择一个或多个漫画文件夹', properties: ['openDirectory', 'multiSelections'] })
-    return result.canceled ? [] : result.filePaths
+    if (!lastImportLocation) {
+      try {
+        const saved = JSON.parse(await readFile(importLocationFile, 'utf8'))
+        if (typeof saved === 'string' && path.isAbsolute(saved) && !saved.includes('\0')) {
+          lastImportLocation = saved
+        }
+      } catch { /* Use the system default when there is no readable saved location. */ }
+    }
+    const options = { title: '选择一个或多个漫画文件夹', properties: ['openDirectory', 'multiSelections'] }
+    // Let the system dialog resolve NAS paths. The trailing separator marks a directory
+    // on Windows even when the share is temporarily unreachable.
+    if (lastImportLocation) options.defaultPath = path.join(lastImportLocation, path.sep)
+    const result = await dialog.showOpenDialog(window, options)
+    if (result.canceled || !result.filePaths.length) return []
+
+    // The chooser returns selected folders, so their parent is where users can pick siblings.
+    lastImportLocation = path.dirname(result.filePaths[0])
+    await writeFile(importLocationFile, JSON.stringify(lastImportLocation), { mode: 0o600 })
+      .catch(() => { /* An unsaved preference must not block folder selection. */ })
+    return result.filePaths
   })
   handle('comic:choose-backup', async () => {
     const result = await dialog.showSaveDialog(window, { title: '备份资料库', defaultPath: `ComicManage-${new Date().toISOString().slice(0, 10)}.sqlite3`,
