@@ -65,7 +65,13 @@ async function run() {
   const syntheticKey = 'synthetic-komga-test-key'
   komgaFixture = await createKomgaFixture(syntheticKey)
   let picking = sourceRoot
-  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: Array.isArray(picking) ? picking : [picking] })
+  let pickerOptions
+  let pickerOpened
+  dialog.showOpenDialog = async (_window, options) => {
+    pickerOptions = options
+    pickerOpened?.()
+    return { canceled: picking === null, filePaths: picking === null ? [] : [].concat(picking) }
+  }
   dialog.showSaveDialog = async (_window, options) => ({ canceled: false, filePath: path.join(fixture, options.title.includes('Komga') ? 'komga_notable_entities_manifest.json' : 'backup.sqlite3') })
   desktop = await createApplication({ dataDir, show: process.env.COMIC_MANAGE_TEST_SHOW === '1' })
   const window = desktop.window
@@ -141,8 +147,18 @@ async function run() {
   assert.equal(await evaluate("window.comic.invoke('arbitrary-shell',{}).then(()=>false,()=>true)"), true)
   await capture('ComicManage-Electron-empty.png')
   await click('添加漫画目录')
-  await click('选择多个文件夹')
+  await waitFor("document.querySelector('[data-testid=import-pick-folders]')", 'single folder picker entry')
+  assert.equal(await evaluate("document.querySelectorAll('[data-testid=import-pick-folders]').length"), 1)
+  assert.equal(await evaluate("typeof window.comic.chooseCbz"), 'undefined')
+  await click('选择文件夹')
   await waitFor("document.querySelectorAll('.folder-tree-node').length === 1", 'directory selection')
+  assert.deepEqual(pickerOptions.properties, ['openDirectory', 'multiSelections'])
+  picking = null
+  const cancelledPicker = new Promise(resolve => { pickerOpened = resolve })
+  await click('选择文件夹')
+  await cancelledPicker
+  pickerOpened = undefined
+  assert.equal(await evaluate("document.querySelectorAll('.folder-tree-node').length"), 1, 'Cancel keeps the selected folder')
   await folderCheckbox(sourceRoot) // Choose two child folders, leaving their sibling unchecked.
   await evaluate("document.querySelector('[data-testid=import-tree] .el-tree-node__expand-icon').click()")
   await waitFor("document.querySelectorAll('.folder-tree-node').length === 4", 'lazy child folders')
@@ -468,8 +484,7 @@ async function run() {
   assert.equal((await call('bootstrap')).comics.length, 1, 'Rescan must not add unchecked or removed comics')
   picking = secondSource
   await click('添加漫画')
-  await evaluate("[...document.querySelectorAll('.el-dropdown-menu__item')].find(item=>item.textContent.includes('选择图片文件夹')).click()")
-  await click('选择多个文件夹')
+  await click('选择文件夹')
   await click('读取并预览')
   await waitFor("document.querySelector('[data-testid=import-table]')?.textContent.includes('已移出')", 'removed import preview')
   await evaluate("document.querySelector('[data-testid=import-table] .el-table__body .el-checkbox').click()")
@@ -761,17 +776,18 @@ async function run() {
     await fs.mkdir(folder, {recursive:true})
     for (let index=1;index<=count;index++) await fs.writeFile(path.join(folder,index+'.png'),page)
   }
-  picking = folderVariantWork
+  picking = [folderVariantWork, source, folderVariantWork]
   await click('添加漫画')
-  await waitFor("[...document.querySelectorAll('.el-dropdown-menu__item')].some(item=>item.getClientRects().length && item.textContent.trim()==='选择图片文件夹')",'folder import menu')
-  await evaluate("[...document.querySelectorAll('.el-dropdown-menu__item')].find(item=>item.getClientRects().length && item.textContent.trim()==='选择图片文件夹').click()")
-  await click('选择多个文件夹')
-  await waitFor("document.querySelectorAll('.folder-tree-node').length === 1",'parent work folder selected')
+  await click('选择文件夹')
+  await waitFor("document.querySelectorAll('.folder-tree-node').length === 2", 'same picker accepts multiple folders and deduplicates locations')
   await click('读取并预览')
-  await waitFor("document.querySelectorAll('[data-testid=import-version-labels]').length===2",'folder editions preview')
+  const editionRows = "[...document.querySelectorAll('[data-testid=import-table] tr')].filter(row => row.querySelector('.import-title')?.textContent === 'Cattleya & Lana')"
+  await waitFor(`${editionRows}.length === 2`, 'both editions appear in the multi-folder preview')
   assert.equal(await evaluate("document.querySelector('[data-testid=import-table]').textContent.includes('Cattleya & Lana')"),true)
   assert.equal(await evaluate("document.querySelector('[data-testid=import-table]').textContent.includes('みずいろめがね')"),true)
-  for (const version of ['有文字','无文字']) assert.equal(await evaluate(`[...document.querySelectorAll('[data-testid=import-version-labels] span')].some(item=>item.textContent===${JSON.stringify(version)})`),true)
+  for (const version of ['有文字','无文字']) {
+    assert.equal(await evaluate(`${editionRows}.some(row => [...row.querySelectorAll('[data-testid=import-version-labels] span')].some(label => label.textContent === ${JSON.stringify(version)}))`), true)
+  }
   await capture('ComicManage-version-folders-preview.png')
   await click('导入选中 2 本')
   await waitFor("document.body.innerText.includes('已导入 2 本作品')",'folder editions imported')

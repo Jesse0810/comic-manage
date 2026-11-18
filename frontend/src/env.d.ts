@@ -4,7 +4,6 @@ interface ComicDesktop {
   onEvent(callback: (event: string, data: any) => void): () => void
   chooseDirectory(): Promise<string | null>
   chooseDirectories(): Promise<string[]>
-  chooseCbz(): Promise<string[]>
   chooseBackup(): Promise<string | null>
   chooseKomgaManifest(): Promise<string | null>
   komgaConfig(): Promise<import('./types').KomgaConfig>

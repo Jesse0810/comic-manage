@@ -420,9 +420,11 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
 .metadata-form :deep(.el-select__selected-item) { min-width: 0; max-width: 100%; }
 .metadata-form :deep(.el-select__tags-text) { overflow: hidden; text-overflow: ellipsis; }
 .metadata-form :deep(.el-tag) { max-width: 100%; }
-.metadata-sections :deep(.el-collapse-item__header) { height: 38px; }
-.metadata-sections :deep(.el-collapse-item__content) { padding: 8px 0 2px; }
-.metadata-sections :deep(.section-number) { height: 21px; width: 21px; }
+.metadata-sections :deep(.el-collapse-item__header) { height: 38px; padding: 0 8px; }
+.metadata-sections :deep(.el-collapse-item__title) { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; }
+.metadata-sections :deep(.collapse-title) { margin: 0; line-height: 1.4; }
+.metadata-sections :deep(.el-collapse-item__content) { padding: 8px 8px 2px; }
+.metadata-sections :deep(.section-number) { height: 21px; width: 21px; flex: 0 0 21px; }
 .metadata-help { margin-top: 5px; line-height: 1.5; }
 .metadata-help.section-help { margin: 0 0 12px; }
 .source-warning { margin-bottom: 8px; }

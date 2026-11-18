@@ -69,7 +69,6 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
 .heading-count { font-size: 12px; color: #6b8672; background: #e8eee3; border: 1px solid #e1e8da; border-radius: 6px; padding: 3px 7px; letter-spacing: 0; font-weight: 500; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
 .header-actions .el-button { padding-left: 14px; padding-right: 14px; }
-.dropdown-arrow { margin-left: 10px; font-size: 10px; opacity: .8; }
 .el-button { font-weight: 500; }
 .el-button--primary { box-shadow: 0 2px 2px #28493608; }
 .el-input__wrapper, .el-select__wrapper { box-shadow: 0 0 0 1px #dfe6df inset; }
@@ -118,12 +117,9 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
 .library-empty-icon { position: relative; height: 86px; width: 86px; display: grid; place-items: center; color: #789d7b; background: #eff5e9; border-radius: 25px; margin-bottom: 27px; box-shadow: 0 8px 24px #5e87580c; transform: rotate(-5deg); }
 .library-empty-icon > .el-icon { transform: rotate(5deg); }
 .empty-icon-spark { position: absolute; right: -5px; top: -4px; width: 20px; height: 20px; background: #d6e4bf; border: 5px solid #fff; border-radius: 50%; }
-.empty-eyebrow { font-size: 9px; letter-spacing: 2px; color: #91a384; margin-bottom: 8px; }
 .library-empty h2 { margin: 0 0 12px; font-weight: 550; font-size: 21px; color: #3a5841; letter-spacing: -.4px; }
 .library-empty p { font-size: 11px; color: #99a797; margin: 0 0 26px; line-height: 1.9; }
 .library-empty > .el-button { min-width: 154px; height: 37px; }
-.empty-import-link { background: none; border: none; color: #839e7b; font-size: 10px; margin-top: 16px; display: flex; align-items: center; gap: 4px; }
-.empty-import-link:disabled { color: #afbaaa; }
 .library-footer { border-top: 1px solid #edf1e8; padding: 15px 18px; display: flex; align-items: center; gap: 15px; flex: 0 0 auto; background: #fdfefb; }
 .output-location { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
 .output-icon { color: #8ca07f; flex: 0 0 auto; }
@@ -310,9 +306,8 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
 .import-steps span.active { background: #edf4e9; color: #4d7857; font-weight: 550; }
 .import-steps i { width: 28px; height: 1px; background: #dde6d6; }
 .import-dialog-scroll { min-height: 0; overflow-y: auto; padding-right: 3px; }
-.import-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
 .import-help { font-size: 12px; line-height: 1.8; color: #82947c; margin: 15px 0; }
-.folder-picker, .cbz-picker { border: 1px solid #e2e8dc; border-radius: 8px; min-height: 230px; max-height: 300px; overflow: auto; padding: 10px; background: #fcfdf9; }
+.folder-picker { border: 1px solid #e2e8dc; border-radius: 8px; max-height: 300px; overflow: auto; padding: 10px; background: #fcfdf9; }
 .folder-picker .el-tree { background: transparent; color: #667f60; }
 .folder-picker .el-tree-node__content { height: 35px; border-radius: 4px; }
 .folder-tree-node { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; padding-right: 8px; }
@@ -320,12 +315,6 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
 .folder-tree-node > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .folder-tree-node > .el-button { margin-left: auto; padding: 4px; flex-shrink: 0; }
 .picker-disabled .el-tree { pointer-events: none; opacity: .65; }
-.import-source-empty { min-height: 235px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #93aa84; gap: 13px; }
-.import-source-empty strong { font-size: 14px; font-weight: 500; color: #68815c; }
-.import-source-empty span { font-size: 12px; color: #9aaa91; margin-top: -5px; margin-bottom: 7px; }
-.cbz-source-row { display: flex; align-items: center; gap: 8px; padding: 10px 8px; border-bottom: 1px solid #edf1e8; font-size: 12px; }
-.cbz-source-row:last-child { border-bottom: none; }
-.cbz-source-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-source-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 12px; color: #638259; padding: 13px 1px 2px; }
 .import-source-summary > span { color: #93a18a; font-size: 11px; }
 .import-preview-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
@@ -374,7 +363,7 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
   .import-dialog .el-dialog__header { padding-bottom: 13px; }
   .import-steps { margin-bottom: 12px; }
   .import-preview-table { max-height: 225px; }
-  .folder-picker, .cbz-picker { max-height: 280px; }
+  .folder-picker { max-height: 280px; }
 }
 
 /* Metadata rules v1.1: five sections keep the expanded editor navigable. */

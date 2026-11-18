@@ -196,10 +196,6 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     const result = await dialog.showOpenDialog(window, { title: '选择本地或 NAS 目录', properties: ['openDirectory', 'createDirectory'] })
     return result.canceled ? null : result.filePaths[0]
   })
-  handle('comic:choose-cbz', async () => {
-    const result = await dialog.showOpenDialog(window, { title: '导入已有 CBZ', filters: [{ name: '漫画压缩包', extensions: ['cbz'] }], properties: ['openFile', 'multiSelections'] })
-    return result.canceled ? [] : result.filePaths
-  })
   handle('comic:choose-directories', async () => {
     const result = await dialog.showOpenDialog(window, { title: '选择一个或多个漫画文件夹', properties: ['openDirectory', 'multiSelections'] })
     return result.canceled ? [] : result.filePaths

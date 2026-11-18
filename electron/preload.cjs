@@ -8,7 +8,6 @@ contextBridge.exposeInMainWorld('comic', {
     : Promise.reject(new Error('不支持的操作。')),
   chooseDirectory: () => ipcRenderer.invoke('comic:choose-directory'),
   chooseDirectories: () => ipcRenderer.invoke('comic:choose-directories'),
-  chooseCbz: () => ipcRenderer.invoke('comic:choose-cbz'),
   chooseBackup: () => ipcRenderer.invoke('comic:choose-backup'),
   chooseKomgaManifest: () => ipcRenderer.invoke('comic:choose-komga-manifest'),
   komgaConfig: () => ipcRenderer.invoke('comic:komga-config'),

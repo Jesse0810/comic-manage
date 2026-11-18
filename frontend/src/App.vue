@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, ArrowRight, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back } from '@element-plus/icons-vue'
+import { Reading, Collection, Clock, CircleCheck, Box, Plus, FolderAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back } from '@element-plus/icons-vue'
 import DetailsPanel from './components/DetailsPanel.vue'
 import LibraryTable from './components/LibraryTable.vue'
 import { buildLibraryEntries } from './library-groups'
@@ -75,7 +75,6 @@ const reviewResult = ref<ReviewSyncResult | null>(null)
 const reviewResultVisible = ref(false)
 const reviewError = ref('')
 const importVisible = ref(false)
-const importMode = ref<'folder' | 'cbz'>('folder')
 const batchVisible = ref(false)
 const batchIds = ref<string[]>([])
 let unsubscribe: (() => void) | undefined
@@ -239,13 +238,6 @@ async function runTask<T>(title: string, action: () => Promise<T>, completed: (r
 
 async function addDirectory() {
   if (disabled.value || !await resolveEdits()) return
-  importMode.value = 'folder'
-  importVisible.value = true
-}
-
-async function importCbz() {
-  if (disabled.value || !await resolveEdits()) return
-  importMode.value = 'cbz'
   importVisible.value = true
 }
 
@@ -635,7 +627,13 @@ onBeforeUnmount(() => unsubscribe?.())
     </aside>
 
     <main class="workspace" :class="{ 'workspace-editor-expanded': editorExpanded }">
-      <header v-show="!editorExpanded" class="workspace-header"><h1>{{ sectionTitle }}<span class="heading-count" title="按独立版本计数">{{ counts[section] }}</span></h1><div class="header-actions"><el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button><el-dropdown trigger="click" :disabled="disabled" @command="(command: string) => command === 'folder' ? addDirectory() : importCbz()"><el-button type="primary" :icon="Plus" :disabled="disabled">添加漫画<el-icon class="dropdown-arrow"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="folder" :icon="FolderAdd">选择图片文件夹</el-dropdown-item><el-dropdown-item command="cbz" :icon="DocumentAdd">导入已有 CBZ</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
+      <header v-show="!editorExpanded" class="workspace-header">
+        <h1>{{ sectionTitle }}<span class="heading-count" title="按独立版本计数">{{ counts[section] }}</span></h1>
+        <div class="header-actions">
+          <el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button>
+          <el-button data-testid="add-comics" type="primary" :icon="Plus" :disabled="disabled" @click="addDirectory">添加漫画</el-button>
+        </div>
+      </header>
 
       <el-alert v-if="startupError" :title="startupError" description="请关闭并重新打开桌面程序。漫画源文件和本机资料库不会被删除。" type="error" :closable="false" show-icon class="startup-error" />
 
@@ -647,7 +645,7 @@ onBeforeUnmount(() => unsubscribe?.())
 
           <div class="table-area" v-loading="loading">
             <LibraryTable v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :comics="filtered" :all-comics="sourceComics" :selected-ids="selectedIds" :current-id="selectedId" :disabled="disabled" :can-select="canEditComic" :auto-sync-label="autoSyncLabel" :reveal-matches="revealMatches" :reveal-key="revealKey" @row-click="selectComic" @selection-change="(ids: string[]) => selectedIds = ids" />
-            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><p>请从左下角“Komga 连接设置”读取书库。</p></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><span class="empty-eyebrow">让你的漫画库井然有序</span><h2>从第一本漫画开始</h2><p>勾选多个本地或 NAS 文件夹，也可以导入已有 CBZ。<br />先预览解析资料，再确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button><button class="empty-import-link" :disabled="disabled" @click="importCbz">或导入已有 CBZ<el-icon><ArrowRight /></el-icon></button></template></div>
+            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><p>请从左下角“Komga 连接设置”读取书库。</p></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><h2>从第一本漫画开始</h2><p>可以选择一个或多个本地或 NAS 文件夹。<br />预览后确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button></template></div>
           </div>
 
           <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
@@ -673,7 +671,7 @@ onBeforeUnmount(() => unsubscribe?.())
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <BatchReviewDialog v-model="reviewPlanVisible" :plan="reviewPlan" :busy="disabled" @confirm="commitReviewSync" />
     <BatchReviewResultDialog v-model="reviewResultVisible" :result="reviewResult" :error="reviewError" />
-    <ImportDialog v-model="importVisible" :mode="importMode" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
+    <ImportDialog v-model="importVisible" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
 
     <el-dialog v-model="planVisible" title="确认生成计划" width="min(940px, 90vw)" :close-on-click-modal="false" destroy-on-close class="plan-dialog"><template v-if="plan"><div class="dialog-intro"><div class="dialog-icon"><el-icon :size="24"><Box /></el-icon></div><div><h3>即将生成 {{ plan.items.length }} 本漫画</h3><p>先检查成品路径，确认后将逐本打包并校验。</p></div></div><el-alert title="只新增文件，不覆盖已有成品；所有源文件保留。" type="info" :closable="false" show-icon /><el-alert v-for="warning in planWarnings" :key="warning" :title="warning" type="warning" :closable="false" show-icon /><el-table :data="plan.items" max-height="330" class="plan-table"><el-table-column label="作品" prop="title" min-width="160" /><el-table-column label="成品路径" min-width="320"><template #default="scope"><span class="plan-path" :title="scope.row.source">{{ scope.row.destination }}</span><div class="plan-source">源：{{ scope.row.source }}</div></template></el-table-column><el-table-column label="页数" prop="pageCount" width="60" align="center" /><el-table-column label="附件" prop="attachmentCount" width="60" align="center" /></el-table><p class="plan-note">图片不转码，完成后检查 CRC、SHA-256、页数和 ComicInfo.xml。原始内容约 {{ sizeText(plan.totalBytes) }}，请保留足够空间。</p></template><template #footer><el-button @click="planVisible = false">返回检查</el-button><el-button type="primary" :icon="Check" @click="confirmExport">确认生成并校验</el-button></template></el-dialog>
