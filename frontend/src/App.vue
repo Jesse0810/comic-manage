@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, ArrowRight, CopyDocument, Edit, Remove, Connection, Setting } from '@element-plus/icons-vue'
+import { Reading, Collection, Clock, CircleCheck, Box, Plus, ArrowDown, FolderAdd, DocumentAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, ArrowRight, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back } from '@element-plus/icons-vue'
 import DetailsPanel from './components/DetailsPanel.vue'
 import LibraryTable from './components/LibraryTable.vue'
 import { buildLibraryEntries } from './library-groups'
@@ -25,6 +25,7 @@ const dataDir = ref('')
 const version = ref('')
 const metadataRules = ref('')
 const selectedId = ref('')
+const editorExpanded = ref(false)
 const form = ref<Metadata | null>(null)
 const savedMetadata = ref('')
 const reviewed = ref(false)
@@ -136,6 +137,7 @@ const navigation = [
 ]
 
 function selectData(comic: Comic | null) {
+  if (!comic) editorExpanded.value = false
   selectedId.value = comic?.id || ''
   form.value = comic ? clone(comic.metadata) : null
   savedMetadata.value = JSON.stringify(form.value)
@@ -632,13 +634,13 @@ onBeforeUnmount(() => unsubscribe?.())
       <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
     </aside>
 
-    <main class="workspace">
-      <header class="workspace-header"><div><div class="eyebrow">LIBRARY / 漫画管理</div><h1>{{ sectionTitle }}<span class="heading-count" title="按独立版本计数">{{ counts[section] }}</span></h1><p>整理作品，保留完整的故事。</p></div><div class="header-actions"><el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button><el-dropdown trigger="click" :disabled="disabled" @command="(command: string) => command === 'folder' ? addDirectory() : importCbz()"><el-button type="primary" :icon="Plus" :disabled="disabled">添加漫画<el-icon class="dropdown-arrow"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="folder" :icon="FolderAdd">选择图片文件夹</el-dropdown-item><el-dropdown-item command="cbz" :icon="DocumentAdd">导入已有 CBZ</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
+    <main class="workspace" :class="{ 'workspace-editor-expanded': editorExpanded }">
+      <header v-show="!editorExpanded" class="workspace-header"><h1>{{ sectionTitle }}<span class="heading-count" title="按独立版本计数">{{ counts[section] }}</span></h1><div class="header-actions"><el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button><el-dropdown trigger="click" :disabled="disabled" @command="(command: string) => command === 'folder' ? addDirectory() : importCbz()"><el-button type="primary" :icon="Plus" :disabled="disabled">添加漫画<el-icon class="dropdown-arrow"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="folder" :icon="FolderAdd">选择图片文件夹</el-dropdown-item><el-dropdown-item command="cbz" :icon="DocumentAdd">导入已有 CBZ</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
 
       <el-alert v-if="startupError" :title="startupError" description="请关闭并重新打开桌面程序。漫画源文件和本机资料库不会被删除。" type="error" :closable="false" show-icon class="startup-error" />
 
       <div class="work-area">
-        <section class="library-panel">
+        <section v-show="!editorExpanded" class="library-panel">
           <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
           <div class="library-summary"><span class="library-count-summary">{{ libraryWorkCount }} 部作品 · {{ filtered.length }} 个版本<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span><span v-if="checkedOutsideFilter" class="hidden-selection-count">（筛选外 {{ checkedOutsideFilter }} 本）</span><el-button v-if="selectedIds.length" data-testid="clear-library-selection" link :disabled="disabled" @click="clearLibrarySelection">取消勾选</el-button></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
@@ -651,7 +653,15 @@ onBeforeUnmount(() => unsubscribe?.())
           <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
         </section>
 
-        <DetailsPanel :metadata-rules="metadataRules" :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @resolve="resolveRemoteConflict" @error="showError" />
+        <DetailsPanel :metadata-rules="metadataRules" :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @resolve="resolveRemoteConflict" @error="showError">
+          <template #heading-actions>
+            <el-button v-if="current" data-testid="editor-layout-toggle" size="small" plain
+              :icon="editorExpanded ? Back : FullScreen" :aria-pressed="editorExpanded"
+              @click="editorExpanded = !editorExpanded">
+              {{ editorExpanded ? '返回列表' : '展开编辑' }}
+            </el-button>
+          </template>
+        </DetailsPanel>
       </div>
 
       <div v-if="busy && !importVisible && !batchVisible && !komgaSettingsVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>
