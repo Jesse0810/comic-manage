@@ -7,6 +7,7 @@ const path = require('node:path')
 const { createHash } = require('node:crypto')
 const { ServiceBridge, validateCall } = require('./bridge.cjs')
 const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
+const { ModelConfigStore } = require('./model-config.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
@@ -51,6 +52,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
 
   const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
   const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
+  const modelConfig = new ModelConfigStore(dataDir, safeStorage)
   const importLocationFile = path.join(dataDir, 'last-import-location.json')
   let lastImportLocation
   let requestQueue = Promise.resolve()
@@ -110,7 +112,26 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args) })
   }
   handle('comic:call', async (method, params = {}) => {
-    if (['komga_test', 'source_context', 'komga_jobs_run'].includes(method)) throw new Error('此操作只允许主进程调用。')
+    if (['model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_assist_preview'].includes(method)) {
+      if (!params || typeof params !== 'object' || Array.isArray(params)
+          || Buffer.byteLength(JSON.stringify(params), 'utf8') > 256 * 1024) throw new Error('模型请求参数无效。')
+      if (method === 'model_config_get') {
+        if (Object.keys(params).length) throw new Error('读取模型配置不接受额外参数。')
+        return modelConfig.get()
+      }
+      if (method === 'model_profile_save') return modelConfig.save(params)
+      if (['model_profile_delete', 'model_profile_default'].includes(method)) {
+        if (Object.keys(params).some(key => key !== 'id')) throw new Error('模型配置请求参数无效。')
+        return method === 'model_profile_delete' ? modelConfig.delete(params.id) : modelConfig.setDefault(params.id)
+      }
+      if (method === 'model_profile_test') return callService('model_test', await modelConfig.testCredentials(params))
+      const { profile_id, ...work } = params
+      if (Object.keys(work).some(key => !['id', 'metadata', 'siteFields'].includes(key))) throw new Error('刮削请求参数无效。')
+      const { name, ...connection } = await modelConfig.connection(profile_id)
+      const result = await callService('model_assist', { ...work, ...connection })
+      return { ...result, model_name: name }
+    }
+    if (['komga_test', 'source_context', 'komga_jobs_run', 'model_test', 'model_assist'].includes(method)) throw new Error('此操作只允许主进程调用。')
     validateCall(method, params)
     if (method === 'bootstrap') {
       const result = await callService(method, params)

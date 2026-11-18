@@ -6,7 +6,7 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
@@ -80,6 +80,17 @@ function validateCall(method, params) {
       if (params[key] !== undefined && (typeof params[key] !== 'string' || !/^[A-Za-z0-9_.=+/~-]{1,512}$/.test(params[key]))) {
         throw new Error('站点 API 凭据格式无效。')
       }
+    }
+  }
+  if (['model_test', 'model_assist'].includes(method)) {
+    const allowed = method === 'model_test' ? ['profile', 'api_key'] : ['profile', 'api_key', 'id', 'metadata', 'siteFields']
+    const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
+    if (Object.keys(params).some(key => !allowed.includes(key)) || !isRecord(params.profile)
+        || Object.keys(params.profile).sort().join(',') !== 'base_url,model,provider'
+        || typeof params.api_key !== 'string' || !/^[\x20-\x7e]{0,4096}$/.test(params.api_key)) throw new Error('模型服务请求参数无效。')
+    if (method === 'model_assist') {
+      string('id')
+      if (!isRecord(params.metadata) || (params.siteFields !== undefined && !isRecord(params.siteFields))) throw new Error('作品资料无效。')
     }
   }
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')

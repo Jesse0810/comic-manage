@@ -13,7 +13,8 @@ import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
 import KomgaJobsDialog from './components/KomgaJobsDialog.vue'
 import MetadataScrapeDialog from './components/MetadataScrapeDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs, ScrapeApplication, ScrapeFields } from './types'
+import ModelSettingsDialog from './components/ModelSettingsDialog.vue'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs, ScrapeApplication, ScrapeFields, ModelConfiguration } from './types'
 import { clone, errorMessage, customTags, collectionMode, comicGenres, komgaAutoSyncLabels, scrapeFieldKeys } from './types'
 import { invoke } from './api'
 
@@ -79,6 +80,9 @@ const importVisible = ref(false)
 const batchVisible = ref(false)
 const batchIds = ref<string[]>([])
 const scrapeVisible = ref(false)
+const modelSettingsVisible = ref(false)
+const modelConfiguration = ref<ModelConfiguration>({ profiles: [], default_id: '' })
+let modelConfigLoad: Promise<void> | undefined
 let unsubscribe: (() => void) | undefined
 
 const current = computed(() => comics.value.find(c => c.id === selectedId.value) || null)
@@ -186,6 +190,17 @@ function showError(message: string) {
   showResult('操作未完成', '请查看以下信息，处理后重试。', message)
 }
 
+async function loadModelConfiguration() {
+  if (!modelConfigLoad) {
+    modelConfigLoad = invoke<ModelConfiguration>('model_config_get').then(value => {
+      modelConfiguration.value = value
+    }).catch(error => { ElMessage.warning(errorMessage(error)) }).finally(() => { modelConfigLoad = undefined })
+  }
+  return modelConfigLoad
+}
+function openModelSettings() {
+  modelSettingsVisible.value = true
+}
 function openMetadataScraper() {
   if (disabled.value || !current.value || !form.value || !canEditComic(current.value) || current.value.remote?.conflict) return
   scrapeVisible.value = true
@@ -650,6 +665,7 @@ onMounted(async () => {
     loading.value = false
     return
   }
+  void loadModelConfiguration()
   unsubscribe = window.comic.onEvent((event, data) => {
     if (event === 'task-progress') taskMessage.value = data.message
     if (event === 'komga-jobs-updated') {
@@ -676,7 +692,7 @@ onBeforeUnmount(() => unsubscribe?.())
       <div class="workspace-label">我的工作区</div>
       <nav class="navigation"><button v-for="item in navigation" :key="item.key" :class="{ active: section === item.key }" @click="section = item.key"><el-icon :size="18"><component :is="item.icon" /></el-icon><span>{{ item.title }}</span><b>{{ counts[item.key] }}</b></button></nav>
       <div class="sidebar-note"><div class="sidebar-note-icon"><el-icon><Lock /></el-icon></div><div><strong>原图保留，资料有序</strong><p>审核后生成成品，<br />可同步资料到你的 Komga。</p></div></div>
-      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
+      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button data-testid="model-settings-open" :disabled="disabled" @click="openModelSettings"><el-icon><Connection /></el-icon>模型管理</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
     </aside>
 
     <main class="workspace" :class="{ 'workspace-editor-expanded': editorExpanded }">
@@ -724,7 +740,9 @@ onBeforeUnmount(() => unsubscribe?.())
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <BatchReviewDialog v-model="reviewPlanVisible" :plan="reviewPlan" :busy="disabled" @confirm="commitReviewSync" />
     <BatchReviewResultDialog v-model="reviewResultVisible" :result="reviewResult" :error="reviewError" />
-    <MetadataScrapeDialog v-model="scrapeVisible" :comic="current" :metadata="form" :disabled="disabled || currentReadOnly || !!current?.remote?.conflict" @apply="applyScrapedMetadata" />
+    <MetadataScrapeDialog v-model="scrapeVisible" :comic="current" :metadata="form" :disabled="disabled || currentReadOnly || !!current?.remote?.conflict"
+      :model-configuration="modelConfiguration" @model-settings="openModelSettings" @apply="applyScrapedMetadata" />
+    <ModelSettingsDialog v-model="modelSettingsVisible" :configuration="modelConfiguration" @updated="modelConfiguration = $event" />
     <ImportDialog v-model="importVisible" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
 

@@ -1,22 +1,34 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
-import { Check, Search } from '@element-plus/icons-vue'
-import type { Comic, Metadata, ScrapeApplication, ScrapeFieldKey, ScrapeFields, ScrapePreview, ScrapeProvider } from '../types'
+import { Check, MagicStick, Search } from '@element-plus/icons-vue'
+import type { Comic, Metadata, ModelAssistPreview, ModelConfiguration, ScrapeApplication, ScrapeFieldKey, ScrapeFields, ScrapePreview, ScrapeProvider } from '../types'
 import { ageRatings, clone, comicGenres, displayTitle, errorMessage, releaseTypes, scrapeFieldKeys } from '../types'
 import { invoke } from '../api'
 
-const props = defineProps<{ modelValue: boolean; comic: Comic | null; metadata: Metadata | null; disabled: boolean }>()
+const props = defineProps<{ modelValue: boolean; comic: Comic | null; metadata: Metadata | null; disabled: boolean; modelConfiguration: ModelConfiguration }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'apply', value: ScrapeApplication): void
+  (e: 'model-settings'): void
 }>()
 const url = ref('')
 const apiKey = ref('')
 const affiliateId = ref('')
 const reading = ref(false)
 const error = ref('')
-const preview = ref<ScrapePreview | null>(null)
-const baseline = ref<Metadata | null>(null)
+const sitePreview = ref<ScrapePreview | null>(null)
+const siteBaseline = ref<Metadata | null>(null)
+const modelPreview = ref<ModelAssistPreview | null>(null)
+const modelBaseline = ref<Metadata | null>(null)
+const previewMode = ref<'site' | 'model'>('site')
+const preview = computed(() => previewMode.value === 'site' ? sitePreview.value : modelPreview.value)
+const baseline = computed(() => previewMode.value === 'site' ? siteBaseline.value : modelBaseline.value)
+const sourceUrl = computed(() => previewMode.value === 'site' ? sitePreview.value?.sourceUrl || '' : '')
+const profileId = ref('')
+const includeSite = ref(true)
+const assisting = ref(false)
+const working = computed(() => reading.value || assisting.value)
+const selectedProfile = computed(() => props.modelConfiguration.profiles.find(profile => profile.id === profileId.value))
 const selectedKeys = ref<string[]>([])
 const sourceSelected = ref(false)
 const overwriteConfirmed = ref(false)
@@ -48,14 +60,15 @@ function sourceKey(value: string) {
 }
 const provider = computed(() => providerForUrl(url.value))
 const existingLinks = computed(() => [...new Set((props.metadata?.web || []).map(value => value.trim()).filter(value => providerForUrl(value)))])
-const canRead = computed(() => !!provider.value && !reading.value && !props.disabled && (provider.value !== 'dmm' || (!!apiKey.value.trim() && !!affiliateId.value.trim())))
+const canRead = computed(() => !!provider.value && !working.value && !props.disabled && (provider.value !== 'dmm' || (!!apiKey.value.trim() && !!affiliateId.value.trim())))
 const stale = computed(() => !!preview.value && !!baseline.value && JSON.stringify(props.metadata) !== JSON.stringify(baseline.value))
-const sourceAlreadyPresent = computed(() => !!preview.value && (props.metadata?.web || []).some(value => sourceKey(value) === sourceKey(preview.value!.sourceUrl)))
-const sourceWillApply = computed(() => !!preview.value && sourceSelected.value && !sourceAlreadyPresent.value)
-const blocked = computed(() => props.disabled || reading.value || stale.value)
+const sourceAlreadyPresent = computed(() => !!sourceUrl.value && (props.metadata?.web || []).some(value => sourceKey(value) === sourceKey(sourceUrl.value)))
+const sourceWillApply = computed(() => !!sourceUrl.value && sourceSelected.value && !sourceAlreadyPresent.value)
+const blocked = computed(() => props.disabled || working.value || stale.value)
+const canAssist = computed(() => !!selectedProfile.value && !!props.comic && !!props.metadata && !working.value && !props.disabled)
 
 const fieldLabels: Partial<Record<ScrapeFieldKey, string>> = {
-  title: '作品名称', authors: '作者', pencillers: '独立绘画者', publisher: '出版方 / 发行社团',
+  title: '作品名称', authors: '作者', pencillers: '独立绘画者', publisher: '出版方 / 发行社团', translator: '译者 / 汉化组',
   original_works: '原作', characters: '角色', genre: '内容类型', tags: '题材与属性标签',
   language: '当前版本语言', release_type: '发行性质', release_platforms: '发布平台', summary: '作品简介', age_rating: '年龄分级',
 }
@@ -117,13 +130,13 @@ function normalizedDate(fields: ScrapeFields): Pick<Metadata, 'year' | 'month' |
   }
   return { year: String(Number(year)), month: month ? String(Number(month)) : '', day: day ? String(Number(day)) : '' }
 }
-function sanitize(result: ScrapePreview, secrets: string[]): ScrapePreview {
-  if (!result || !providerHosts[result.provider] || providerForUrl(result.sourceUrl) !== result.provider || !result.fields || typeof result.fields !== 'object') throw new Error('读取结果缺少有效来源，请重新读取。')
+function sanitizeFields(raw: ScrapeFields, notices: string[], secrets: string[] = []) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('候选结果无法识别，请重试。')
   const fields: ScrapeFields = {}
-  const warnings = Array.isArray(result.warnings) ? result.warnings.filter(value => typeof value === 'string').map(value => redact(value, secrets)) : []
+  const warnings = Array.isArray(notices) ? notices.filter(value => typeof value === 'string').map(value => redact(value, secrets)) : []
   for (const key of scrapeFieldKeys) {
     if (dateFields.has(key)) continue
-    const value = result.fields[key]
+    const value = raw[key]
     const normalized = arrayFields.has(key)
       ? Array.isArray(value) ? [...new Set(value.filter(item => typeof item === 'string').map(item => item.trim()).filter(item => !blank(item)))] : undefined
       : typeof value === 'string' ? value.trim() : undefined
@@ -134,30 +147,44 @@ function sanitize(result: ScrapePreview, secrets: string[]): ScrapePreview {
     if (key === 'original_works' && Array.isArray(normalized) && normalized.length > 1) { warnings.push('来源列出多个原作，请在资料面板中人工核对。'); continue }
     ;(fields as Record<string, unknown>)[key] = normalized
   }
-  if (['year', 'month', 'day'].some(key => !blank((result.fields as Record<string, unknown>)[key]))) {
-    const date = normalizedDate(result.fields)
+  if (['year', 'month', 'day'].some(key => !blank((raw as Record<string, unknown>)[key]))) {
+    const date = normalizedDate(raw)
     if (date) Object.assign(fields, date)
     else warnings.push('来源的发行日期不完整或无效，未提供日期应用，以免混合已有年月日。')
   }
-  return { provider: result.provider, sourceUrl: result.sourceUrl, fields, warnings: [...new Set(warnings)] }
+  return { fields, warnings: [...new Set(warnings)] }
+}
+function sanitize(result: ScrapePreview, secrets: string[]): ScrapePreview {
+  if (!result || !providerHosts[result.provider] || providerForUrl(result.sourceUrl) !== result.provider) throw new Error('读取结果缺少有效来源，请重新读取。')
+  return { provider: result.provider, sourceUrl: result.sourceUrl, ...sanitizeFields(result.fields, result.warnings, secrets) }
+}
+function resetSelection() {
+  selectedKeys.value = []
+  sourceSelected.value = false
+  overwriteConfirmed.value = false
+}
+function selectPreview(mode: typeof previewMode.value) {
+  previewMode.value = mode
+  resetSelection()
 }
 function clearResult() {
   request++
   reading.value = false
-  preview.value = null
-  baseline.value = null
-  selectedKeys.value = []
-  sourceSelected.value = false
-  overwriteConfirmed.value = false
+  assisting.value = false
+  sitePreview.value = null
+  siteBaseline.value = null
+  modelPreview.value = null
+  modelBaseline.value = null
+  selectPreview('site')
+  includeSite.value = true
   error.value = ''
 }
 function close() { emit('update:modelValue', false) }
 function compareAgain() {
   if (!props.metadata) return
-  baseline.value = clone(props.metadata)
-  selectedKeys.value = []
-  sourceSelected.value = false
-  overwriteConfirmed.value = false
+  if (previewMode.value === 'site') siteBaseline.value = clone(props.metadata)
+  else modelBaseline.value = clone(props.metadata)
+  resetSelection()
 }
 function selectEmptyFields() { selectedKeys.value = rows.value.filter(row => !row.same && !row.overwrite).map(row => row.key) }
 function clearSelection() { selectedKeys.value = []; sourceSelected.value = false }
@@ -178,8 +205,8 @@ async function read() {
       new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('读取超时，请稍后重试。')), 45000) }),
     ])
     if (currentRequest !== request || !props.modelValue || props.comic?.id !== targetId || !props.metadata) return
-    preview.value = sanitize(result, secrets)
-    baseline.value = clone(props.metadata)
+    sitePreview.value = sanitize(result, secrets)
+    siteBaseline.value = clone(props.metadata)
   } catch (reason) {
     if (currentRequest === request && props.modelValue) error.value = redact(errorMessage(reason), secrets)
   } finally {
@@ -187,18 +214,55 @@ async function read() {
     if (currentRequest === request) reading.value = false
   }
 }
+function modelEvidence(source: ScrapeFields & Partial<Pick<Metadata, 'original_title' | 'chinese_title'>>) {
+  const excluded = new Set<ScrapeFieldKey>(['summary', 'age_rating', 'original_works', 'characters'])
+  const keys = [...scrapeFieldKeys.filter(key => !excluded.has(key)), 'original_title', 'chinese_title'] as const
+  return Object.fromEntries(keys.filter(key => !blank(source[key])).map(key => [key, source[key]]))
+}
+async function assist() {
+  const profile = selectedProfile.value
+  if (!canAssist.value || !props.metadata || !profile || props.comic?.id !== targetId) return
+  const currentRequest = ++request
+  const draft = clone(props.metadata)
+  const metadata = modelEvidence(draft)
+  const siteFields = includeSite.value && sitePreview.value ? modelEvidence(sitePreview.value.fields) : undefined
+  assisting.value = true
+  error.value = ''
+  try {
+    const result = await invoke<ModelAssistPreview>('model_assist_preview', {
+      id: targetId, profile_id: profile.id, metadata, ...(siteFields ? { siteFields } : {}),
+    })
+    if (request !== currentRequest || !props.modelValue || props.comic?.id !== targetId) return
+    modelPreview.value = { ...sanitizeFields(result.fields, result.warnings), model_name: result.model_name || profile.name }
+    modelBaseline.value = draft
+    selectPreview('model')
+  } catch (reason) {
+    if (request === currentRequest && props.modelValue) error.value = errorMessage(reason)
+  } finally {
+    if (request === currentRequest) assisting.value = false
+  }
+}
 function apply() {
   if (!canApply.value || !baseline.value || props.comic?.id !== targetId) return
   const patch = Object.assign({}, ...selectedRows.value.map(row => row.patch)) as ScrapeFields
-  emit('apply', { id: targetId, baseline: clone(baseline.value), patch: clone(patch), ...(sourceWillApply.value ? { sourceUrl: preview.value!.sourceUrl } : {}) })
+  emit('apply', { id: targetId, baseline: clone(baseline.value), patch: clone(patch), ...(sourceWillApply.value ? { sourceUrl: sourceUrl.value } : {}) })
 }
 watch(url, () => clearResult(), { flush: 'sync' })
+function ensureProfile() {
+  const config = props.modelConfiguration
+  if (!config.profiles.some(profile => profile.id === profileId.value)) {
+    profileId.value = config.profiles.find(profile => profile.id === config.default_id)?.id || config.profiles[0]?.id || ''
+  }
+}
+watch(() => props.modelConfiguration, ensureProfile, { deep: true })
 watch(provider, () => { apiKey.value = ''; affiliateId.value = '' }, { flush: 'sync' })
 watch(selectedKeys, () => { overwriteConfirmed.value = false }, { deep: true, flush: 'sync' })
 watch(() => props.modelValue, visible => {
   clearResult()
   apiKey.value = ''; affiliateId.value = ''
   targetId = visible ? props.comic?.id || '' : ''
+  profileId.value = ''
+  if (visible) ensureProfile()
   url.value = visible ? existingLinks.value[0] || '' : ''
 }, { flush: 'sync', immediate: true })
 watch(() => props.comic?.id, id => { if (props.modelValue && id !== targetId) close() }, { flush: 'sync' })
@@ -206,36 +270,60 @@ onBeforeUnmount(() => { clearResult(); apiKey.value = ''; affiliateId.value = ''
 </script>
 
 <template>
-  <el-dialog :model-value="modelValue" @update:model-value="emit('update:modelValue', $event)" title="从链接读取资料" width="min(980px, 96vw)" top="4vh" class="metadata-scrape-dialog" :close-on-click-modal="false" destroy-on-close>
-    <div class="scrape-intro"><strong :title="metadata ? displayTitle(metadata) : ''">{{ metadata ? displayTitle(metadata) : '当前作品' }}</strong><p>请确认链接对应这本作品。读取后逐项核对，仅把勾选内容应用到当前草稿。</p></div>
+  <el-dialog :model-value="modelValue" @update:model-value="emit('update:modelValue', $event)" title="读取作品资料" width="min(980px, 96vw)" top="4vh" class="metadata-scrape-dialog" :close-on-click-modal="false" destroy-on-close>
+    <div class="scrape-intro"><strong :title="metadata ? displayTitle(metadata) : ''">{{ metadata ? displayTitle(metadata) : '当前作品' }}</strong><p>可从网站读取或用模型整理资料。勾选核对过的字段，应用到当前草稿。</p></div>
     <el-form label-position="top" class="scrape-form" @submit.prevent="read">
       <el-form-item label="作品详情页链接">
-        <div class="scrape-url-row"><el-select v-if="existingLinks.length" data-testid="scrape-existing-url" :model-value="existingLinks.includes(url) ? url : ''" @update:model-value="url = String($event)" :disabled="reading" placeholder="选择已有链接"><el-option v-for="link in existingLinks" :key="link" :value="link" :label="link" /></el-select><el-input data-testid="scrape-url" v-model="url" :disabled="reading" clearable autocomplete="off" placeholder="粘贴 E-Hentai、nhentai、DLsite 或 DMM / FANZA 的作品详情页链接" @keyup.enter="read" /><el-button data-testid="scrape-read" type="primary" :icon="Search" :loading="reading" :disabled="!canRead" @click="read">{{ reading ? '读取中' : '读取资料' }}</el-button></div>
-        <p class="scrape-help">{{ provider ? `当前来源：${providerNames[provider]}` : url.trim() ? '暂不支持这个地址；请填写上述站点的 http(s) 作品详情页链接。' : '使用已确认的作品链接；当前版本不自动搜索或匹配作品。' }}</p>
+        <div class="scrape-url-row"><el-select v-if="existingLinks.length" data-testid="scrape-existing-url" :model-value="existingLinks.includes(url) ? url : ''" @update:model-value="url = String($event)" :disabled="working" placeholder="选择已有链接"><el-option v-for="link in existingLinks" :key="link" :value="link" :label="link" /></el-select><el-input data-testid="scrape-url" v-model="url" :disabled="working" clearable autocomplete="off" placeholder="粘贴 E-Hentai、nhentai、DLsite 或 DMM / FANZA 的作品详情页链接" @keyup.enter="read" /><el-button data-testid="scrape-read" type="primary" :icon="Search" :loading="reading" :disabled="!canRead" @click="read">{{ reading ? '读取中' : '读取资料' }}</el-button></div>
+        <p class="scrape-help">{{ provider ? `当前来源：${providerNames[provider]}` : url.trim() ? '暂不支持这个地址；请填写上述站点的 http(s) 作品详情页链接。' : '填入已确认的作品链接，即可获取网站资料。' }}</p>
       </el-form-item>
       <div v-if="provider === 'nhentai' || provider === 'dmm'" class="scrape-credentials">
-        <el-form-item :label="provider === 'dmm' ? 'API ID' : 'API Key（可选）'" :required="provider === 'dmm'"><el-input data-testid="scrape-api-key" v-model="apiKey" type="password" autocomplete="new-password" :disabled="reading" :placeholder="provider === 'dmm' ? '输入 DMM API ID' : '公开详情可匿名读取，受访问限制时再填写'" /></el-form-item>
-        <el-form-item v-if="provider === 'dmm'" label="Affiliate ID" required><el-input data-testid="scrape-affiliate-id" v-model="affiliateId" type="password" autocomplete="new-password" :disabled="reading" placeholder="输入 DMM Affiliate ID" /></el-form-item>
+        <el-form-item :label="provider === 'dmm' ? 'API ID' : 'API Key（可选）'" :required="provider === 'dmm'"><el-input data-testid="scrape-api-key" v-model="apiKey" type="password" autocomplete="new-password" :disabled="working" :placeholder="provider === 'dmm' ? '输入 DMM API ID' : '公开详情可匿名读取，受访问限制时再填写'" /></el-form-item>
+        <el-form-item v-if="provider === 'dmm'" label="Affiliate ID" required><el-input data-testid="scrape-affiliate-id" v-model="affiliateId" type="password" autocomplete="new-password" :disabled="working" placeholder="输入 DMM Affiliate ID" /></el-form-item>
         <p class="scrape-help">凭据仅用于当前弹窗的读取，关闭后清除；不保存在本机配置或漫画资料中。</p>
       </div>
     </el-form>
+    <section class="scrape-model" aria-label="模型辅助">
+      <div class="scrape-model-header">
+        <strong><el-icon><MagicStick /></el-icon>模型辅助</strong>
+        <el-button data-testid="scrape-model-settings" link :disabled="working" @click="emit('model-settings')">模型管理</el-button>
+      </div>
+      <template v-if="modelConfiguration.profiles.length">
+        <div class="scrape-model-controls">
+          <el-select data-testid="scrape-model-profile" v-model="profileId" :disabled="working" aria-label="辅助模型" placeholder="选择模型">
+            <el-option v-for="profile in modelConfiguration.profiles" :key="profile.id" :label="profile.name" :value="profile.id" />
+          </el-select>
+          <el-checkbox v-if="sitePreview && Object.keys(sitePreview.fields).length" data-testid="scrape-model-use-site" v-model="includeSite" :disabled="working">加入网站资料</el-checkbox>
+          <el-button data-testid="scrape-model-run" :icon="MagicStick" :loading="assisting" :disabled="!canAssist" @click="assist">生成候选</el-button>
+        </div>
+        <p v-if="selectedProfile" class="scrape-help">生成候选时，草稿中的标题、作者、分类等文字字段，以及已勾选的网站资料会发往 <b>{{ selectedProfile.name }}</b> 的服务（{{ selectedProfile.base_url }}）。请核对模型建议。</p>
+      </template>
+      <p v-else class="scrape-help">在模型管理中添加服务，即可根据作品名称、草稿或网站资料生成候选。</p>
+    </section>
     <el-alert v-if="disabled" title="当前作品暂不可编辑，请先处理任务、连接状态或远端资料冲突。" type="warning" :closable="false" show-icon class="scrape-alert" />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon class="scrape-alert" data-testid="scrape-error" />
-    <p v-if="reading" class="scrape-reading" role="status">正在读取文字资料… 可以关闭弹窗，迟到的结果不会应用。</p>
+    <p v-if="working" class="scrape-reading" role="status">{{ reading ? '正在读取网站资料…' : '正在生成模型候选…' }}</p>
     <template v-if="preview">
-      <div class="scrape-result-source" data-testid="scrape-source"><span>{{ providerNames[preview.provider] }}</span><span :title="preview.sourceUrl">{{ preview.sourceUrl }}</span></div>
+      <div v-if="sitePreview && modelPreview" class="scrape-preview-tabs" aria-label="候选来源">
+        <el-button data-testid="scrape-preview-site" :type="previewMode === 'site' ? 'primary' : 'default'" size="small"
+          :aria-pressed="previewMode === 'site'" :disabled="working" @click="selectPreview('site')">网站资料</el-button>
+        <el-button data-testid="scrape-preview-model" :type="previewMode === 'model' ? 'primary' : 'default'" size="small"
+          :aria-pressed="previewMode === 'model'" :disabled="working" @click="selectPreview('model')">模型候选</el-button>
+      </div>
+      <div v-if="previewMode === 'site' && sitePreview" class="scrape-result-source" data-testid="scrape-source"><span>{{ providerNames[sitePreview.provider] }}</span><span :title="sitePreview.sourceUrl">{{ sitePreview.sourceUrl }}</span></div>
+      <div v-else-if="modelPreview" class="scrape-result-source" data-testid="scrape-model-result"><span>模型候选</span><span :title="modelPreview.model_name">{{ modelPreview.model_name }}</span></div>
       <div v-if="preview.warnings.length" class="scrape-warnings" data-testid="scrape-warnings"><p v-for="(warning, index) in preview.warnings" :key="index">{{ warning }}</p></div>
       <div v-if="stale" class="scrape-stale" data-testid="scrape-stale"><span>当前草稿已变化，请更新对照后重新勾选。</span><el-button size="small" @click="compareAgain">更新对照</el-button></div>
       <div class="scrape-selection-tools"><span>{{ rows.filter(row => !row.same).length }} 项资料可核对</span><div><el-button data-testid="scrape-select-empty" link :disabled="blocked" @click="selectEmptyFields">仅勾选空字段</el-button><el-button data-testid="scrape-clear-selection" link :disabled="blocked" @click="clearSelection">取消勾选</el-button></div></div>
       <div class="scrape-comparison" role="table" aria-label="读取资料与当前草稿对照" data-testid="scrape-comparison">
-        <div class="scrape-comparison-head" role="row"><span role="columnheader">应用字段</span><span role="columnheader">当前草稿</span><span role="columnheader">读取结果</span></div>
+        <div class="scrape-comparison-head" role="row"><span role="columnheader">应用字段</span><span role="columnheader">当前草稿</span><span role="columnheader">{{ previewMode === 'site' ? '读取结果' : '模型候选' }}</span></div>
         <div v-for="row in rows" :key="row.key" class="scrape-field-row" :class="{ 'is-same': row.same }" role="row" data-testid="scrape-field-row" :data-field="row.key">
           <div class="scrape-field-name" role="cell"><el-checkbox :data-testid="`scrape-field-${row.key}`" :model-value="selectedKeys.includes(row.key)" :disabled="blocked || row.same" @update:model-value="selectedKeys = $event ? [...selectedKeys.filter(key => key !== row.key), row.key] : selectedKeys.filter(key => key !== row.key)">{{ row.label }}</el-checkbox><small>{{ row.same ? '与草稿相同' : row.overwrite ? '替换已有值' : '补充空字段' }}</small></div>
-          <div class="scrape-value" role="cell"><span class="scrape-mobile-label">当前草稿</span><p>{{ row.before }}</p></div><div class="scrape-value scrape-incoming-value" role="cell"><span class="scrape-mobile-label">读取结果</span><p>{{ row.after }}</p><small v-if="row.note">{{ row.note }}</small></div>
+          <div class="scrape-value" role="cell"><span class="scrape-mobile-label">当前草稿</span><p>{{ row.before }}</p></div><div class="scrape-value scrape-incoming-value" role="cell"><span class="scrape-mobile-label">{{ previewMode === 'site' ? '读取结果' : '模型候选' }}</span><p>{{ row.after }}</p><small v-if="row.note">{{ row.note }}</small></div>
         </div>
-        <div v-if="!rows.length" class="scrape-no-fields" data-testid="scrape-empty-result">没有读到可应用的元数据。可以核对链接或改用其他来源；来源链接仍可单独加入草稿。</div>
+        <div v-if="!rows.length" class="scrape-no-fields" data-testid="scrape-empty-result">{{ previewMode === 'site' ? '没有读到可应用的元数据。可以核对链接或改用其他来源，来源链接仍可单独加入草稿。' : '模型没有提供可应用的字段。可先补充网站资料再试。' }}</div>
       </div>
-      <div class="scrape-source-choice"><el-checkbox data-testid="scrape-append-source" v-model="sourceSelected" :disabled="blocked || sourceAlreadyPresent">{{ sourceAlreadyPresent ? '来源链接已在当前草稿中' : '将本次来源链接追加到草稿' }}</el-checkbox><p>保留已有链接，不会替换来源列表。</p></div>
+      <div v-if="sourceUrl" class="scrape-source-choice"><el-checkbox data-testid="scrape-append-source" v-model="sourceSelected" :disabled="blocked || sourceAlreadyPresent">{{ sourceAlreadyPresent ? '来源链接已在当前草稿中' : '将本次来源链接追加到草稿' }}</el-checkbox><p>保留已有链接，不会替换来源列表。</p></div>
       <div v-if="overwriteRows.length" class="scrape-overwrite-confirm"><el-checkbox data-testid="scrape-confirm-overwrite" v-model="overwriteConfirmed" :disabled="blocked">已核对，同意替换 {{ overwriteRows.length }} 项已有资料</el-checkbox><p>{{ overwriteRows.map(row => row.label).join('、') }}</p></div>
     </template>
     <template #footer><div class="scrape-footer"><span>应用后请保存草稿，人工核对后再审核。</span><div><el-button data-testid="scrape-close" @click="close">取消</el-button><el-button data-testid="scrape-apply" type="primary" :icon="Check" :disabled="!canApply" @click="apply">应用 {{ applyCount }} 项到草稿</el-button></div></div></template>
@@ -257,6 +345,17 @@ onBeforeUnmount(() => { clearResult(); apiKey.value = ''; affiliateId.value = ''
 .scrape-help { width: 100%; margin: 6px 0 0; color: #83917e; font-size: 11px; line-height: 1.6; }
 .scrape-credentials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; padding: 12px; border: 1px solid #e5ebe1; border-radius: 7px; background: #f8faf6; margin-bottom: 12px; }
 .scrape-credentials > .scrape-help { grid-column: 1 / -1; margin-top: 0; }
+.scrape-model { margin: 4px 0 12px; padding: 10px 12px; border: 1px solid #e5ebe1; border-radius: 7px; background: #f8faf6; }
+.scrape-model-header, .scrape-model-controls { display: flex; align-items: center; gap: 10px; }
+.scrape-model-header { justify-content: space-between; }
+.scrape-model-header strong { display: inline-flex; align-items: center; gap: 6px; color: #3c5741; font-size: 13px; }
+.scrape-model-header .el-button { margin: 0; }
+.scrape-model-controls { flex-wrap: wrap; margin-top: 6px; }
+.scrape-model-controls > .el-select { width: min(240px, 100%); }
+.scrape-model-controls > .el-button { margin: 0 0 0 auto; }
+.scrape-model .scrape-help { overflow-wrap: anywhere; }
+.scrape-preview-tabs { display: flex; gap: 8px; margin-top: 12px; }
+.scrape-preview-tabs .el-button { margin: 0; }
 .scrape-alert { margin: 0 0 10px; }
 .scrape-alert :deep(.el-alert__title) { font-size: 12px; overflow-wrap: anywhere; }
 .scrape-reading { color: #7c8d74; font-size: 12px; margin: 14px 0; }

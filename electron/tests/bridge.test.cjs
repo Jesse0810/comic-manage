@@ -179,6 +179,7 @@ async function mainProcessFixture(options = {}) {
   const fakeRequire = name => {
     if (name === 'electron') return fakeElectron
     if (name === './bridge.cjs') return {ServiceBridge:FakeBridge, validateCall}
+    if (name === './model-config.cjs') return require('../model-config.cjs')
     if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore, normalizeKomgaUrl}
     if (name === 'node:fs/promises') return {
       ...require(name), stat: async location => { statPaths.push(location); return {isDirectory:() => true} },

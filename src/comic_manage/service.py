@@ -20,6 +20,8 @@ from typing import Callable, TextIO
 from .metadata import AGE_RATINGS, GENRES, METADATA_RULES_VERSION, Metadata, to_comicinfo
 from .scrape import scrape_preview
 from .scrape_http import ScrapeError
+from .model_assist import assist_preview, test_profile
+from .model_transport import ModelTransportError
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
@@ -179,7 +181,7 @@ def _folder_link(path: Path) -> bool:
 
 
 class ComicService:
-    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview",
+    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview", "model_test", "model_assist",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
                          "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
 
@@ -318,6 +320,27 @@ class ComicService:
                 raise ServiceError(str(error), error.code) from None
             except (OSError, ValueError, KeyError, TypeError, RecursionError):
                 raise ServiceError("无法读取该站点的作品资料，请核对链接或稍后重试。", "SCRAPE_RESPONSE") from None
+        if method in ("model_test", "model_assist"):
+            allowed = {"profile", "api_key"}
+            if method == "model_assist":
+                allowed.update(("id", "metadata", "siteFields"))
+            if set(params) - allowed:
+                raise ServiceError("模型请求参数无效。")
+            profile, api_key = params.get("profile"), params.get("api_key", "")
+            if not isinstance(profile, dict) or not isinstance(api_key, str):
+                raise ServiceError("模型接口或密钥格式无效。")
+            try:
+                if method == "model_test":
+                    started = time.monotonic()
+                    result = test_profile(profile, api_key, cancelled=cancel)
+                    return {**result, "latency_ms": round((time.monotonic() - started) * 1000)}
+                metadata, site = params.get("metadata"), params.get("siteFields")
+                if not isinstance(metadata, dict) or (site is not None and not isinstance(site, dict)):
+                    raise ServiceError("作品资料无效。")
+                self.repo.get(_string(params.get("id"), "作品 id"))
+                return assist_preview(profile, api_key, metadata, site_fields=site, cancelled=cancel)
+            except ModelTransportError as error:
+                raise ServiceError(str(error), error.code) from None
         if method == "scan":
             return self.scan(params, cancel)
         if method == "import":

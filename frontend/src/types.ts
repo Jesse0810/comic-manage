@@ -16,10 +16,14 @@ export interface Metadata {
   language: string; age_rating: string; summary: string; year: string; month: string; cover_index: number; original_xml: string
 }
 export type ScrapeProvider = 'ehentai' | 'nhentai' | 'dlsite' | 'dmm'
-export const scrapeFieldKeys = ['title', 'authors', 'pencillers', 'publisher', 'original_works', 'characters', 'genre', 'tags', 'language', 'release_type', 'release_platforms', 'year', 'month', 'day', 'summary', 'age_rating'] as const
+export const scrapeFieldKeys = ['title', 'authors', 'pencillers', 'publisher', 'translator', 'original_works', 'characters', 'genre', 'tags', 'language', 'release_type', 'release_platforms', 'year', 'month', 'day', 'summary', 'age_rating'] as const
 export type ScrapeFieldKey = typeof scrapeFieldKeys[number]
 export type ScrapeFields = Partial<Pick<Metadata, ScrapeFieldKey>>
 export interface ScrapePreview { provider: ScrapeProvider; sourceUrl: string; fields: ScrapeFields; warnings: string[] }
+export type ModelProtocol = 'openai' | 'openai-responses' | 'ollama' | 'anthropic' | 'gemini'
+export interface ModelProfile { id: string; name: string; provider: ModelProtocol; base_url: string; model: string; has_key: boolean }
+export interface ModelConfiguration { profiles: ModelProfile[]; default_id: string }
+export interface ModelAssistPreview { fields: ScrapeFields; warnings: string[]; model_name: string }
 export interface ScrapeApplication { id: string; baseline: Metadata; patch: ScrapeFields; sourceUrl?: string }
 export interface Comic {
   id: string; source: string; kind: 'folder' | 'cbz' | 'komga'; fingerprint: string; page_count: number

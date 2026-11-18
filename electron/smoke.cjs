@@ -10,6 +10,7 @@ const path = require('node:path')
 const assert = require('node:assert/strict')
 const { createKomgaFixture } = require('./tests/komga-http-fixture.cjs')
 const { deflateSync } = require('node:zlib')
+const { createServer } = require('node:http')
 
 const root = path.resolve(__dirname, '..')
 let desktop
@@ -139,6 +140,75 @@ async function run() {
     await waitFor("![...document.querySelectorAll('.el-select__popper')].some(item=>item.getClientRects().length)", 'multi dropdown closed')
   }
 
+  async function verifyModelAssist() {
+    const received = []
+    const testKey = 'synthetic-model-test-key'
+    const modelServer = createServer(async (req, res) => {
+      const body = []
+      for await (const chunk of req) body.push(chunk)
+      const input = JSON.parse(Buffer.concat(body).toString('utf8'))
+      received.push({ path: req.url, authorization: req.headers.authorization, input })
+      const isProbe = received.length === 1
+      const content = JSON.stringify(isProbe ? { status: 'ok' } : { fields: { title: '春日旅途' } })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content } }] }))
+    })
+    await new Promise((resolve, reject) => { modelServer.once('error', reject); modelServer.listen(0, '127.0.0.1', resolve) })
+    try {
+      await toggle('model-settings-open')
+      await waitFor("document.querySelector('[data-testid=model-profile-new]')", 'model configuration')
+      const name = '测试本机模型'
+      await toggle('model-profile-new')
+      await setField('model-profile-name', name)
+      const base = 'http://127.0.0.1:' + modelServer.address().port + '/v1'
+      await setField('model-profile-endpoint', base)
+      await setField('model-profile-model', 'fixture-model')
+      await setField('model-profile-key', testKey)
+      await toggle('model-profile-test')
+      await waitFor("document.querySelector('[data-testid=model-profile-result]')?.textContent.includes('连接成功')", 'model request to a real local server')
+      assert.deepEqual(await call('model_config_get'), { profiles: [], default_id: '' })
+      await toggle('model-profile-save')
+      await waitFor("document.querySelector('[data-testid=model-profile-option]')?.textContent.includes('测试本机模型')", 'saved model profile')
+      const saved = await call('model_config_get')
+      assert.equal(saved.profiles[0].id, saved.default_id)
+      assert.equal(saved.profiles[0].has_key, true)
+      assert(!JSON.stringify(saved).includes(testKey))
+      const onDisk = await fs.readFile(path.join(dataDir, 'model-connections.json'), 'utf8')
+      assert(!onDisk.includes(testKey))
+      assert.match(onDisk, /encrypted_key/)
+      await delay(300)
+      await capture('ComicManage-Electron-model-management.png')
+      await toggle('model-settings-close')
+      await waitFor("!document.querySelector('[data-testid=model-profile-test]')?.getClientRects().length", 'model settings closed')
+      await toggle('scrape-open')
+      await waitFor("document.querySelector('[data-testid=scrape-model-run]')?.getClientRects().length", 'assist available without a selected link')
+      await toggle('scrape-model-run')
+      await waitFor("document.querySelector('[data-testid=scrape-field-title]')?.getClientRects().length", 'model candidates')
+      assert.equal(received.length, 2)
+      assert(received.every(item => item.path === '/v1/chat/completions' && item.authorization === 'Bearer ' + testKey))
+      const sent = received[1].input.messages.at(-1).content
+      assert(sent.includes('春日旅途·校订'))
+      assert(!sent.includes('用于验证新界面的合成样本'))
+      assert(!sent.includes('example.com'))
+      assert(!sent.includes('漫画源'))
+      assert(!sent.includes(id))
+      assert.equal(await evaluate("!!document.querySelector('[data-testid=scrape-field-title] input:checked')"), false)
+      await toggle('scrape-field-title')
+      await waitFor("document.querySelector('[data-testid=scrape-confirm-overwrite]')", 'model overwrite confirmation')
+      assert.equal(await evaluate("document.querySelector('[data-testid=scrape-apply]').disabled"), true)
+      await toggle('scrape-confirm-overwrite')
+      await delay(300)
+      await capture('ComicManage-Electron-model-candidates.png')
+      await toggle('scrape-apply')
+      await waitFor("!document.querySelector('[data-testid=scrape-apply]')?.getClientRects().length", 'model candidates applied to the draft')
+      assert.equal(await evaluate("(document.querySelector('input[data-testid=title]') || document.querySelector('[data-testid=title] input')).value"), '春日旅途')
+      assert.equal((await call('bootstrap')).comics.find(book => book.id === id).metadata.title, '春日旅途')
+      await setField('title', '春日旅途·校订')
+    } finally {
+      await new Promise(resolve => modelServer.close(resolve))
+    }
+  }
+
   await waitFor("document.body.innerText.includes('从第一本漫画开始')", 'empty state')
   assert.equal(await evaluate("document.querySelectorAll('[data-testid=komga-settings]').length"), 1)
   assert.equal(await evaluate("document.querySelector('[data-testid=komga-pull]')"), null)
@@ -234,6 +304,7 @@ async function run() {
   } finally {
     desktop.bridge.call = originalBridgeCall
   }
+  await verifyModelAssist()
   await toggle('editor-layout-toggle')
   await waitFor("document.querySelector('.workspace-editor-expanded') && !document.querySelector('.library-panel').getClientRects().length", 'expanded editor hides the list')
   assert.equal(await evaluate("(document.querySelector('input[data-testid=title]') || document.querySelector('[data-testid=title] input')).value"), '春日旅途·校订')
@@ -890,7 +961,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)
