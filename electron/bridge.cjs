@@ -6,7 +6,7 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
@@ -73,6 +73,15 @@ function validateCall(method, params) {
   if (method === 'scan') strings('roots', false)
   if (['import', 'prepare_import'].includes(method)) strings('paths')
   if (method === 'browse_folders') string('path')
+  if (method === 'scrape_preview') {
+    if (Object.keys(params).some(key => !['url', 'apiKey', 'affiliateId'].includes(key))
+        || typeof params.url !== 'string' || !params.url || params.url.length > 2048) throw new Error('请提供作品的 HTTPS 链接。')
+    for (const key of ['apiKey', 'affiliateId']) {
+      if (params[key] !== undefined && (typeof params[key] !== 'string' || !/^[A-Za-z0-9_.=+/~-]{1,512}$/.test(params[key]))) {
+        throw new Error('站点 API 凭据格式无效。')
+      }
+    }
+  }
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
   if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync', 'prepare_review_sync', 'komga_jobs_retry'].includes(method)) strings('ids')
   if (method === 'komga_jobs' && Object.keys(params).length) throw new Error('同步任务列表不接受额外参数。')

@@ -12,8 +12,9 @@ import BatchReviewResultDialog from './components/BatchReviewResultDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
 import KomgaSyncResultDialog from './components/KomgaSyncResultDialog.vue'
 import KomgaJobsDialog from './components/KomgaJobsDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs } from './types'
-import { clone, errorMessage, customTags, collectionMode, comicGenres, komgaAutoSyncLabels } from './types'
+import MetadataScrapeDialog from './components/MetadataScrapeDialog.vue'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs, ScrapeApplication, ScrapeFields } from './types'
+import { clone, errorMessage, customTags, collectionMode, comicGenres, komgaAutoSyncLabels, scrapeFieldKeys } from './types'
 import { invoke } from './api'
 
 type Section = 'all' | ComicStatus
@@ -77,6 +78,7 @@ const reviewError = ref('')
 const importVisible = ref(false)
 const batchVisible = ref(false)
 const batchIds = ref<string[]>([])
+const scrapeVisible = ref(false)
 let unsubscribe: (() => void) | undefined
 
 const current = computed(() => comics.value.find(c => c.id === selectedId.value) || null)
@@ -182,6 +184,56 @@ function showResult(title: string, summary: string, details: string[] | string =
 
 function showError(message: string) {
   showResult('操作未完成', '请查看以下信息，处理后重试。', message)
+}
+
+function openMetadataScraper() {
+  if (disabled.value || !current.value || !form.value || !canEditComic(current.value) || current.value.remote?.conflict) return
+  scrapeVisible.value = true
+}
+function metadataSourceKey(value: string) {
+  try {
+    const parsed = new URL(value.trim())
+    parsed.hash = ''
+    parsed.hostname = parsed.hostname.replace(/^www\./, '')
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/'
+    return parsed.href
+  } catch { return value.trim() }
+}
+function applyScrapedMetadata(application: ScrapeApplication) {
+  const comic = current.value
+  if (disabled.value || !comic || !form.value || comic.id !== application.id || !canEditComic(comic) || comic.remote?.conflict) {
+    ElMessage.warning('当前作品已变化或暂不可编辑，请重新打开读取窗口。')
+    return
+  }
+  if (JSON.stringify(form.value) !== JSON.stringify(application.baseline)) {
+    ElMessage.warning('当前草稿已变化，请更新对照后重新勾选。')
+    return
+  }
+  const keys = scrapeFieldKeys.filter(key => Object.prototype.hasOwnProperty.call(application.patch, key))
+  const patch = Object.fromEntries(keys.map(key => [key, clone(application.patch[key])])) as ScrapeFields
+  const dateKeys = ['year', 'month', 'day']
+  if (keys.some(key => dateKeys.includes(key)) && !dateKeys.every(key => Object.prototype.hasOwnProperty.call(patch, key))) {
+    ElMessage.warning('发行日期需按年、月、日整组核对，请重新读取。')
+    return
+  }
+  const next = { ...clone(form.value), ...patch }
+  let sourceAdded = false
+  if (application.sourceUrl) {
+    try {
+      const source = new URL(application.sourceUrl)
+      if (!['https:', 'http:'].includes(source.protocol) || source.username || source.password) throw new Error()
+      if (!next.web.some(value => metadataSourceKey(value) === metadataSourceKey(source.href))) {
+        next.web = [...next.web, source.href]
+        sourceAdded = true
+      }
+    } catch { ElMessage.warning('来源链接无效，请重新读取并核对。'); return }
+  }
+  const count = keys.filter(key => !dateKeys.includes(key)).length + Number(keys.some(key => dateKeys.includes(key))) + Number(sourceAdded)
+  if (!count) return
+  form.value = next
+  reviewed.value = false
+  scrapeVisible.value = false
+  ElMessage.success(`已应用 ${count} 项到当前草稿，请保存并重新核对审核`)
 }
 
 async function saveCurrent(): Promise<boolean> {
@@ -589,6 +641,7 @@ function sizeText(bytes: number) {
 }
 
 watch(form, () => { if (dirty.value) reviewed.value = false }, { deep: true, flush: 'sync' })
+watch(selectedId, () => { scrapeVisible.value = false }, { flush: 'sync' })
 watch([dirty, busy], () => window.comic?.setWindowState({ dirty: dirty.value, busy: busy.value }), { immediate: true })
 onMounted(async () => {
   if (!window.comic) {
@@ -651,7 +704,7 @@ onBeforeUnmount(() => unsubscribe?.())
           <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
         </section>
 
-        <DetailsPanel :metadata-rules="metadataRules" :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @resolve="resolveRemoteConflict" @error="showError">
+        <DetailsPanel :metadata-rules="metadataRules" :read-only="currentReadOnly" :library="comics" :comic="current" v-model="form" v-model:reviewed="reviewed" :busy="disabled" :dirty="dirty" @save="saveCurrent" @approve="approveCurrent" @scrape="openMetadataScraper" @resolve="resolveRemoteConflict" @error="showError">
           <template #heading-actions>
             <el-button v-if="current" data-testid="editor-layout-toggle" size="small" plain
               :icon="editorExpanded ? Back : FullScreen" :aria-pressed="editorExpanded"
@@ -671,6 +724,7 @@ onBeforeUnmount(() => unsubscribe?.())
     <KomgaSyncResultDialog v-model="komgaResultVisible" :result="komgaResult" />
     <BatchReviewDialog v-model="reviewPlanVisible" :plan="reviewPlan" :busy="disabled" @confirm="commitReviewSync" />
     <BatchReviewResultDialog v-model="reviewResultVisible" :result="reviewResult" :error="reviewError" />
+    <MetadataScrapeDialog v-model="scrapeVisible" :comic="current" :metadata="form" :disabled="disabled || currentReadOnly || !!current?.remote?.conflict" @apply="applyScrapedMetadata" />
     <ImportDialog v-model="importVisible" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
 

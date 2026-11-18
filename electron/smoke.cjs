@@ -203,6 +203,37 @@ async function run() {
   await waitFor("[...document.querySelectorAll('input')].some(item=>item.dataset.testid === 'title' && item.value === '春日旅途') || document.querySelector('[data-testid=title] input')?.value === '春日旅途'", 'details')
   await toggle('expand-metadata')
   await setField('title', '春日旅途·校订')
+  const fixtureLink = 'https://www.dlsite.com/home/work/=/product_id/RJ123456.html'
+  const originalBridgeCall = desktop.bridge.call
+  let requestedMetadata
+  desktop.bridge.call = function (method, params) {
+    if (method !== 'scrape_preview') return originalBridgeCall.call(this, method, params)
+    requestedMetadata = params
+    return Promise.resolve({
+      provider: 'dlsite', sourceUrl: fixtureLink, warnings: [],
+      fields: { title: '站点作品标题', publisher: '站点出版方', release_platforms: ['DLsite'] },
+    })
+  }
+  try {
+    await toggle('scrape-open')
+    await waitFor("document.querySelector('[data-testid=scrape-url]')", 'metadata lookup form')
+    await setField('scrape-url', fixtureLink)
+    await toggle('scrape-read')
+    await waitFor("document.querySelector('[data-testid=scrape-field-title]')", 'metadata differences')
+    assert.deepEqual(requestedMetadata, { url: fixtureLink })
+    assert.equal(await evaluate("!!document.querySelector('[data-testid=scrape-field-title] input:checked')"), false)
+    await toggle('scrape-select-empty')
+    const sourceChecked = await evaluate("!!document.querySelector('[data-testid=scrape-append-source] input:checked')")
+    if (!sourceChecked) await toggle('scrape-append-source')
+    await toggle('scrape-apply')
+    await waitFor("!document.querySelector('[data-testid=scrape-apply]')?.getClientRects().length", 'scrape preview applied to draft')
+    assert.equal(await evaluate("(document.querySelector('input[data-testid=title]') || document.querySelector('[data-testid=title] input')).value"), '春日旅途·校订')
+    assert.equal(await evaluate("document.querySelector('[data-testid=release-platforms]').textContent.includes('DLsite')"), true)
+    assert.equal(await evaluate(`(document.querySelector('textarea[data-testid=web]') || document.querySelector('[data-testid=web] textarea')).value.includes(${JSON.stringify(fixtureLink)})`), true)
+    assert.equal((await call('bootstrap')).comics.find(book => book.id === id).metadata.title, '春日旅途')
+  } finally {
+    desktop.bridge.call = originalBridgeCall
+  }
   await toggle('editor-layout-toggle')
   await waitFor("document.querySelector('.workspace-editor-expanded') && !document.querySelector('.library-panel').getClientRects().length", 'expanded editor hides the list')
   assert.equal(await evaluate("(document.querySelector('input[data-testid=title]') || document.querySelector('[data-testid=title] input')).value"), '春日旅途·校订')

@@ -15,6 +15,12 @@ export interface Metadata {
   genre: string; tags: string[]; translated: boolean; uncensored: boolean; full_color: boolean
   language: string; age_rating: string; summary: string; year: string; month: string; cover_index: number; original_xml: string
 }
+export type ScrapeProvider = 'ehentai' | 'nhentai' | 'dlsite' | 'dmm'
+export const scrapeFieldKeys = ['title', 'authors', 'pencillers', 'publisher', 'original_works', 'characters', 'genre', 'tags', 'language', 'release_type', 'release_platforms', 'year', 'month', 'day', 'summary', 'age_rating'] as const
+export type ScrapeFieldKey = typeof scrapeFieldKeys[number]
+export type ScrapeFields = Partial<Pick<Metadata, ScrapeFieldKey>>
+export interface ScrapePreview { provider: ScrapeProvider; sourceUrl: string; fields: ScrapeFields; warnings: string[] }
+export interface ScrapeApplication { id: string; baseline: Metadata; patch: ScrapeFields; sourceUrl?: string }
 export interface Comic {
   id: string; source: string; kind: 'folder' | 'cbz' | 'komga'; fingerprint: string; page_count: number
   metadata: Metadata; status: ComicStatus; output: string; warning: string; updated_at: string

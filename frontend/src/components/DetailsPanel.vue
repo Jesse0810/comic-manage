@@ -10,6 +10,7 @@ const emit = defineEmits<{
   (e: 'update:reviewed', value: boolean): void
   (e: 'save'): void
   (e: 'approve'): void
+  (e: 'scrape'): void
   (e: 'resolve', resolution: 'keep_local' | 'use_remote'): void
   (e: 'error', message: string): void
 }>()
@@ -240,7 +241,7 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
                 <div class="historical-notice-content"><p v-for="(warning, index) in historicalWarnings" :key="index">{{ warning }}</p><div v-if="legacyNames.length" class="legacy-name-note"><strong>旧版名称 · 供核对</strong><p v-for="item in legacyNames" :key="item.label">{{ item.label }}：{{ item.value }}</p></div></div>
               </details>
             </div>
-            <div class="metadata-tools"><span>未知内容可留空</span><div><el-button link data-testid="toggle-metadata-help" :aria-pressed="showFieldHelp" @click="showFieldHelp = !showFieldHelp">{{ showFieldHelp ? '收起说明' : '填写说明' }}</el-button><el-button link data-testid="expand-metadata" :disabled="busy" @click="expanded = expanded.length === sections.length ? ['basic'] : [...sections]">{{ expanded.length === sections.length ? '收起分组' : '展开全部' }}</el-button></div></div>
+            <div class="metadata-tools"><span>未知内容可留空</span><div><el-button link data-testid="scrape-open" :disabled="editDisabled || !!comic.remote?.conflict" :title="comic.remote?.conflict ? '请先解决远端资料冲突，再读取补充资料' : '使用已确认的作品详情页链接读取资料，逐项核对后应用到草稿'" @click="emit('scrape')">从链接读取</el-button><el-button link data-testid="toggle-metadata-help" :aria-pressed="showFieldHelp" @click="showFieldHelp = !showFieldHelp">{{ showFieldHelp ? '收起说明' : '填写说明' }}</el-button><el-button link data-testid="expand-metadata" :disabled="busy" @click="expanded = expanded.length === sections.length ? ['basic'] : [...sections]">{{ expanded.length === sections.length ? '收起分组' : '展开全部' }}</el-button></div></div>
             <el-form label-position="top" class="metadata-form" :disabled="editDisabled">
               <el-collapse v-model="expanded" class="metadata-sections">
                 <el-collapse-item name="basic">
@@ -404,9 +405,9 @@ onBeforeUnmount(() => { clearTimeout(xmlTimer); pageRequest++; xmlRequest++ })
 .details-tabs :deep(.el-tabs__item) { height: 35px; }
 .metadata-scroll { width: 100%; max-width: 1080px; margin: 0 auto; padding-top: 10px; }
 .metadata-scroll:not(.show-field-help) .metadata-help:not(.metadata-evidence) { display: none; }
-.metadata-tools { margin-bottom: 3px; gap: 7px; }
+.metadata-tools { margin-bottom: 3px; gap: 7px; flex-wrap: wrap; }
 .metadata-tools > span { font-size: 10px; }
-.metadata-tools > div { display: flex; align-items: center; gap: 11px; flex-shrink: 0; }
+.metadata-tools > div { display: flex; align-items: center; gap: 11px; flex-shrink: 0; margin-left: auto; }
 .metadata-tools :deep(.el-button + .el-button) { margin-left: 0; }
 .editor-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; align-items: start; }
 .editor-field-grid > :deep(.el-form-item) { min-width: 0; margin-bottom: 12px; }

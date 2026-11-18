@@ -18,6 +18,8 @@ import time
 from typing import Callable, TextIO
 
 from .metadata import AGE_RATINGS, GENRES, METADATA_RULES_VERSION, Metadata, to_comicinfo
+from .scrape import scrape_preview
+from .scrape_http import ScrapeError
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
 from .komga_client import KomgaError, test_connection
@@ -177,7 +179,7 @@ def _folder_link(path: Path) -> bool:
 
 
 class ComicService:
-    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml",
+    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
                          "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
 
@@ -305,6 +307,17 @@ class ComicService:
         if method == "source_context":
             comic = self.repo.get(_string(params.get("id"), "id"))
             return {"kind": comic.kind, "remote": comic.remote}
+        if method == "scrape_preview":
+            if set(params) - {"url", "apiKey", "affiliateId"}:
+                raise ServiceError("刮削预览只接受作品链接和站点 API 凭据。")
+            url = _string(params.get("url"), "作品链接")
+            try:
+                return scrape_preview(url, api_key=params.get("apiKey"),
+                                      affiliate_id=params.get("affiliateId"), cancel=cancel)
+            except ScrapeError as error:
+                raise ServiceError(str(error), error.code) from None
+            except (OSError, ValueError, KeyError, TypeError, RecursionError):
+                raise ServiceError("无法读取该站点的作品资料，请核对链接或稍后重试。", "SCRAPE_RESPONSE") from None
         if method == "scan":
             return self.scan(params, cancel)
         if method == "import":
