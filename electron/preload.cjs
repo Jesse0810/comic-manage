@@ -1,6 +1,6 @@
 'use strict'
 const { contextBridge, ipcRenderer } = require('electron')
-const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_assist_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_sync', 'komga_pull', 'komga_resolve', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry']
+const methods = ['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_chatgpt_status', 'model_chatgpt_sign_in', 'model_chatgpt_cancel', 'model_chatgpt_disconnect', 'model_chatgpt_models', 'model_chatgpt_usage', 'model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_assist_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_sync', 'komga_pull', 'komga_resolve', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry']
 
 contextBridge.exposeInMainWorld('comic', {
   invoke: (method, params = {}) => methods.includes(method)

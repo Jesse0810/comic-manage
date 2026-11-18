@@ -87,7 +87,8 @@ function validateCall(method, params) {
     const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
     if (Object.keys(params).some(key => !allowed.includes(key)) || !isRecord(params.profile)
         || Object.keys(params.profile).sort().join(',') !== 'base_url,model,provider'
-        || typeof params.api_key !== 'string' || !/^[\x20-\x7e]{0,4096}$/.test(params.api_key)) throw new Error('模型服务请求参数无效。')
+        || typeof params.api_key !== 'string' || !/^[\x20-\x7e]*$/.test(params.api_key)
+        || params.api_key.length > (params.profile.provider === 'chatgpt-plan' ? 16384 : 4096)) throw new Error('模型服务请求参数无效。')
     if (method === 'model_assist') {
       string('id')
       if (!isRecord(params.metadata) || (params.siteFields !== undefined && !isRecord(params.siteFields))) throw new Error('作品资料无效。')
@@ -128,7 +129,19 @@ function validateCall(method, params) {
   }
   if (method === 'batch_edit') validateBatchEdit(params.changes)
   if (method === 'plan') { strings('ids'); string('outputRoot') }
-  if (method === 'export') string('token')
+  if (method === 'export') {
+    string('token')
+    strings('ids', false)
+    strings('confirmedIds', false)
+    if (params.ids && !params.ids.length) throw new Error('请选择要生成的作品。')
+  }
+  if (['plan', 'export'].includes(method) && params.comparison !== undefined) {
+    const value = params.comparison
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).sort().join(',') !== 'apiKey,libraryId,url'
+        || Object.values(value).some(item => typeof item !== 'string' || !item.trim() || item.length > 8192
+            || /[\r\n\0]/.test(item))) throw new Error('Komga 查重连接参数无效。')
+  }
   if (method === 'export' && params.autoSync !== undefined) {
     if (!params.autoSync || typeof params.autoSync !== 'object' || Array.isArray(params.autoSync)
         || Object.keys(params.autoSync).sort().join(',') !== 'libraryId,url'

@@ -458,6 +458,8 @@ async function run() {
   await call('approve', { id: secondId, metadata: { age_rating: 'Everyone', genre: '漫画', tags: ['日常'], collection_mode: 'oneshot', series: '本地旧系列', number: '8', count: '9', volume: '3' } })
   const oneShotPlan = await call('plan', { ids: [secondId], outputRoot: output })
   assert.equal(path.basename(path.dirname(oneShotPlan.items[0].destination)), '_oneshots')
+  assert.equal(oneShotPlan.komga.state, 'checked')
+  assert.equal(oneShotPlan.items[0].komga.status, 'new')
   const oneShotResult = await call('export', { token: oneShotPlan.token })
   assert.deepEqual(oneShotResult.errors, [])
   const oneShotXml = (await call('xml', { id: secondId, metadata: {}, pageCount: 1 })).xml

@@ -219,6 +219,12 @@ function modelEvidence(source: ScrapeFields & Partial<Pick<Metadata, 'original_t
   const keys = [...scrapeFieldKeys.filter(key => !excluded.has(key)), 'original_title', 'chinese_title'] as const
   return Object.fromEntries(keys.filter(key => !blank(source[key])).map(key => [key, source[key]]))
 }
+
+async function openChatGPTUsage() {
+  try { await window.comic.invoke('model_chatgpt_usage') }
+  catch (reason) { error.value = errorMessage(reason) }
+}
+
 async function assist() {
   const profile = selectedProfile.value
   if (!canAssist.value || !props.metadata || !profile || props.comic?.id !== targetId) return
@@ -296,6 +302,10 @@ onBeforeUnmount(() => { clearResult(); apiKey.value = ''; affiliateId.value = ''
           <el-checkbox v-if="sitePreview && Object.keys(sitePreview.fields).length" data-testid="scrape-model-use-site" v-model="includeSite" :disabled="working">加入网站资料</el-checkbox>
           <el-button data-testid="scrape-model-run" :icon="MagicStick" :loading="assisting" :disabled="!canAssist" @click="assist">生成候选</el-button>
         </div>
+        <div v-if="selectedProfile?.provider === 'chatgpt-plan'" class="scrape-chatgpt-usage">
+          <span>使用 ChatGPT 方案</span>
+          <el-button link data-testid="scrape-chatgpt-usage" size="small" @click="openChatGPTUsage">管理用量</el-button>
+        </div>
         <p v-if="selectedProfile" class="scrape-help">生成候选时，草稿中的标题、作者、分类等文字字段，以及已勾选的网站资料会发往 <b>{{ selectedProfile.name }}</b> 的服务（{{ selectedProfile.base_url }}）。请核对模型建议。</p>
       </template>
       <p v-else class="scrape-help">在模型管理中添加服务，即可根据作品名称、草稿或网站资料生成候选。</p>
@@ -331,6 +341,9 @@ onBeforeUnmount(() => { clearResult(); apiKey.value = ''; affiliateId.value = ''
 </template>
 
 <style scoped>
+
+.scrape-chatgpt-usage { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; color: #426047; font-size: 12px; }
+
 :global(.metadata-scrape-dialog) { display: flex; flex-direction: column; max-height: 92vh; max-height: 92dvh; }
 :global(.metadata-scrape-dialog .el-dialog__body) { min-height: 0; overflow: auto; }
 .scrape-intro { margin-bottom: 16px; color: #73856b; font-size: 12px; line-height: 1.7; }

@@ -292,6 +292,11 @@ def complete(profile: dict, api_key: str, system: str, prompt: str, cancelled=No
     """Send a single text request and return assistant text without executing tools."""
     if not isinstance(system, str) or not isinstance(prompt, str) or not prompt.strip():
         raise ModelTransportError("模型请求需要有效的文本。", "MODEL_CONFIG")
+    if isinstance(profile, dict) and profile.get("provider") == "chatgpt-plan":
+        if profile.get("base_url") != "https://api.openai.com/v1":
+            raise ModelTransportError("ChatGPT 套餐仅使用 OpenAI 官方地址。", "MODEL_CONFIG")
+        from .chatgpt_plan import complete_chatgpt_plan
+        return complete_chatgpt_plan(profile.get("model"), api_key, system, prompt, cancelled=cancelled)
     settings = validate_profile(profile)
     request = _make_request(settings, _credential(api_key), system, prompt)
     data = _read_response(request, cancelled)

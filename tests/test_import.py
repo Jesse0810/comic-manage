@@ -49,7 +49,7 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(self.service.repo.all(), [])
         self.assertEqual(self.service.repo.setting("roots"), "")
 
-    def test_only_checked_books_are_imported_and_remembered_for_rescan(self):
+    def test_only_current_checked_books_are_rescanned_without_saved_roots(self):
         preview = self.preview()
         first_id = source_id(self.first)
         result = self.commit(preview, [first_id], defaults={"authors": ["  已知作者  "], "genre": "漫画"})
@@ -58,9 +58,9 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(comic.metadata.authors, ["已知作者"])
         self.assertEqual(comic.metadata.genre, "漫画")
         self.assertEqual(comic.status, "draft")
-        roots = self.service.repo.setting("roots").splitlines()
-        self.assertEqual(len(roots), 1)
-        self.assertTrue(Path(roots[0]).samefile(self.first))
+        self.assertEqual(self.service.repo.setting("roots"), "")
+        self.assertEqual(self.service.repo.setting("exact_import_roots"), "")
+        self.assertTrue(Path(comic.source).samefile(self.first))
         self.assertEqual(self.service.call("scan", {})["count"], 1)
         self.assertEqual([c.id for c in self.service.repo.all()], [first_id])
 
@@ -339,7 +339,7 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(self.service.repo.all(), [])
 
-    def test_cancelled_commit_keeps_only_completed_records_and_roots(self):
+    def test_cancelled_commit_keeps_only_completed_records(self):
         preview = self.preview()
         cancel = Event()
         original = self.service.repo.upsert_scan
@@ -355,7 +355,7 @@ class ImportTests(unittest.TestCase):
         self.assertTrue(result["cancelled"])
         self.assertEqual(result["count"], 1)
         self.assertEqual(len(self.service.repo.all()), 1)
-        self.assertEqual(len(self.service.repo.setting("roots").splitlines()), 1)
+        self.assertEqual(self.service.repo.setting("roots"), "")
 
     def test_cbz_files_can_be_selected_alongside_folders(self):
         archive = self.root / "现有漫画.cbz"

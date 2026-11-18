@@ -11,6 +11,7 @@ import re
 import sqlite3
 
 from .metadata import COLORS, READING_DIRECTIONS, V12_FIELDS, V13_FIELDS, Metadata, legacy_color, migration_warnings, read_variant_fields
+from .komga_client import path_matches
 from .sources import Snapshot, check_cancel, source_id
 
 
@@ -739,6 +740,43 @@ class Repository:
     def _event(db, comic_id: str, action: str, detail: str):
         db.execute("INSERT INTO events (comic_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
                    (comic_id, action, detail, now()))
+
+    def clear_import_roots(self) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM settings WHERE key IN ('roots', 'exact_import_roots')")
+
+    def retire_indexed_uploads(self, scope: str) -> list[str]:
+        """Retire completed local tasks once their exact Komga records are in the workspace."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            candidates = db.execute("""
+                SELECT c.id, c.metadata, j.metadata_json, j.relative_path, k.remote_path
+                FROM comics c
+                JOIN komga_auto_jobs j ON j.comic_id=c.id
+                JOIN komga_sources k ON k.scope=? AND k.unavailable=0 AND k.conflict=0
+                    AND k.comic_id NOT IN (SELECT comic_id FROM removed_comics)
+                WHERE c.kind IN ('folder','cbz') AND c.status='packaged' AND c.output!=''
+                    AND j.output_path=c.output AND j.source_fingerprint=c.fingerprint AND j.stale=0
+                    AND ((j.status='Synced' AND j.server_url=k.server_url AND j.library_id=k.library_id
+                          AND j.book_id=k.book_id AND j.series_id=k.series_id)
+                    OR (j.status IN ('Approved','Validated') AND j.server_url='' AND j.library_id=''
+                        AND EXISTS (
+                            SELECT 1 FROM komga_mappings m WHERE m.comic_id=c.id
+                            AND m.server_url=k.server_url AND m.library_id=k.library_id
+                            AND m.book_id=k.book_id AND m.series_id=k.series_id AND m.remote_path=k.remote_path
+                            AND m.synced_at>=c.updated_at
+                        )))
+            """, (scope,)).fetchall()
+            identities = {row["id"] for row in candidates
+                          if path_matches(row["remote_path"], row["relative_path"])
+                          and json.loads(row["metadata_json"]) == json.loads(row["metadata"])}
+            for identity in identities:
+                db.execute("DELETE FROM events WHERE comic_id=?", (identity,))
+                db.execute("DELETE FROM removed_comics WHERE comic_id=?", (identity,))
+                db.execute("DELETE FROM komga_mappings WHERE comic_id=?", (identity,))
+                db.execute("DELETE FROM komga_auto_jobs WHERE comic_id=? AND status!='Synced'", (identity,))
+                db.execute("DELETE FROM comics WHERE id=?", (identity,))
+        return sorted(identities)
 
     def setting(self, key: str, default: str = "") -> str:
         with self.connect() as db:

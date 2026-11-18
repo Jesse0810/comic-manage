@@ -20,7 +20,7 @@ export const scrapeFieldKeys = ['title', 'authors', 'pencillers', 'publisher', '
 export type ScrapeFieldKey = typeof scrapeFieldKeys[number]
 export type ScrapeFields = Partial<Pick<Metadata, ScrapeFieldKey>>
 export interface ScrapePreview { provider: ScrapeProvider; sourceUrl: string; fields: ScrapeFields; warnings: string[] }
-export type ModelProtocol = 'openai' | 'openai-responses' | 'ollama' | 'anthropic' | 'gemini'
+export type ModelProtocol = 'openai' | 'openai-responses' | 'ollama' | 'anthropic' | 'gemini' | 'chatgpt-plan'
 export interface ModelProfile { id: string; name: string; provider: ModelProtocol; base_url: string; model: string; has_key: boolean }
 export interface ModelConfiguration { profiles: ModelProfile[]; default_id: string }
 export interface ModelAssistPreview { fields: ScrapeFields; warnings: string[]; model_name: string }
@@ -30,7 +30,7 @@ export interface Comic {
   metadata: Metadata; status: ComicStatus; output: string; warning: string; updated_at: string
   remote?: { serverUrl: string; libraryId: string; libraryName: string; bookId: string; seriesId: string; scope: string; hasLocalChanges: boolean; conflict: boolean; syncedAt?: string; unavailable?: boolean; pendingSync?: boolean; dirtyFields?: string[]; sharedMetadata?: { ageRating?: number | null; genres?: string[]; readingDirection?: string; alternateTitles?: { label: string; title: string }[]; [key: string]: unknown } }
 }
-export interface Bootstrap { comics: Comic[]; roots: string[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string; autoSyncJobs?: KomgaAutoSyncJob[]; metadataRules?: string }
+export interface Bootstrap { comics: Comic[]; outputRoot: string; dataDir: string; komgaScope?: string; komgaLibraryName?: string; autoSyncJobs?: KomgaAutoSyncJob[]; metadataRules?: string }
 export interface ImportCandidate {
   id: string; source: string; kind: 'folder' | 'cbz'; page_count: number; metadata: Metadata
   import_status: 'new' | 'existing' | 'removed'; warning: string
@@ -38,7 +38,7 @@ export interface ImportCandidate {
 export interface ImportPreview { token: string; items: ImportCandidate[]; errors: string[]; cancelled?: boolean }
 export interface ImportResult { count: number; skipped: number; errors: string[]; cancelled: boolean; ids: string[] }
 export interface KomgaConfig { url: string; libraryId: string; libraryName: string; hasApiKey: boolean; autoSyncEnabled?: boolean }
-export interface KomgaPullResult { total: number; added: number; updated: number; kept: number; skipped: number; cancelled: boolean; errors: string[]; ids: string[]; scope: string }
+export interface KomgaPullResult { total: number; added: number; updated: number; kept: number; skipped: number; retired?: number; cancelled: boolean; errors: string[]; ids: string[]; scope: string }
 export interface KomgaLibrary { id: string; name: string; root?: string }
 export interface KomgaConnectionInput { url: string; apiKey?: string; clearKey?: boolean }
 export interface KomgaConfigInput extends KomgaConnectionInput { libraryId: string; libraryName: string; autoSyncEnabled?: boolean }
@@ -112,9 +112,22 @@ export function customTags(metadata: Metadata): string[] {
 export function versionLabels(metadata: Metadata): string[] {
   return [metadata.work_group?.trim() ? `作品组：${metadata.work_group}` : '', metadata.text_version || ''].filter(Boolean)
 }
+export interface KomgaUploadMatch {
+  bookId: string; title: string; authors: string[]; pageCount: number; language: string; textVersion: string
+  number: string; status: 'existing' | 'possible_version'; reasons: string[]; series?: string
+}
+export interface KomgaUploadComparison {
+  id: string; status: 'new' | 'existing' | 'possible_version'; matches: KomgaUploadMatch[]; matchCount: number
+}
 export interface ExportPlan {
   token: string; totalBytes: number
-  items: { id: string; title: string; source: string; destination: string; pageCount: number; attachmentCount: number; warnings: string[] }[]
+  komga?: { libraryName: string; state: 'checked' | 'unconfigured' | 'error'; message?: string }
+  items: {
+    id: string; title: string; source: string; destination: string; pageCount: number; attachmentCount: number
+    warnings: string[]; bytes?: number
+    local?: { authors: string[]; language: string; textVersion: string; series: string; number: string }
+    komga?: KomgaUploadComparison
+  }[]
 }
 export const statusLabels: Record<ComicStatus, string> = { draft: '待审核', approved: '已审核', packaged: '已生成' }
 export function displayTitle(metadata: Metadata): string {

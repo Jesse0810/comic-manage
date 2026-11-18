@@ -7,6 +7,7 @@ const path = require('node:path')
 const { createHash } = require('node:crypto')
 const { ServiceBridge, validateCall } = require('./bridge.cjs')
 const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
+const { ChatGPTAuth, CHATGPT_USAGE_URL } = require('./chatgpt-auth.cjs')
 const { ModelConfigStore } = require('./model-config.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
@@ -53,6 +54,9 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
   const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
   const modelConfig = new ModelConfigStore(dataDir, safeStorage)
+  const chatgptAuth = new ChatGPTAuth(dataDir, safeStorage)
+  const modelConnection = async credentials => credentials.profile.provider === 'chatgpt-plan'
+    ? { ...credentials, api_key: await chatgptAuth.accessToken() } : credentials
   const importLocationFile = path.join(dataDir, 'last-import-location.json')
   let lastImportLocation
   let requestQueue = Promise.resolve()
@@ -111,7 +115,23 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     ipcMain.removeHandler(channel)
     ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args) })
   }
+  const uploadConfiguration = async () => {
+    const config = await komgaConfig.get()
+    const comparison = config.url && config.libraryId ? await komgaConfig.connection() : undefined
+    const autoSync = comparison && config.autoSyncEnabled
+      ? { url: comparison.url, libraryId: comparison.libraryId } : undefined
+    return { comparison, autoSync }
+  }
   handle('comic:call', async (method, params = {}) => {
+    if (['model_chatgpt_status', 'model_chatgpt_sign_in', 'model_chatgpt_cancel', 'model_chatgpt_disconnect', 'model_chatgpt_models', 'model_chatgpt_usage'].includes(method)) {
+      if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new Error('ChatGPT 授权请求参数无效。')
+      if (method === 'model_chatgpt_status') return chatgptAuth.get()
+      if (method === 'model_chatgpt_sign_in') return chatgptAuth.signIn(url => shell.openExternal(url))
+      if (method === 'model_chatgpt_cancel') return chatgptAuth.cancel()
+      if (method === 'model_chatgpt_disconnect') return chatgptAuth.disconnect()
+      if (method === 'model_chatgpt_models') return chatgptAuth.modelList()
+      return shell.openExternal(CHATGPT_USAGE_URL)
+    }
     if (['model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_assist_preview'].includes(method)) {
       if (!params || typeof params !== 'object' || Array.isArray(params)
           || Buffer.byteLength(JSON.stringify(params), 'utf8') > 256 * 1024) throw new Error('模型请求参数无效。')
@@ -124,11 +144,11 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
         if (Object.keys(params).some(key => key !== 'id')) throw new Error('模型配置请求参数无效。')
         return method === 'model_profile_delete' ? modelConfig.delete(params.id) : modelConfig.setDefault(params.id)
       }
-      if (method === 'model_profile_test') return callService('model_test', await modelConfig.testCredentials(params))
+      if (method === 'model_profile_test') return callService('model_test', await modelConnection(await modelConfig.testCredentials(params)))
       const { profile_id, ...work } = params
       if (Object.keys(work).some(key => !['id', 'metadata', 'siteFields'].includes(key))) throw new Error('刮削请求参数无效。')
       const { name, ...connection } = await modelConfig.connection(profile_id)
-      const result = await callService('model_assist', { ...work, ...connection })
+      const result = await callService('model_assist', { ...work, ...await modelConnection(connection) })
       return { ...result, model_name: name }
     }
     if (['komga_test', 'source_context', 'komga_jobs_run', 'model_test', 'model_assist'].includes(method)) throw new Error('此操作只允许主进程调用。')
@@ -161,17 +181,15 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       send('komga-jobs-updated', { jobs: result.jobs })
       return result
     }
+    if (method === 'plan') {
+      if (Object.keys(params).some(key => !['ids', 'outputRoot'].includes(key))) throw new Error('生成计划参数无效。')
+      const { comparison } = await uploadConfiguration()
+      return callService(method, { ...params, ...(comparison ? { comparison } : {}) })
+    }
     if (method === 'export') {
-      if (Object.keys(params).some(key => key !== 'token')) throw new Error('生成只接受已确认的计划。')
-      let autoSync
-      let configError = false
-      try {
-        const config = await komgaConfig.get()
-        autoSync = config.autoSyncEnabled && config.url && config.libraryId && config.hasApiKey
-          ? { url: normalizeKomgaUrl(config.url), libraryId: config.libraryId } : undefined
-      } catch { configError = true }
-      const result = await callService(method, { token: params.token, ...(autoSync ? { autoSync } : {}) })
-      if (configError) result.autoSyncErrors = [...(result.autoSyncErrors || []), 'CBZ 生成结果独立保留；无法读取 Komga 配置，自动同步未入队，请检查左下角连接设置。']
+      if (Object.keys(params).some(key => !['token', 'ids', 'confirmedIds'].includes(key))) throw new Error('生成只接受已确认的计划。')
+      const { comparison, autoSync } = await uploadConfiguration()
+      const result = await callService(method, { ...params, ...(comparison ? { comparison } : {}), ...(autoSync ? { autoSync } : {}) })
       send('komga-jobs-updated', {})
       return result
     }
@@ -281,7 +299,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   window.on('close', event => {
     if (!allowClose && (windowState.dirty || windowState.busy)) { event.preventDefault(); send('close-request', {}) }
   })
-  window.on('closed', () => { clearInterval(automaticTimer); ipcMain.removeListener('comic:window-state', stateListener) })
+  window.on('closed', () => { chatgptAuth.cancel(); clearInterval(automaticTimer); ipcMain.removeListener('comic:window-state', stateListener) })
   window.once('ready-to-show', () => { if (show) window.show() })
   await window.loadURL(devURL || 'comic://ui/index.html')
   return { window, bridge, dataDir }

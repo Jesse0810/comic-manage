@@ -24,6 +24,7 @@ from .model_assist import assist_preview, test_profile
 from .model_transport import ModelTransportError
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
+from .komga_compare import compare_uploads
 from .komga_client import KomgaError, test_connection
 from .komga_sync import synchronize
 from .komga_jobs import KomgaJobs, list_jobs, record_approval, record_validated_export, enqueue_export, retry_jobs, run_due
@@ -68,6 +69,8 @@ class PreparedExport:
     created_at: float
     output_root: Path
     plans: list[ExportPlan]
+    comparison_scope: tuple[str, str] | None = None
+    findings: dict | None = None
 
 
 @dataclass
@@ -188,6 +191,7 @@ class ComicService:
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
         self.repo = Repository(self.data_dir / "catalog.sqlite3")
+        self.repo.clear_import_roots()
         self.progress = progress or (lambda message: None)
         self.plans: OrderedDict[str, PreparedExport] = OrderedDict()
         self.imports: OrderedDict[str, PreparedImport] = OrderedDict()
@@ -289,7 +293,6 @@ class ComicService:
                     self._legacy_variants_checked = True
                     self.progress("旧版本目录资料暂未修正，原资料已保留，可重新扫描核对。")
             return {"comics": [self.serialize(c) for c in self.repo.all()],
-                    "roots": self.repo.setting("roots").splitlines(),
                     "outputRoot": self.repo.setting("output_root"), "dataDir": str(self.data_dir),
                     "autoSyncJobs": list_jobs(self.repo), "metadataRules": METADATA_RULES_VERSION}
         if method == "komga_jobs":
@@ -378,8 +381,11 @@ class ComicService:
                 return self.reviews.prepare(_strings(params.get("ids"), "作品 id"), *connection)
             return self.reviews.commit(_string(params.get("token"), "审核预览"), *connection)
         if method == "komga_pull":
-            return pull_library(self.repo, _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
-                                _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)
+            result = pull_library(self.repo, _string(params.get("url"), "Komga 地址"), _string(params.get("apiKey"), "API Key"),
+                                  _string(params.get("libraryId"), "Komga 书库"), cancel, self.progress)
+            if not result["cancelled"] and not result["errors"]:
+                result["retired"] = len(self.repo.retire_indexed_uploads(result["scope"]))
+            return result
         if method == "komga_resolve":
             identity = _string(params.get("id"), "id")
             if self.repo.get(identity).kind != "komga":
@@ -534,7 +540,7 @@ class ComicService:
             raise ServiceError("勾选的作品不在此导入预览中。", "INVALID_IMPORT")
         self.imports.pop(token)
         self.plans.clear()
-        completed, errors, skipped, roots = [], [], 0, []
+        completed, errors, skipped = [], [], 0
         cancelled = False
         try:
             for identity in identities:
@@ -561,8 +567,6 @@ class ComicService:
                         skipped += 1
                     else:
                         completed.append(identity)
-                    if fresh.kind == "folder":
-                        roots.append(str(fresh.path))
                 except Cancelled:
                     raise
                 except Exception as exc:
@@ -570,34 +574,24 @@ class ComicService:
             check_cancel(cancel)
         except Cancelled:
             cancelled = True
-        # Only the selected comic directories become scan roots. Browsing locations are never persisted.
-        retained = self.repo.setting("roots").splitlines()
-        exact = self.repo.setting("exact_import_roots").splitlines()
-        existing_roots = {normalized_path(Path(p)) for p in retained}
-        new_roots = [p for p in roots if normalized_path(Path(p)) not in existing_roots]
-        by_path = {normalized_path(Path(p)): p for p in retained + roots}
-        exact_by_path = {normalized_path(Path(p)): p for p in exact + new_roots}
-        self.repo.set_setting("roots", "\n".join(by_path.values()))
-        self.repo.set_setting("exact_import_roots", "\n".join(exact_by_path.values()))
         return {"count": len(completed), "skipped": skipped, "errors": errors,
                 "cancelled": cancelled, "ids": completed}
 
     def scan(self, params: dict, cancel: Event) -> dict:
-        roots = _strings(params.get("roots", self.repo.setting("roots").splitlines()), "扫描目录")
-        roots = [str(_path(value, "扫描目录")) for value in roots]
-        retained = self.repo.setting("roots").splitlines()
-        by_path = {os.path.normcase(p): p for p in retained + roots}
-        self.repo.set_setting("roots", "\n".join(by_path.values()))
+        current_only = "roots" not in params
+        if current_only:
+            roots = [c.source for c in self.repo.all() if c.kind in ("folder", "cbz")]
+        else:
+            roots = [str(_path(value, "扫描目录")) for value in _strings(params["roots"], "扫描目录")]
         self.plans.clear()
         output = self.repo.setting("output_root")
         excluded = [self.data_dir] + ([Path(output)] if output else [])
-        exact_roots = {normalized_path(Path(p)) for p in self.repo.setting("exact_import_roots").splitlines()}
         count, errors, seen = 0, [], set()
         try:
             for root in roots:
                 check_cancel(cancel)
                 try:
-                    if normalized_path(Path(root)) in exact_roots:
+                    if current_only:
                         if any(is_inside(Path(root), p) for p in excluded):
                             continue
                         if _folder_link(Path(root)):
@@ -699,8 +693,11 @@ class ComicService:
                 "name": member.name, "index": index, "total": len(snapshot.pages)}
 
     def prepare(self, params: dict, cancel: Event) -> dict:
+        if set(params) - {"ids", "outputRoot", "comparison"}:
+            raise ServiceError("生成计划参数无效。")
         identities = _strings(params.get("ids"), "作品 id")
         output_root = _path(params.get("outputRoot"), "成品目录")
+        comparison = self._upload_connection(params.get("comparison"))
         plans, destinations, items = [], set(), []
         for identity in identities:
             check_cancel(cancel)
@@ -708,7 +705,7 @@ class ComicService:
             if comic.kind == "komga":
                 raise ServiceError("Komga 远端记录请直接同步元数据，不能作为本机图片来源生成 CBZ。")
             self.progress(f"检查生成计划 · {comic.metadata.display_title}")
-            plan = make_plan(comic, output_root)
+            plan = make_plan(comic, output_root, allow_alternate=bool(comparison))
             destination = os.path.normcase(str(plan.destination))
             if destination in destinations:
                 raise ServiceError("多本作品使用了相同输出路径，请调整后重试。")
@@ -716,7 +713,25 @@ class ComicService:
             plans.append(plan)
             items.append({"id": identity, "title": comic.metadata.display_title, "source": comic.source,
                           "destination": str(plan.destination), "pageCount": len(plan.snapshot.pages),
-                          "attachmentCount": len(plan.snapshot.extras), "warnings": plan.warnings})
+                          "attachmentCount": len(plan.snapshot.extras), "warnings": plan.warnings,
+                          "bytes": sum(m.size for m in plan.snapshot.pages + plan.snapshot.extras) + len(plan.xml),
+                          "local": {"authors": comic.metadata.authors, "language": comic.metadata.language,
+                                    "textVersion": comic.metadata.text_version, "series": comic.metadata.series,
+                                    "number": comic.metadata.number}})
+        view = {"state": "unconfigured", "libraryName": ""}
+        findings = None
+        scope = None
+        if comparison:
+            url, key, library_id = comparison
+            try:
+                inspected = compare_uploads(plans, url, key, library_id, cancel, self.progress)
+                findings = {item["id"]: item for item in inspected["items"]}
+                for item in items:
+                    item["komga"] = findings[item["id"]]
+                scope = (url, library_id)
+                view = {"state": "checked", "libraryName": inspected["libraryName"]}
+            except KomgaError as error:
+                view = {"state": "error", "libraryName": "", "message": str(error)}
         check_cancel(cancel)
         now = time.monotonic()
         self.plans = OrderedDict((token, p) for token, p in self.plans.items()
@@ -724,12 +739,21 @@ class ComicService:
         while len(self.plans) >= 8:
             self.plans.popitem(last=False)
         token = secrets.token_urlsafe(32)
-        self.plans[token] = PreparedExport(now, output_root, plans)
-        return {"token": token, "items": items, "totalBytes": sum(
-            sum(m.size for m in p.snapshot.pages + p.snapshot.extras) + len(p.xml) for p in plans)}
+        if view["state"] != "error":
+            self.plans[token] = PreparedExport(now, output_root, plans, scope, findings)
+        return {"token": token, "items": items, "totalBytes": sum(item["bytes"] for item in items), "komga": view}
+
+    @staticmethod
+    def _upload_connection(value) -> tuple[str, str, str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"url", "apiKey", "libraryId"}:
+            raise ServiceError("Komga 查重连接参数无效。")
+        return (_string(value["url"], "Komga 地址"), _string(value["apiKey"], "API Key"),
+                _string(value["libraryId"], "Komga 书库"))
 
     def export(self, params: dict, cancel: Event) -> dict:
-        if set(params) - {"token", "autoSync"}:
+        if set(params) - {"token", "autoSync", "ids", "confirmedIds", "comparison"}:
             raise ServiceError("生成参数无效。")
         auto_sync = params.get("autoSync")
         if auto_sync is not None and (not isinstance(auto_sync, dict)
@@ -742,16 +766,36 @@ class ComicService:
         prepared = self.plans.pop(token, None)
         if prepared is None or time.monotonic() - prepared.created_at > PLAN_TTL_SECONDS:
             raise ServiceError("生成计划已失效，请重新预览并确认。", "INVALID_PLAN")
+        connection = self._upload_connection(params.get("comparison"))
+        scope = (connection[0], connection[2]) if connection else None
+        if scope != prepared.comparison_scope:
+            raise ServiceError("Komga 目标书库已变化，请重新预览并核对。", "INVALID_PLAN")
+        ids = {p.comic.id for p in prepared.plans}
+        selected = set(_strings(params["ids"], "选中的作品")) if "ids" in params else ids
+        confirmed = set(_strings(params["confirmedIds"], "确认继续的作品")) if params.get("confirmedIds") != [] and "confirmedIds" in params else set()
+        if not selected <= ids or not confirmed <= selected:
+            raise ServiceError("所选作品不属于当前生成计划。", "INVALID_PLAN")
+        expected = prepared.findings or {}
+        needs_confirmation = {identity for identity in selected if identity in expected and expected[identity]["status"] != "new"}
+        if needs_confirmation != confirmed:
+            raise ServiceError("请先勾选并确认所有可能重复的作品。", "INVALID_PLAN")
         completed, errors, auto_sync_errors = [], [], []
         try:
             fresh = []
             for previous in prepared.plans:
+                if previous.comic.id not in selected:
+                    continue
                 check_cancel(cancel)
-                current = make_plan(self.repo.get(previous.comic.id), prepared.output_root)
+                current = make_plan(self.repo.get(previous.comic.id), prepared.output_root, allow_alternate=bool(connection))
                 if (current.destination != previous.destination or current.xml != previous.xml
                         or current.snapshot.fingerprint != previous.snapshot.fingerprint):
                     raise ServiceError("作品在生成计划确认后发生变化，请重新预览。", "INVALID_PLAN")
                 fresh.append(current)
+            if connection:
+                inspected = compare_uploads(fresh, *connection, cancel=cancel, progress=self.progress)
+                checked = {item["id"]: item for item in inspected["items"]}
+                if any(checked.get(identity) != expected[identity] for identity in selected):
+                    raise ServiceError("Komga 书库中的相似作品在确认后有变化，请重新预览核对。", "INVALID_PLAN")
             for plan in fresh:
                 check_cancel(cancel)
                 try:

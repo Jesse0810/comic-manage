@@ -4,7 +4,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { randomUUID } = require('node:crypto')
 
-const PROVIDERS = new Set(['openai', 'openai-responses', 'ollama', 'anthropic', 'gemini'])
+const PROVIDERS = new Set(['openai', 'openai-responses', 'ollama', 'anthropic', 'gemini', 'chatgpt-plan'])
 const PROFILE_ID = /^[a-f0-9-]{36}$/
 const MAX_PROFILES = 32
 const PUBLIC_FIELDS = ['id', 'name', 'provider', 'base_url', 'model']
@@ -44,11 +44,15 @@ function profileInput(value) {
       || address.includes('?') || address.includes('#') || !url.hostname) {
     throw new Error('模型接口地址须以 http 或 https 开头，且不含账号、查询参数或片段。')
   }
+  const baseUrl = url.href.replace(/\/+$/, '')
+  if (value.provider === 'chatgpt-plan' && baseUrl !== 'https://api.openai.com/v1') {
+    throw new Error('ChatGPT 套餐仅使用 OpenAI 官方地址。')
+  }
   return {
     id: value.id === undefined || value.id === '' ? '' : checkId(value.id),
     name,
     provider: value.provider,
-    base_url: url.href.replace(/\/+$/, ''),
+    base_url: baseUrl,
     model: clean(value.model, 256, '模型 ID'),
   }
 }
@@ -62,7 +66,9 @@ function settingsInput(value) {
   }
   const key = value.api_key?.trim() ? cleanKey(value.api_key) : ''
   if (key && value.clear_key) throw new Error('请先取消清除密钥选项，再填写新密钥。')
-  return { profile: profileInput(value.profile), key, clear: value.clear_key === true, makeDefault: value.make_default === true }
+  const profile = profileInput(value.profile)
+  if (profile.provider === 'chatgpt-plan' && key) throw new Error('请在浏览器授权 ChatGPT 套餐。')
+  return { profile, key, clear: value.clear_key === true, makeDefault: value.make_default === true }
 }
 
 function publicSettings(value) {
@@ -89,7 +95,8 @@ class ModelConfigStore {
       const profiles = value.profiles.map(({ encrypted_key, ...saved }) => {
         const profile = profileInput(saved)
         if (!profile.id || typeof encrypted_key !== 'string' || encrypted_key.length > 65536
-            || !/^[A-Za-z0-9+/]*={0,2}$/.test(encrypted_key)) throw new Error()
+            || !/^[A-Za-z0-9+/]*={0,2}$/.test(encrypted_key)
+            || (profile.provider === 'chatgpt-plan' && encrypted_key)) throw new Error()
         return { ...profile, encrypted_key }
       })
       const ids = new Set(profiles.map(profile => profile.id))

@@ -179,6 +179,7 @@ async function mainProcessFixture(options = {}) {
   const fakeRequire = name => {
     if (name === 'electron') return fakeElectron
     if (name === './bridge.cjs') return {ServiceBridge:FakeBridge, validateCall}
+    if (name === './chatgpt-auth.cjs') return require('../chatgpt-auth.cjs')
     if (name === './model-config.cjs') return require('../model-config.cjs')
     if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore, normalizeKomgaUrl}
     if (name === 'node:fs/promises') return {
@@ -729,21 +730,24 @@ test('automatic task calls validate scopes and never accept embedded secrets in 
   assert.doesNotThrow(() => validateCall('export',{token:'plan',autoSync:{url:'http://localhost',libraryId:'lib'}}))
 })
 
-test('publication receives the saved server scope without a key and the renderer cannot drive the worker', async () => {
+test('upload checks use the saved library, and renderer cannot choose scope or drive the worker', async () => {
   const main = await mainProcessFixture({config:{autoSyncEnabled:true,hasApiKey:true}})
   await assert.rejects(main.invoke('comic:call','komga_jobs_run',{}),/主进程/)
   await assert.rejects(main.invoke('comic:call','export',{token:'plan',autoSync:{url:'http://other',libraryId:'lib'}}),/只接受/)
   await assert.rejects(main.invoke('comic:call','komga_jobs_retry',{ids:['job'],url:'http://other'}),/只接受/)
-  await main.invoke('comic:call','export',{token:'plan'})
+  await assert.rejects(main.invoke('comic:call','plan',{ids:['comic'],outputRoot:'C:/out',comparison:main.credentials}),/参数无效/)
+  await main.invoke('comic:call','plan',{ids:['comic'],outputRoot:'C:/out'})
+  await main.invoke('comic:call','export',{token:'plan',ids:['comic'],confirmedIds:['comic']})
   await main.invoke('comic:call','komga_jobs_retry',{ids:['job']})
   assert.deepEqual(JSON.parse(JSON.stringify(main.calls)),[
-    {method:'export',params:{token:'plan',autoSync:{url:main.config.url,libraryId:main.config.libraryId}}},
+    {method:'plan',params:{ids:['comic'],outputRoot:'C:/out',comparison:main.credentials}},
+    {method:'export',params:{token:'plan',ids:['comic'],confirmedIds:['comic'],comparison:main.credentials,autoSync:{url:main.config.url,libraryId:main.config.libraryId}}},
     {method:'komga_jobs_retry',params:{ids:['job'],url:main.config.url,libraryId:main.config.libraryId}},
   ])
-  assert.equal(JSON.stringify(main.calls).includes(main.credentials.apiKey),false)
+  assert.equal(JSON.stringify(main.calls.at(-1)).includes(main.credentials.apiKey),false)
   main.config.autoSyncEnabled=false
   await main.invoke('comic:call','export',{token:'manual-only'})
-  assert.deepEqual(JSON.parse(JSON.stringify(main.calls.at(-1))),{method:'export',params:{token:'manual-only'}})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls.at(-1))),{method:'export',params:{token:'manual-only',comparison:main.credentials}})
 })
 
 test('automatic worker pauses for edits and busy operations and serializes repeated timer ticks', async () => {

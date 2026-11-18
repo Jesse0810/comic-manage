@@ -93,7 +93,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(result["comics"]), 1)
         self.assertEqual(result["comics"][0]["metadata"]["chinese_title"], "春日旅途")
         self.assertEqual(result["comics"][0]["status"], "approved")
-        self.assertEqual(result["roots"], [str(self.library), str(self.book)])
+        self.assertNotIn("roots", result)
+        self.assertEqual(self.service.repo.setting("roots"), "")
 
     def test_scan_missing_nas_path_keeps_records_and_reports_error(self):
         result = self.service.call("scan", {"roots": [str(self.root / "offline-share")]})

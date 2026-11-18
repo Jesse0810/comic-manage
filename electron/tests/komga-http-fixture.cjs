@@ -29,6 +29,8 @@ async function createKomgaFixture(apiKey) {
       result = [{ id: 'test-library', name: '合成测试书库' }]
     } else if (request.method === 'POST' && route === '/api/v1/books/list') {
       result = { content: [...books.values()], last: true }
+    } else if (request.method === 'POST' && route === '/api/v1/series/list') {
+      result = { content: [...series.values()], last: true }
     } else {
       const match = route.match(/^\/api\/v1\/(books|series)\/([^/]+)(\/metadata)?$/)
       const collection = match?.[1] === 'books' ? books : series

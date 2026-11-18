@@ -142,22 +142,32 @@ class KomgaClient:
         return [{"id": item["id"], "name": item["name"]} for item in response]
 
     def books(self, library_id: str) -> list[dict]:
-        books = {}
+        return self._catalog_entries("books", library_id, "url", "漫画")
+
+    def series(self, library_id: str) -> list[dict]:
+        return self._catalog_entries("series", library_id, "name", "系列")
+
+    def _catalog_entries(self, resource: str, library_id: str, sort: str, label: str) -> list[dict]:
+        entries = {}
         for page_number in range(10000):
-            response = self.request("POST", f"api/v1/books/list?page={page_number}&size=200&sort=url,asc", {
+            response = self.request("POST", f"api/v1/{resource}/list?page={page_number}&size=200&sort={sort},asc", {
                 "condition": {"libraryId": {"operator": "is", "value": library_id}},
             })
             if not isinstance(response, dict) or not isinstance(response.get("content"), list) or not isinstance(response.get("last"), bool):
-                raise KomgaError("Komga 未返回有效的分页漫画列表。", "KOMGA_RESPONSE")
-            for book in response["content"]:
-                if not isinstance(book, dict) or not isinstance(book.get("id"), str) or not book["id"]:
-                    raise KomgaError("Komga 漫画列表包含无效记录。", "KOMGA_RESPONSE")
-                previous = books.get(book["id"])
-                if previous is not None and previous != book:
+                raise KomgaError(f"Komga 未返回有效的分页{label}列表。", "KOMGA_RESPONSE")
+            if type(response.get("number")) is int and response["number"] != page_number:
+                raise KomgaError("Komga 分页结果不完整，请重新同步。", "KOMGA_RESPONSE")
+            for entry in response["content"]:
+                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:
+                    raise KomgaError(f"Komga {label}列表包含无效记录。", "KOMGA_RESPONSE")
+                previous = entries.get(entry["id"])
+                if previous is not None and previous != entry:
                     raise KomgaError("Komga 书库在分页时发生变化，请重新同步。", "KOMGA_RESPONSE")
-                books[book["id"]] = book
+                entries[entry["id"]] = entry
             if response["last"]:
-                return list(books.values())
+                if type(response.get("totalElements")) is int and response["totalElements"] != len(entries):
+                    raise KomgaError("Komga 分页结果不完整，请重新同步。", "KOMGA_RESPONSE")
+                return list(entries.values())
             if not response["content"]:
                 raise KomgaError("Komga 分页结果不完整，请重新同步。", "KOMGA_RESPONSE")
         raise KomgaError("Komga 书库分页过多，请缩小书库范围后重试。", "KOMGA_RESPONSE")

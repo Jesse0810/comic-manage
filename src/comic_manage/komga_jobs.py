@@ -165,7 +165,7 @@ def invalidate_jobs(repo, identities: list[str] | None = None) -> int:
                      and comic.fingerprint == job["source_fingerprint"]
                      and (not job["output_path"] or (comic.output and str(Path(comic.output).resolve()) == job["output_path"])))
         except (ValueError, OSError):
-            valid = False
+            valid = (job["status"] == "Synced" and not job["stale"] and not repo.is_removed(job["comic_id"]))
         if not valid:
             changed.append((job["id"], job["metadata_hash"]))
     with repo.connect() as db:

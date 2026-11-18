@@ -36,9 +36,10 @@ class ExportPlan:
     snapshot: Snapshot
     xml: bytes
     warnings: list[str] = field(default_factory=list)
+    occupied_destination: Path | None = None
 
 
-def make_plan(comic: Comic, output_root: Path) -> ExportPlan:
+def make_plan(comic: Comic, output_root: Path, *, allow_alternate: bool = False) -> ExportPlan:
     if comic.status not in ("approved", "packaged"):
         raise ValueError("需要先人工审核通过，才能生成 CBZ。")
     snapshot = inspect_source(Path(comic.source))
@@ -61,14 +62,23 @@ def make_plan(comic: Comic, output_root: Path) -> ExportPlan:
             prefix = "series-" + prefix
         directory = f"{prefix} [{series_key}]"
     destination = root / directory / f"{name} [{comic.id[:8]}].cbz"
-    if destination.exists():
+    occupied_destination = None
+    if allow_alternate and os.path.lexists(destination):
+        occupied_destination = destination
+        stem = destination.stem
+        for version in range(2, 1000):
+            candidate = destination.with_name(f"{stem} (版本 {version}).cbz")
+            if not os.path.lexists(candidate):
+                destination = candidate
+                break
+    if os.path.lexists(destination):
         raise FileExistsError(f"目标已存在，v1 不覆盖文件：{destination}")
     if destination.resolve() == snapshot.path:
         raise ValueError("输出路径与源文件相同。")
     # Reserve headroom for temporary names and Windows installations without long paths.
     if os.name == "nt" and len(str(destination).encode("utf-16-le")) // 2 > 235:
         raise ValueError("输出完整路径过长，请选择层级更浅的成品目录。完整标题仍保存在 XML 中。")
-    return ExportPlan(comic, destination, snapshot, xml, komga_warnings(metadata))
+    return ExportPlan(comic, destination, snapshot, xml, komga_warnings(metadata), occupied_destination)
 
 
 def verify_archive(path: Path, expected: dict[str, str], xml: bytes,
