@@ -41,7 +41,7 @@ button:focus-visible { outline: 2px solid #82aa91; outline-offset: 3px; }
 button:disabled { cursor: default; }
 #app { height: 100vh; min-height: 0; }
 .desktop-shell { height: 100%; display: grid; grid-template-columns: 218px minmax(0, 1fr); }
-.sidebar { background: #183d34; padding: 31px 18px 18px; display: flex; flex-direction: column; color: #c6d4cb; user-select: none; }
+.sidebar { background: #183d34; padding: 31px 18px 18px; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; color: #c6d4cb; user-select: none; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 9px; margin-bottom: 47px; }
 .brand-icon { width: 43px; height: 43px; display: grid; place-items: center; background: #2c5544; border: 1px solid #436754; border-radius: 12px; color: #dcebd9; }
 .brand strong { display: block; color: #f2f6ec; font-size: 20px; font-weight: 650; letter-spacing: 1px; }
@@ -280,6 +280,8 @@ h1 { display: flex; align-items: center; margin: 0; gap: 12px; font-size: 26px; 
   .workspace-header { margin-bottom: 17px; }
   .workspace { padding-top: 23px; }
   .brand { margin-bottom: 35px; }
+  .sidebar-note { display: none; }
+  .sidebar-bottom { margin-top: auto; }
   .selected-summary { padding-top: 13px; padding-bottom: 13px; }
   .mini-cover { width: 55px; height: 73px; }
   .selected-summary-copy h2 { font-size: 14px; }

@@ -19,7 +19,8 @@ import KomgaJobsDialog from './components/KomgaJobsDialog.vue'
 import ExportPlanDialog from './components/ExportPlanDialog.vue'
 import MetadataScrapeDialog from './components/MetadataScrapeDialog.vue'
 import ModelSettingsDialog from './components/ModelSettingsDialog.vue'
-import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs, ScrapeApplication, ScrapeFields, ModelConfiguration } from './types'
+import SiteSettingsDialog from './components/SiteSettingsDialog.vue'
+import type { Comic, Metadata, Bootstrap, ComicStatus, ExportPlan, ImportResult, KomgaConfig, KomgaSyncResult, KomgaPullResult, ReviewSyncPlan, ReviewSyncResult, KomgaAutoSyncJob, KomgaAutoSyncJobs, ScrapeApplication, ScrapeFields, ModelConfiguration, SiteConfiguration } from './types'
 import { clone, errorMessage, customTags, collectionMode, comicGenres, komgaAutoSyncLabels, scrapeFieldKeys } from './types'
 import { invoke } from './api'
 
@@ -84,6 +85,9 @@ const batchVisible = ref(false)
 const batchIds = ref<string[]>([])
 const scrapeVisible = ref(false)
 const modelSettingsVisible = ref(false)
+const siteSettingsVisible = ref(false)
+const siteConfig = ref<SiteConfiguration | null>(null)
+const siteConfigLoading = ref(false)
 const agentMode = ref(false)
 const agentTab = ref<'organize' | 'search'>('organize')
 const agentVisited = ref(false)
@@ -217,6 +221,18 @@ async function loadModelConfiguration() {
 function openModelSettings() {
   modelSettingsVisible.value = true
 }
+async function loadSiteConfiguration() {
+  if (siteConfigLoading.value) return
+  siteConfigLoading.value = true
+  try {
+    const status = await invoke<SiteConfiguration>('site_config_get')
+    if (!siteSettingsVisible.value) siteConfig.value = status
+  } catch { /* The settings dialog gives a retry and shows the read error. */ }
+  finally { siteConfigLoading.value = false }
+}
+function openSiteSettings() {
+  siteSettingsVisible.value = true
+}
 function openMetadataScraper() {
   if (disabled.value || !current.value || !form.value || !canEditComic(current.value) || current.value.remote?.conflict) return
   scrapeVisible.value = true
@@ -301,6 +317,7 @@ async function openAgentWorkspace() {
   if (agentMode.value || disabled.value || !await resolveEdits()) return
   agentVisited.value = true
   agentMode.value = true
+  if (!siteConfig.value) void loadSiteConfiguration()
 }
 function selectLibrarySection(target: Section) {
   if (agentWorking.value) return
@@ -721,7 +738,7 @@ onBeforeUnmount(() => unsubscribe?.())
         <button data-testid="agent-open" class="agent-nav" :class="{ active: agentMode }" :aria-current="agentMode ? 'page' : undefined" :disabled="disabled" @click="openAgentWorkspace"><el-icon :size="18"><MagicStick /></el-icon><span>Agent</span></button>
       </nav>
       <div class="sidebar-note"><div class="sidebar-note-icon"><el-icon><Lock /></el-icon></div><div><strong>原图保留，资料有序</strong><p>审核后生成成品，<br />可同步资料到你的 Komga。</p></div></div>
-      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button data-testid="model-settings-open" :disabled="disabled" @click="openModelSettings"><el-icon><Connection /></el-icon>模型管理</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
+      <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button data-testid="model-settings-open" :disabled="disabled" @click="openModelSettings"><el-icon><Connection /></el-icon>模型管理</button><button data-testid="site-settings-open" :disabled="disabled" @click="openSiteSettings"><el-icon><Lock /></el-icon>站点 API 设置</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
     </aside>
 
     <main class="workspace" :class="{ 'workspace-editor-expanded': editorExpanded && !agentMode }">
@@ -745,7 +762,8 @@ onBeforeUnmount(() => unsubscribe?.())
         :configuration="modelConfiguration" :disabled="agentUnavailable" @model-settings="openModelSettings"
         @task-state="agentWorking = $event" @applied="refreshAfterAgent" />
       <AgentSearchWorkspace v-if="agentVisited" v-show="agentMode && agentTab === 'search'" :selected="agentSelected"
-        :filtered="agentFiltered" :disabled="agentUnavailable" @task-state="agentWorking = $event" @applied="refreshAfterAgent" />
+        :filtered="agentFiltered" :disabled="agentUnavailable" :site-config="siteConfig" :site-config-loading="siteConfigLoading"
+        @site-settings="openSiteSettings" @task-state="agentWorking = $event" @applied="refreshAfterAgent" />
 
       <div v-show="!agentMode" class="work-area">
         <section v-show="!editorExpanded" class="library-panel">
@@ -784,6 +802,7 @@ onBeforeUnmount(() => unsubscribe?.())
     <MetadataScrapeDialog v-model="scrapeVisible" :comic="current" :metadata="form" :disabled="disabled || currentReadOnly || !!current?.remote?.conflict"
       :model-configuration="modelConfiguration" @model-settings="openModelSettings" @apply="applyScrapedMetadata" />
     <ModelSettingsDialog v-model="modelSettingsVisible" :configuration="modelConfiguration" @updated="modelConfiguration = $event" />
+    <SiteSettingsDialog v-model="siteSettingsVisible" :disabled="agentWorking" @updated="siteConfig = $event" />
     <ImportDialog v-model="importVisible" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
 

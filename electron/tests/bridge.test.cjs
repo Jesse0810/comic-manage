@@ -169,7 +169,7 @@ async function mainProcessFixture(options = {}) {
   }
 
   const fakeElectron = {
-    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:options.dialog || {}, safeStorage:{},
+    app: {isPackaged:false}, BrowserWindow:FakeWindow, ipcMain, dialog:options.dialog || {}, safeStorage:options.safeStorage || {},
     shell: {
       async openExternal(url) { externalUrls.push(url) },
       async openPath(directory) { localPaths.push(directory); return '' },
@@ -183,6 +183,7 @@ async function mainProcessFixture(options = {}) {
     if (name === './model-config.cjs') return options.modelConnection
       ? { ModelConfigStore: class { connection(id) { return options.modelConnection(id) } } }
       : require('../model-config.cjs')
+    if (name === './site-config.cjs') return require('../site-config.cjs')
     if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore, normalizeKomgaUrl}
     if (name === 'node:fs/promises') return {
       ...require(name), stat: async location => { statPaths.push(location); return {isDirectory:() => true} },
@@ -234,22 +235,53 @@ test('Agent prepare binds saved model and current Komga scope, while apply accep
   assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1])), { method: 'agent_apply', params: { ...edit, komga_scope: scope } })
 })
 
-test('site search uses the current scope and accepts only approved providers and opaque candidate IDs', async () => {
-  const main = await mainProcessFixture({respond: method => ({ token: method === 'agent_search' ? 'result' : 'drafts', books: [] })})
-  const request = { ids: ['work'], providers: ['dlsite', 'dmm'], credentials: { dmm: { apiKey: 'fake-key', affiliateId: 'fake-990' } } }
+test('site search and preview use encrypted settings while the renderer can only read status', async t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comic-agent-settings-'))
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }))
+  const crypt = data => Buffer.from(Array.from(data, byte => byte ^ 0xa7))
+  const safeStorage = {
+    isAsyncEncryptionAvailable: async () => true,
+    encryptStringAsync: async text => crypt(Buffer.from(text)),
+    decryptStringAsync: async data => ({result:crypt(data).toString(), shouldReEncrypt:false}),
+  }
+  const fixture = {dataDir, safeStorage, respond: method => ({ token: method === 'agent_search' ? 'result' : 'drafts', books: [] })}
+  const settings = await mainProcessFixture(fixture)
+  const credentials = {
+    dmm: { apiKey: 'synthetic-dmm-id', affiliateId: 'synthetic-990' },
+    nhentai: { apiKey: 'synthetic-nhentai-key' },
+  }
+  await assert.rejects(settings.invoke('comic:call', 'site_config_get', { raw: true }), /额外参数/)
+  for (const [provider, value] of Object.entries(credentials)) {
+    const status = await settings.invoke('comic:call', 'site_config_save', {provider, ...value})
+    assert.equal(status[provider].configured, true)
+    assert(!JSON.stringify(status).includes(value.apiKey))
+  }
+  const main = await mainProcessFixture(fixture)
+  const [dmm, nhentai] = Object.values(await main.invoke('comic:call', 'site_config_get'))
+  assert.deepEqual([dmm, nhentai], [{ configured: true }, { configured: true }])
+  const request = { ids: ['work'], providers: ['dlsite', 'dmm'] }
   await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, providers: ['https://example.test'] }), /站点/)
   await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, komga_scope: 'forged' }), /不支持/)
-  await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, credentials: { ehentai: { apiKey: 'unexpected' } } }), /凭据/)
+  await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, credentials }), /不支持/)
   const discovered = await main.invoke('comic:call', 'agent_search', request)
   assert.equal(discovered.token, 'result')
-  assert(!JSON.stringify(discovered).includes('fake-key'))
-  const preview = {token: discovered.token, choices: [{id:'work',candidateId:'candidate'}], credentials: request.credentials}
+  assert(!JSON.stringify(discovered).includes(credentials.dmm.apiKey))
+  const preview = {token: discovered.token, choices: [{id:'work',candidateId:'candidate'}]}
+  await assert.rejects(main.invoke('comic:call', 'agent_search_preview', { ...preview, credentials }), /不支持/)
   await assert.rejects(main.invoke('comic:call', 'agent_search_preview', { ...preview, choices: [{...preview.choices[0],url:'https://example.test'}] }), /候选/)
   await main.invoke('comic:call', 'agent_search_preview', preview)
   assert.equal(main.calls.length, 2)
   assert.match(main.calls[0].params.komga_scope, /^[a-f0-9]{20}$/)
   assert.equal(main.calls[1].params.komga_scope, main.calls[0].params.komga_scope)
   assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1].params.choices)), preview.choices)
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[0].params.credentials)), {dmm: credentials.dmm})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1].params.credentials)), credentials)
+  assert.doesNotThrow(() => validateCall('agent_search_preview', main.calls[1].params))
+  await assert.rejects(main.invoke('comic:call', 'site_config_clear', {provider:'dmm', extra: true}), /清除/)
+  const cleared = await main.invoke('comic:call', 'site_config_clear', {provider:'nhentai'})
+  assert.equal(cleared.nhentai.configured, false)
+  await main.invoke('comic:call', 'agent_search', {ids:['work'],providers:['nhentai']})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[2].params.credentials)), {})
 })
 
 test('cancelling Agent while model credentials are loading prevents the model call', async () => {

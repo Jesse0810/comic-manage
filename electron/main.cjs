@@ -9,6 +9,7 @@ const { ServiceBridge, validateCall, validateAgentRequest } = require('./bridge.
 const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
 const { ChatGPTAuth, CHATGPT_USAGE_URL } = require('./chatgpt-auth.cjs')
 const { ModelConfigStore } = require('./model-config.cjs')
+const { SiteConfigStore } = require('./site-config.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
@@ -60,6 +61,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
   const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
   const modelConfig = new ModelConfigStore(dataDir, safeStorage)
+  const siteConfig = new SiteConfigStore(dataDir, safeStorage)
   const chatgptAuth = new ChatGPTAuth(dataDir, safeStorage)
   const modelConnection = async credentials => credentials.profile.provider === 'chatgpt-plan'
     ? { ...credentials, api_key: await chatgptAuth.accessToken() } : credentials
@@ -151,7 +153,13 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       try {
         const komga_scope = await komgaConfig.get().then(currentKomgaScope).catch(() => '')
         if (task.cancelled) return task.emptyResult
-        if (method !== 'agent_prepare') return await callService(method, { ...params, komga_scope }, task)
+        if (method === 'agent_search' || method === 'agent_search_preview') {
+          // The service resolves saved candidate IDs to providers during preview.
+          const providers = method === 'agent_search' ? params.providers : ['dmm', 'nhentai']
+          const credentials = await siteConfig.credentials(providers)
+          return await callService(method, { ...params, credentials, komga_scope }, task)
+        }
+        if (method === 'agent_apply') return await callService(method, { ...params, komga_scope }, task)
         const { profile_id, ...request } = params
         const { name, ...connection } = await modelConfig.connection(profile_id)
         const credentials = await modelConnection(connection)
@@ -162,6 +170,16 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       } finally {
         agentTask = undefined
       }
+    }
+    if (['site_config_get', 'site_config_save', 'site_config_clear'].includes(method)) {
+      if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('站点设置参数无效。')
+      if (method === 'site_config_save') return siteConfig.save(params)
+      if (method === 'site_config_clear') {
+        if (Object.keys(params).length !== 1 || !Object.hasOwn(params, 'provider')) throw new Error('请选择要清除的站点。')
+        return siteConfig.clear(params.provider)
+      }
+      if (Object.keys(params).length) throw new Error('读取站点设置不接受额外参数。')
+      return siteConfig.get()
     }
     if (['model_chatgpt_status', 'model_chatgpt_sign_in', 'model_chatgpt_cancel', 'model_chatgpt_disconnect', 'model_chatgpt_models', 'model_chatgpt_usage'].includes(method)) {
       if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new Error('ChatGPT 授权请求参数无效。')

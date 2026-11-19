@@ -61,7 +61,7 @@ const SEARCH_SITES = new Set(['dlsite', 'dmm', 'ehentai', 'nhentai'])
 
 function validateSearchRequest(method, params) {
   const discovery = method === 'agent_search'
-  const allowed = discovery ? ['ids', 'providers', 'credentials'] : ['token', 'choices', 'credentials']
+  const allowed = discovery ? ['ids', 'providers'] : ['token', 'choices']
   if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('站点搜索请求包含不支持的参数。')
   if (discovery) {
     if (!Array.isArray(params.ids) || !params.ids.length || params.ids.length > AGENT_SELECTION_MAX
@@ -77,7 +77,9 @@ function validateSearchRequest(method, params) {
         || Object.keys(row).sort().join(',') !== 'candidateId,id' || !validAgentID(row.id) || !validAgentID(row.candidateId))) {
     throw new Error('请从此次搜索中选择有效的作品候选。')
   }
-  const credentials = params.credentials ?? {}
+}
+
+function validateSearchCredentials(credentials) {
   if (!isRecord(credentials) || Object.keys(credentials).some(site => !['dmm', 'nhentai'].includes(site))) {
     throw new Error('站点凭据格式无效。')
   }
@@ -156,7 +158,11 @@ function validateCall(method, params) {
   if (['agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'].includes(method)) {
     const { komga_scope, ...rest } = params
     if (typeof komga_scope !== 'string' || !/^(?:[a-f0-9]{20})?$/.test(komga_scope)) throw new Error('Agent 书库范围无效。')
-    if (method !== 'agent_prepare') validateAgentRequest(method, rest)
+    if (method === 'agent_search' || method === 'agent_search_preview') {
+      const { credentials = {}, ...request } = rest
+      validateSearchRequest(method, request)
+      validateSearchCredentials(credentials)
+    } else if (method === 'agent_apply') validateAgentRequest(method, rest)
     else {
       const { profile, api_key, ...request } = rest
       validateAgentRequest(method, { ...request, profile_id: 'trusted-profile' })

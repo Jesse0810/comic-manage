@@ -1039,6 +1039,26 @@ async function run() {
   } finally {
     await new Promise(resolve => agentModel.close(resolve))
   }
+  const siteCredentials = {
+    dmm: {apiKey:'synthetic-dmm-test-id',affiliateId:'synthetic-dmm-990'},
+    nhentai: {apiKey:'synthetic-nhentai-test-key'},
+  }
+  await toggle('site-settings-open')
+  await waitFor("document.querySelector('input[data-testid=site-settings-dmm-key], [data-testid=site-settings-dmm-key] input')?.disabled === false", 'site settings loaded')
+  await setField('site-settings-dmm-key', siteCredentials.dmm.apiKey)
+  await setField('site-settings-dmm-affiliate', siteCredentials.dmm.affiliateId)
+  await toggle('site-settings-dmm-save')
+  await waitFor("document.querySelector('[data-testid=site-settings-dmm-status]')?.textContent.includes('已保存')", 'DMM credentials saved')
+  await setField('site-settings-nhentai-key', siteCredentials.nhentai.apiKey)
+  await toggle('site-settings-nhentai-save')
+  await waitFor("document.querySelector('[data-testid=site-settings-nhentai-status]')?.textContent.includes('已保存')", 'nhentai credentials saved')
+  const siteStatus = {dmm:{configured:true},nhentai:{configured:true}}
+  assert.deepEqual(await call('site_config_get'), siteStatus)
+  const encryptedSites = await fs.readFile(path.join(dataDir, 'site-credentials.json'), 'utf8')
+  for (const value of Object.values(siteCredentials).flatMap(Object.values)) assert(!encryptedSites.includes(value))
+  await capture('ComicManage-Electron-site-settings.png')
+  await toggle('site-settings-close')
+  await waitFor("!document.querySelector('[data-testid=site-settings-dmm-key]')?.getClientRects().length", 'site settings closed')
   // The site search UI is exercised through its real desktop bridge with synthetic provider responses.
   const siteBooks = (await call('bootstrap')).comics.filter(book => agentBooks.includes(book.metadata.title))
   const [firstSiteBook, secondSiteBook] = siteBooks
@@ -1067,13 +1087,22 @@ async function run() {
     await toggle('agent-tab-search')
     await waitFor("document.querySelector('[data-testid=agent-search-workspace]')?.getClientRects().length", 'Agent site search tab')
     await toggle('agent-search-scope-filtered')
+    await waitFor("document.querySelector('[data-testid=agent-search-dmm-status]')?.textContent.includes('已配置') && document.querySelector('[data-testid=agent-search-nhentai-status]')?.textContent.includes('已配置')", 'Agent sees persisted site statuses')
+    await evaluate("document.querySelector('input[data-testid=agent-search-provider-dmm], [data-testid=agent-search-provider-dmm] input').click()")
     await toggle('agent-search-start')
     await waitFor("document.querySelectorAll('[data-testid=agent-search-book]').length === 2", 'unique and ambiguous candidates')
     assert.equal(requests[0].method, 'agent_search')
+    assert.deepEqual(requests[0].params.credentials, siteCredentials)
     assert.deepEqual(new Set(requests[0].params.ids), new Set(siteBooks.map(book=>book.id)))
     await evaluate("document.querySelector('[data-testid=agent-search-candidate][data-candidate-id=option-b] input')?.click()")
+    await toggle('agent-search-site-settings')
+    await waitFor("document.querySelector('input[data-testid=site-settings-dmm-key], [data-testid=site-settings-dmm-key] input')?.disabled === false", 'Agent opens the same settings')
+    assert.equal(await evaluate("document.querySelector('input[data-testid=site-settings-dmm-key], [data-testid=site-settings-dmm-key] input').value"), '')
+    await toggle('site-settings-close')
+    await waitFor("!document.querySelector('[data-testid=site-settings-dmm-key]')?.getClientRects().length", 'return to current candidates')
     await toggle('agent-search-preview')
     await waitFor("document.querySelectorAll('[data-testid=agent-search-draft]').length === 2", 'only chosen editions get field previews')
+    assert.deepEqual(requests[1].params.credentials, siteCredentials)
     assert.deepEqual(Object.fromEntries(requests[1].params.choices.map(item=>[item.id,item.candidateId])),
       {[firstSiteBook.id]:'match-a',[secondSiteBook.id]:'option-b'})
     await toggle('agent-search-select-empty')
@@ -1087,7 +1116,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, site search and ambiguous candidate review, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

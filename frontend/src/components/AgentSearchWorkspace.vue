@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Check, Collection, Filter, Loading, Search, VideoPause } from '@element-plus/icons-vue'
+import { Check, Collection, Filter, Loading, Search, Setting, VideoPause } from '@element-plus/icons-vue'
 import { invoke } from '../api'
 import { displayTitle, errorMessage } from '../types'
-import type { Comic, ScrapeProvider } from '../types'
+import type { Comic, ScrapeProvider, SiteConfiguration } from '../types'
 
-const props = defineProps<{ selected: Comic[]; filtered: Comic[]; disabled: boolean }>()
-const emit = defineEmits<{ applied: []; 'task-state': [working: boolean] }>()
+const props = defineProps<{
+  selected: Comic[]
+  filtered: Comic[]
+  disabled: boolean
+  siteConfig: SiteConfiguration | null
+  siteConfigLoading?: boolean
+}>()
+const emit = defineEmits<{ applied: []; 'task-state': [working: boolean]; 'site-settings': [] }>()
 
 type Scope = 'selected' | 'filtered'
 type Work = 'search' | 'preview' | 'apply'
@@ -67,9 +73,6 @@ const fields: Record<string, string> = {
 
 const scope = ref<Scope>('selected')
 const sites = ref<ScrapeProvider[]>(['dlsite', 'ehentai', 'nhentai'])
-const nhKey = ref('')
-const dmmKey = ref('')
-const dmmAffiliate = ref('')
 const work = ref<Work | ''>('')
 const cancelling = ref(false)
 const message = ref('')
@@ -92,8 +95,8 @@ const targetById = computed(() => new Map(targets.value.map(book => [book.id, bo
 const searchKey = computed(() => JSON.stringify([scope.value, targets.value.map(book => book.id).sort(), [...sites.value].sort()]))
 const busy = computed(() => props.disabled || !!work.value)
 const hasDmm = computed(() => sites.value.includes('dmm'))
-const hasNhentai = computed(() => sites.value.includes('nhentai'))
-const dmmReady = computed(() => !!dmmKey.value.trim() && !!dmmAffiliate.value.trim())
+const dmmReady = computed(() => props.siteConfig?.dmm.configured === true)
+const nhentaiReady = computed(() => props.siteConfig?.nhentai.configured === true)
 const canSearch = computed(() => !busy.value && targets.value.length > 0 && targets.value.length <= MAX_BOOKS &&
   sites.value.length > 0 && (!hasDmm.value || dmmReady.value))
 const isStale = computed(() => !!submitted.value && submitted.value !== searchKey.value)
@@ -179,18 +182,6 @@ function selectEmpty() {
     if (empty.length) checked.value.set(book.id, new Set(empty))
   }
 }
-function credentials() {
-  const apiKey = nhKey.value.trim()
-  return {
-    ...(hasNhentai.value && apiKey ? { nhentai: { apiKey } } : {}),
-    ...(hasDmm.value && dmmReady.value ? { dmm: { apiKey: dmmKey.value.trim(), affiliateId: dmmAffiliate.value.trim() } } : {}),
-  }
-}
-function safeText(value: string) {
-  return [nhKey.value, dmmKey.value, dmmAffiliate.value]
-    .map(secret => secret.trim()).filter(Boolean)
-    .reduce((visible, secret) => visible.split(secret).join('•••'), value)
-}
 function start(kind: Work, status: string) {
   problem.value = ''
   message.value = status
@@ -205,7 +196,7 @@ function finish() {
 }
 async function search() {
   if (!canSearch.value) return
-  const request = { ids: targets.value.map(book => book.id), providers: [...sites.value], credentials: credentials() }
+  const request = { ids: targets.value.map(book => book.id), providers: [...sites.value] }
   submitted.value = searchKey.value
   results.value = plan.value = report.value = null
   candidateBooks.value.clear()
@@ -224,12 +215,12 @@ async function search() {
     if (uncertain) candidateBooks.value.add(uncertain.id)
     await nextTick()
     candidateSection.value?.scrollIntoView({ block: 'start' })
-  } catch (error) { problem.value = safeText(errorMessage(error)) }
+  } catch (error) { problem.value = errorMessage(error) }
   finally { finish() }
 }
 async function preview() {
   if (!canPreview.value || !results.value?.token) return
-  const request = { token: results.value.token, choices: choices.value, credentials: credentials() }
+  const request = { token: results.value.token, choices: choices.value }
   previewFor.value = choiceKey.value
   plan.value = report.value = null
   checked.value.clear()
@@ -242,7 +233,7 @@ async function preview() {
     if (first) reviewBooks.value.add(first.id)
     await nextTick()
     reviewSection.value?.scrollIntoView({ block: 'start' })
-  } catch (error) { problem.value = safeText(errorMessage(error)) }
+  } catch (error) { problem.value = errorMessage(error) }
   finally { finish() }
 }
 async function apply() {
@@ -256,7 +247,7 @@ async function apply() {
     reviewSection.value?.scrollIntoView({ block: 'start' })
   } catch (error) {
     if (plan.value) plan.value.token = null
-    problem.value = safeText(errorMessage(error))
+    problem.value = errorMessage(error)
   } finally { finish() }
 }
 async function cancel() {
@@ -264,7 +255,7 @@ async function cancel() {
   cancelling.value = true
   try { await invoke('cancel') }
   catch (error) {
-    problem.value = safeText(errorMessage(error))
+    problem.value = errorMessage(error)
     cancelling.value = false
   }
 }
@@ -297,22 +288,23 @@ async function cancel() {
             </details>
           </section>
           <section aria-labelledby="site-providers-heading">
-            <h2 id="site-providers-heading">搜索站点</h2>
+            <div class="site-provider-heading">
+              <h2 id="site-providers-heading">搜索站点</h2>
+              <el-button link :icon="Setting" :disabled="busy" data-testid="agent-search-site-settings" @click="emit('site-settings')">站点设置</el-button>
+            </div>
             <p class="site-note site-provider-note">搜索请求会向所选站点发送原名和作者。</p>
             <el-checkbox-group v-model="sites" :disabled="busy" class="site-providers">
               <el-checkbox v-for="site in providers" :key="site.id" :value="site.id" :data-testid="'agent-search-provider-' + site.id">{{ site.label }}</el-checkbox>
             </el-checkbox-group>
-            <div v-if="hasDmm" class="site-credentials">
-              <label for="agent-dmm-id">DMM API ID</label>
-              <el-input id="agent-dmm-id" v-model="dmmKey" :disabled="busy" type="password" autocomplete="off" maxlength="512" data-testid="agent-search-dmm-key" />
-              <label for="agent-dmm-affiliate">Affiliate ID</label>
-              <el-input id="agent-dmm-affiliate" v-model="dmmAffiliate" :disabled="busy" type="password" autocomplete="off" maxlength="512" data-testid="agent-search-dmm-affiliate" />
-              <p class="site-note">DMM 需要两项官方凭据。凭据仅在当前窗口用于搜索和详情读取。</p>
+            <p v-if="siteConfigLoading" class="site-note">正在读取站点设置…</p>
+            <div v-else class="site-provider-status">
+              <span class="site-note" :class="{ warning: hasDmm && !dmmReady }" data-testid="agent-search-dmm-status">
+                {{ dmmReady ? 'DMM / FANZA 已配置' : 'DMM / FANZA 需要配置后使用' }}
+              </span>
+              <span class="site-note" data-testid="agent-search-nhentai-status">
+                {{ nhentaiReady ? 'nhentai 已配置' : 'nhentai 可公开搜索，API Key 选填' }}
+              </span>
             </div>
-            <details v-if="hasNhentai" class="site-targets site-nh">
-              <summary>nhentai API Key（可选）</summary>
-              <el-input v-model="nhKey" :disabled="busy" type="password" autocomplete="off" maxlength="512" aria-label="nhentai API Key" data-testid="agent-search-nh-key" />
-            </details>
           </section>
         </div>
         <footer class="site-actions">
@@ -341,7 +333,7 @@ async function cancel() {
             <span class="site-state" :class="book.status">{{ statusLabels[book.status] }}</span>
           </button>
           <div v-if="candidateBooks.has(book.id)" class="site-book-body">
-            <ul v-if="book.warnings?.length" class="site-warnings"><li v-for="(warning, index) in book.warnings" :key="index">{{ safeText(warning) }}</li></ul>
+            <ul v-if="book.warnings?.length" class="site-warnings"><li v-for="(warning, index) in book.warnings" :key="index">{{ warning }}</li></ul>
             <div v-if="book.candidates.length" class="site-candidate-group" role="radiogroup" :aria-label="book.title + ' 的候选'">
               <label v-for="item in book.candidates" :key="item.id" class="site-candidate" :class="{ chosen: picked.get(book.id) === item.id }" data-testid="agent-search-candidate" :data-candidate-id="item.id">
                 <input type="radio" :name="'site-candidate-' + book.id" :value="item.id" :checked="picked.get(book.id) === item.id" :disabled="!canChoose" @change="selectCandidate(book, item.id)">
@@ -360,7 +352,11 @@ async function cancel() {
           </div>
         </article>
         <footer class="site-actions site-sticky">
-          <span class="site-note">{{ needsDmmDetails && !dmmReady ? '请填写 DMM 凭据后读取详情。' : '已选 ' + choices.length + ' 本，未选择的作品会跳过。' }}</span>
+          <div v-if="needsDmmDetails && !dmmReady" class="site-provider-status">
+            <span class="site-note warning">读取 DMM / FANZA 候选前，请先配置站点凭据。</span>
+            <el-button link :disabled="busy" @click="emit('site-settings')">站点设置</el-button>
+          </div>
+          <span v-else class="site-note">已选 {{ choices.length }} 本，未选择的作品会跳过。</span>
           <el-button type="primary" :disabled="!canPreview" :loading="work === 'preview'" data-testid="agent-search-preview" @click="preview">读取详情并预览字段</el-button>
         </footer>
       </section>
@@ -377,7 +373,7 @@ async function cancel() {
         <el-alert v-else-if="!report && (isStale || previewFor !== choiceKey)" title="已选候选或搜索范围有变化，请重新读取详情。" type="warning" :closable="false" show-icon />
         <div v-if="report" class="site-report" role="status" data-testid="agent-search-report">
           <strong>已保存 {{ report.updated }} 本草稿</strong><span v-if="report.skipped"> · 跳过 {{ report.skipped }} 本</span><span v-if="report.cancelled"> · 保存已取消</span>
-          <ul v-if="report.errors?.length" class="site-warnings"><li v-for="(item, index) in report.errors" :key="index">{{ item.title }} · {{ safeText(item.message) }}</li></ul>
+          <ul v-if="report.errors?.length" class="site-warnings"><li v-for="(item, index) in report.errors" :key="index">{{ item.title }} · {{ item.message }}</li></ul>
         </div>
         <article v-for="book in plan.books" :key="book.id" class="site-book" data-testid="agent-search-draft" :data-book-id="book.id">
           <button type="button" class="site-book-heading" :aria-expanded="reviewBooks.has(book.id)" @click="toggleExpanded(reviewBooks, book.id)">
@@ -387,7 +383,7 @@ async function cancel() {
             <span class="site-note">{{ book.fields.length ? book.fields.length + ' 项候选' : '无可填字段' }}</span>
           </button>
           <div v-if="reviewBooks.has(book.id)" class="site-book-body">
-            <ul v-if="book.warnings?.length" class="site-warnings"><li v-for="(warning, index) in book.warnings" :key="index">{{ safeText(warning) }}</li></ul>
+            <ul v-if="book.warnings?.length" class="site-warnings"><li v-for="(warning, index) in book.warnings" :key="index">{{ warning }}</li></ul>
             <div v-if="book.fields.length" class="site-diff" role="table" :aria-label="book.title + ' 的字段对照'">
               <div class="site-diff-line site-diff-header" role="row"><strong role="columnheader">选择字段</strong><strong role="columnheader">当前值</strong><strong role="columnheader">候选值</strong></div>
               <div v-for="change in book.fields" :key="change.field" class="site-diff-line" role="row" data-testid="agent-search-field" :data-field="change.field">
@@ -438,11 +434,10 @@ async function cancel() {
 .site-targets { color: var(--site-muted); font-size: 11px; margin-top: 9px; }
 .site-targets summary { cursor: pointer; width: fit-content; color: #47765d; }
 .site-targets ul { padding-left: 20px; margin: 6px 0 0; max-height: 113px; overflow: auto; line-height: 1.6; overflow-wrap: anywhere; }
-.site-targets .el-input { margin-top: 5px; width: 100%; }
+.site-provider-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .site-providers { display: flex; flex-wrap: wrap; gap: 3px 14px; }
 .site-providers :deep(.el-checkbox) { margin: 0; height: 26px; }
-.site-credentials { margin-top: 8px; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 6px 8px; color: var(--site-muted); font-size: 11px; }
-.site-credentials p { grid-column: 1 / -1; }
+.site-provider-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .site-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--site-line); }
 .site-activity, .site-results { margin-top: 12px; }
 .site-activity { display: grid; gap: 6px; }

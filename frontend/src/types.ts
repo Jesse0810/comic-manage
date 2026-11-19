@@ -16,6 +16,7 @@ export interface Metadata {
   language: string; age_rating: string; summary: string; year: string; month: string; cover_index: number; original_xml: string
 }
 export type ScrapeProvider = 'ehentai' | 'nhentai' | 'dlsite' | 'dmm'
+export type SiteConfiguration = Record<'dmm' | 'nhentai', { configured: boolean }>
 export const scrapeFieldKeys = ['title', 'authors', 'pencillers', 'publisher', 'translator', 'original_works', 'characters', 'genre', 'tags', 'language', 'release_type', 'release_platforms', 'year', 'month', 'day', 'summary', 'age_rating'] as const
 export type ScrapeFieldKey = typeof scrapeFieldKeys[number]
 export type ScrapeFields = Partial<Pick<Metadata, ScrapeFieldKey>>
