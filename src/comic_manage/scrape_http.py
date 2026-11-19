@@ -31,7 +31,12 @@ class _NoRedirects(HTTPRedirectHandler):
 def request_source(url: str, *, body: dict | None = None, headers: dict | None = None,
                    accept: str = "application/json", cancel=None) -> bytes:
     parts = urlsplit(url)
-    if parts.scheme != "https" or parts.netloc not in API_HOSTS:
+    public_search = (
+        parts.netloc == "e-hentai.org" and parts.path == "/" and not parts.fragment
+        and 9 < len(parts.query) <= 2500 and parts.query.startswith("f_search=") and "&" not in parts.query
+        and body is None and not headers and accept == "text/html"
+    )
+    if parts.scheme != "https" or (parts.netloc not in API_HOSTS and not public_search):
         raise ScrapeError("不支持此资料来源。")
     headers = {
         "User-Agent": f"ComicManage/{__version__} (https://github.com/Jesse0810/comic-manage)",

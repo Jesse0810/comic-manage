@@ -14,7 +14,7 @@ from . import model_transport
 from .metadata import COLORS, GENRES, Metadata, RELEASE_PLATFORMS, RELEASE_TYPES, TEXT_VERSIONS, title_key, unique
 from .model_assist import _allowed_text, _grounded_fields, _object_answer, _safe_text
 from .repository import Repository
-from .scrape import _fields, scrape_preview, work_link
+from .scrape import SITE_PROPOSAL_FIELDS, _fields, scrape_preview, work_link
 from .scrape_http import ScrapeError
 from .sources import Cancelled, check_cancel
 
@@ -51,6 +51,7 @@ _CHOICES = {
 }
 _MULTI = {"authors", "pencillers", "tags", "release_platforms"}
 _FIELDS = (*_LABELS, "release_date")
+_WRITABLE_FIELDS = frozenset(_FIELDS) | SITE_PROPOSAL_FIELDS
 _PROVIDER_NAMES = {"ehentai": "E-Hentai", "nhentai": "nhentai", "dlsite": "DLsite"}
 _ALIAS_FIELDS = {alias: field for field, aliases in _LABELS.items() for alias in aliases}
 _ALIAS_PATTERN = "|".join(map(re.escape, sorted(_ALIAS_FIELDS, key=len, reverse=True)))
@@ -396,10 +397,10 @@ class LibraryAgent:
         except Cancelled:
             return {"token": None, "books": [rows[identity] for identity in identities if identity in rows],
                     "cancelled": True}
-        token = self._remember(scope, planned) if planned else None
+        token = self.remember_plan(scope, planned) if planned else None
         return {"token": token, "books": [rows[identity] for identity in identities], "cancelled": False}
 
-    def _remember(self, scope: str, proposed: dict) -> str:
+    def remember_plan(self, scope: str, proposed: dict) -> str:
         token = secrets.token_urlsafe(24)
         now = time.monotonic()
         with self._lock:
@@ -419,8 +420,8 @@ class LibraryAgent:
                 raise AgentError("应用请求只能包含预览中的作品和字段。")
             identity, fields = choice["id"], choice["fields"]
             if (not _text(identity, 128) or identity in selections or not isinstance(fields, list)
-                    or not 1 <= len(fields) <= len(_FIELDS)
-                    or any(not isinstance(field, str) or field not in _FIELDS for field in fields)
+                    or not 1 <= len(fields) <= len(_WRITABLE_FIELDS)
+                    or any(not isinstance(field, str) or field not in _WRITABLE_FIELDS for field in fields)
                     or len(set(fields)) != len(fields)):
                 raise AgentError("应用选择无效，请重新勾选预览中的字段。")
             selections[identity] = tuple(fields)

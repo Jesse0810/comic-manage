@@ -1039,11 +1039,55 @@ async function run() {
   } finally {
     await new Promise(resolve => agentModel.close(resolve))
   }
+  // The site search UI is exercised through its real desktop bridge with synthetic provider responses.
+  const siteBooks = (await call('bootstrap')).comics.filter(book => agentBooks.includes(book.metadata.title))
+  const [firstSiteBook, secondSiteBook] = siteBooks
+  const requests = []
+  const siteBridgeCall = desktop.bridge.call
+  desktop.bridge.call = function (method, params) {
+    if (!['agent_search', 'agent_search_preview', 'agent_apply'].includes(method)) return siteBridgeCall.call(this, method, params)
+    requests.push({method, params})
+    if (method === 'agent_search') {
+      const option = (id, title) => ({ id, provider:'dlsite', title, authors:['示例作者'],
+        url:'https://www.dlsite.com/home/work/=/product_id/RJ120000.html', reasons:['原名一致'] })
+      return Promise.resolve({ token:'site-ticket', cancelled:false, books:[
+        {id:firstSiteBook.id,title:firstSiteBook.metadata.title,status:'matched',recommendedId:'match-a', warnings:[],
+          candidates:[option('match-a','唯一匹配')]},
+        {id:secondSiteBook.id,title:secondSiteBook.metadata.title,status:'ambiguous',warnings:[],
+          candidates:[option('option-a','待核对的版本'),option('option-b','另一个版本')]},
+      ] })
+    }
+    if (method === 'agent_search_preview') return Promise.resolve({ token:'draft-ticket',cancelled:false,
+      books:params.choices.map(choice=>({id:choice.id,title:'来源测试作品',warnings:[],
+        fields:[{field:'pencillers',before:[],after:['示例画师']},{field:'title',before:'原题',after:'候选题'}]})) })
+    return Promise.resolve({updated:params.books.length,skipped:0,errors:[],cancelled:false})
+  }
+  try {
+    await toggle('agent-open')
+    await toggle('agent-tab-search')
+    await waitFor("document.querySelector('[data-testid=agent-search-workspace]')?.getClientRects().length", 'Agent site search tab')
+    await toggle('agent-search-scope-filtered')
+    await toggle('agent-search-start')
+    await waitFor("document.querySelectorAll('[data-testid=agent-search-book]').length === 2", 'unique and ambiguous candidates')
+    assert.equal(requests[0].method, 'agent_search')
+    assert.deepEqual(new Set(requests[0].params.ids), new Set(siteBooks.map(book=>book.id)))
+    await evaluate("document.querySelector('[data-testid=agent-search-candidate][data-candidate-id=option-b] input')?.click()")
+    await toggle('agent-search-preview')
+    await waitFor("document.querySelectorAll('[data-testid=agent-search-draft]').length === 2", 'only chosen editions get field previews')
+    assert.deepEqual(Object.fromEntries(requests[1].params.choices.map(item=>[item.id,item.candidateId])),
+      {[firstSiteBook.id]:'match-a',[secondSiteBook.id]:'option-b'})
+    await toggle('agent-search-select-empty')
+    await toggle('agent-search-apply')
+    await waitFor("document.querySelector('[data-testid=agent-search-report]')?.textContent.includes('2 本')", 'batch draft confirmation')
+    assert(requests[2].params.books.every(book=>book.fields.length === 1 && book.fields[0] === 'pencillers'))
+  } finally {
+    desktop.bridge.call = siteBridgeCall
+  }
   assert.equal(javascriptErrors.filter(x => /Uncaught|TypeError|ReferenceError/.test(x)).length, 0, javascriptErrors.join('\n'))
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, site search and ambiguous candidate review, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

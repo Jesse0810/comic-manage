@@ -6,8 +6,8 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'agent_prepare', 'agent_apply', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
-const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry', 'agent_prepare', 'agent_apply'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
@@ -57,8 +57,42 @@ const AGENT_TEXT_MAX = 1200
 const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
 const validAgentID = value => typeof value === 'string' && !!value && value.length <= 128 && !/[^A-Za-z0-9_-]/.test(value)
 
+const SEARCH_SITES = new Set(['dlsite', 'dmm', 'ehentai', 'nhentai'])
+
+function validateSearchRequest(method, params) {
+  const discovery = method === 'agent_search'
+  const allowed = discovery ? ['ids', 'providers', 'credentials'] : ['token', 'choices', 'credentials']
+  if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('站点搜索请求包含不支持的参数。')
+  if (discovery) {
+    if (!Array.isArray(params.ids) || !params.ids.length || params.ids.length > AGENT_SELECTION_MAX
+        || params.ids.some(id => !validAgentID(id)) || new Set(params.ids).size !== params.ids.length) {
+      throw new Error('每次请选择 1 至 24 本不同的作品。')
+    }
+    if (!Array.isArray(params.providers) || !params.providers.length || params.providers.length > SEARCH_SITES.size
+        || params.providers.some(site => !SEARCH_SITES.has(site)) || new Set(params.providers).size !== params.providers.length) {
+      throw new Error('请选择要搜索的站点。')
+    }
+  } else if (!validAgentID(params.token) || !Array.isArray(params.choices) || !params.choices.length
+      || params.choices.length > AGENT_SELECTION_MAX || params.choices.some(row => !isRecord(row)
+        || Object.keys(row).sort().join(',') !== 'candidateId,id' || !validAgentID(row.id) || !validAgentID(row.candidateId))) {
+    throw new Error('请从此次搜索中选择有效的作品候选。')
+  }
+  const credentials = params.credentials ?? {}
+  if (!isRecord(credentials) || Object.keys(credentials).some(site => !['dmm', 'nhentai'].includes(site))) {
+    throw new Error('站点凭据格式无效。')
+  }
+  for (const [site, value] of Object.entries(credentials)) {
+    const keys = site === 'dmm' ? ['apiKey', 'affiliateId'] : ['apiKey']
+    if (!isRecord(value) || Object.keys(value).some(key => !keys.includes(key))
+        || Object.values(value).some(secret => typeof secret !== 'string' || !/^[A-Za-z0-9_.=+/~-]{1,512}$/.test(secret))) {
+      throw new Error('站点 API 凭据格式无效。')
+    }
+  }
+}
+
 function validateAgentRequest(method, params) {
   if (!isRecord(params)) throw new Error('Agent 请求格式无效。')
+  if (method === 'agent_search' || method === 'agent_search_preview') return validateSearchRequest(method, params)
   const prepare = method === 'agent_prepare'
   const allowed = prepare ? ['ids', 'profile_id', 'prompt', 'use_sources'] : ['token', 'books']
   if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('Agent 请求包含不支持的参数。')
@@ -119,10 +153,10 @@ function validateCall(method, params) {
       if (!isRecord(params.metadata) || (params.siteFields !== undefined && !isRecord(params.siteFields))) throw new Error('作品资料无效。')
     }
   }
-  if (method === 'agent_prepare' || method === 'agent_apply') {
+  if (['agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'].includes(method)) {
     const { komga_scope, ...rest } = params
     if (typeof komga_scope !== 'string' || !/^(?:[a-f0-9]{20})?$/.test(komga_scope)) throw new Error('Agent 书库范围无效。')
-    if (method === 'agent_apply') validateAgentRequest(method, rest)
+    if (method !== 'agent_prepare') validateAgentRequest(method, rest)
     else {
       const { profile, api_key, ...request } = rest
       validateAgentRequest(method, { ...request, profile_id: 'trusted-profile' })

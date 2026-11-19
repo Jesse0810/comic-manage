@@ -6,6 +6,7 @@ import DetailsPanel from './components/DetailsPanel.vue'
 import LibraryTable from './components/LibraryTable.vue'
 import LibraryFieldToolbar from './components/LibraryFieldToolbar.vue'
 import AgentWorkspace from './components/AgentWorkspace.vue'
+import AgentSearchWorkspace from './components/AgentSearchWorkspace.vue'
 import { activeLibraryConditions, matchesLibraryConditions, type LibraryCondition, type LibrarySort } from './library-fields'
 import { buildLibraryEntries } from './library-groups'
 import ImportDialog from './components/ImportDialog.vue'
@@ -84,6 +85,7 @@ const batchIds = ref<string[]>([])
 const scrapeVisible = ref(false)
 const modelSettingsVisible = ref(false)
 const agentMode = ref(false)
+const agentTab = ref<'organize' | 'search'>('organize')
 const agentVisited = ref(false)
 const agentWorking = ref(false)
 const fieldConditions = ref<LibraryCondition[]>([])
@@ -733,9 +735,17 @@ onBeforeUnmount(() => unsubscribe?.())
 
       <el-alert v-if="startupError" :title="startupError" description="请关闭并重新打开桌面程序。漫画源文件和本机资料库不会被删除。" type="error" :closable="false" show-icon class="startup-error" />
 
-      <AgentWorkspace v-if="agentVisited" v-show="agentMode" :selected="agentSelected" :filtered="agentFiltered"
+      <div v-if="agentMode" class="agent-modes" role="group" aria-label="Agent 工作方式">
+        <el-button data-testid="agent-tab-organize" :type="agentTab === 'organize' ? 'primary' : 'default'"
+          :aria-pressed="agentTab === 'organize'" :disabled="agentWorking" @click="agentTab = 'organize'">批量整理</el-button>
+        <el-button data-testid="agent-tab-search" :type="agentTab === 'search' ? 'primary' : 'default'"
+          :aria-pressed="agentTab === 'search'" :disabled="agentWorking" @click="agentTab = 'search'">站点搜索</el-button>
+      </div>
+      <AgentWorkspace v-if="agentVisited" v-show="agentMode && agentTab === 'organize'" :selected="agentSelected" :filtered="agentFiltered"
         :configuration="modelConfiguration" :disabled="agentUnavailable" @model-settings="openModelSettings"
         @task-state="agentWorking = $event" @applied="refreshAfterAgent" />
+      <AgentSearchWorkspace v-if="agentVisited" v-show="agentMode && agentTab === 'search'" :selected="agentSelected"
+        :filtered="agentFiltered" :disabled="agentUnavailable" @task-state="agentWorking = $event" @applied="refreshAfterAgent" />
 
       <div v-show="!agentMode" class="work-area">
         <section v-show="!editorExpanded" class="library-panel">
@@ -785,6 +795,8 @@ onBeforeUnmount(() => unsubscribe?.())
 </template>
 
 <style scoped>
+.agent-modes { display: flex; gap: 8px; margin-bottom: 12px; flex: 0 0 auto; }
+.agent-modes .el-button { margin: 0; }
 .navigation .agent-nav { margin-top: 8px; }
 .navigation button:disabled { opacity: .65; cursor: default; }
 .library-source-bar { display: flex; align-items: center; gap: 10px; padding: 13px 19px 0; }

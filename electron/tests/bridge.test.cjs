@@ -234,6 +234,24 @@ test('Agent prepare binds saved model and current Komga scope, while apply accep
   assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1])), { method: 'agent_apply', params: { ...edit, komga_scope: scope } })
 })
 
+test('site search uses the current scope and accepts only approved providers and opaque candidate IDs', async () => {
+  const main = await mainProcessFixture({respond: method => ({ token: method === 'agent_search' ? 'result' : 'drafts', books: [] })})
+  const request = { ids: ['work'], providers: ['dlsite', 'dmm'], credentials: { dmm: { apiKey: 'fake-key', affiliateId: 'fake-990' } } }
+  await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, providers: ['https://example.test'] }), /站点/)
+  await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, komga_scope: 'forged' }), /不支持/)
+  await assert.rejects(main.invoke('comic:call', 'agent_search', { ...request, credentials: { ehentai: { apiKey: 'unexpected' } } }), /凭据/)
+  const discovered = await main.invoke('comic:call', 'agent_search', request)
+  assert.equal(discovered.token, 'result')
+  assert(!JSON.stringify(discovered).includes('fake-key'))
+  const preview = {token: discovered.token, choices: [{id:'work',candidateId:'candidate'}], credentials: request.credentials}
+  await assert.rejects(main.invoke('comic:call', 'agent_search_preview', { ...preview, choices: [{...preview.choices[0],url:'https://example.test'}] }), /候选/)
+  await main.invoke('comic:call', 'agent_search_preview', preview)
+  assert.equal(main.calls.length, 2)
+  assert.match(main.calls[0].params.komga_scope, /^[a-f0-9]{20}$/)
+  assert.equal(main.calls[1].params.komga_scope, main.calls[0].params.komga_scope)
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1].params.choices)), preview.choices)
+})
+
 test('cancelling Agent while model credentials are loading prevents the model call', async () => {
   let finish
   let started

@@ -23,6 +23,7 @@ TEXT_FIELDS = {"title": 500, "publisher": 500, "summary": 8000, "language": 35}
 LIST_FIELDS = {"authors": 30, "pencillers": 30, "original_works": 1, "characters": 50,
                "tags": 80, "release_platforms": 5}
 ENUM_FIELDS = {"genre": GENRES, "release_type": RELEASE_TYPES, "age_rating": AGE_RATINGS[1:]}
+SITE_PROPOSAL_FIELDS = frozenset((*TEXT_FIELDS, *LIST_FIELDS, *ENUM_FIELDS, "release_date", "web"))
 MANAGED_TAGS = frozenset({
     "原作", "角色", "作品组", "文字版本", "内容类型", "发行性质", "出版形态", "发布方式", "发布平台",
     "色彩", "修正状态", "汉化状态", "年龄", "年龄等级", "年龄分级", "agerating", "彩色状态",

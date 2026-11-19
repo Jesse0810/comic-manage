@@ -138,20 +138,20 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       agentTask.cancelled = true
       return { cancelled: true }
     }
-    if (method === 'agent_prepare' || method === 'agent_apply') {
+    if (['agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'].includes(method)) {
       validateAgentRequest(method, params)
       if (agentTask) throw new Error('已有 Agent 任务正在运行。')
       const task = {
         started: false,
         cancelled: false,
-        emptyResult: method === 'agent_prepare' ? { token: null, books: [], cancelled: true }
-          : { updated: 0, skipped: 0, errors: [], cancelled: true },
+        emptyResult: method === 'agent_apply' ? { updated: 0, skipped: 0, errors: [], cancelled: true }
+          : { token: null, books: [], cancelled: true },
       }
       agentTask = task
       try {
         const komga_scope = await komgaConfig.get().then(currentKomgaScope).catch(() => '')
         if (task.cancelled) return task.emptyResult
-        if (method === 'agent_apply') return await callService(method, { ...params, komga_scope }, task)
+        if (method !== 'agent_prepare') return await callService(method, { ...params, komga_scope }, task)
         const { profile_id, ...request } = params
         const { name, ...connection } = await modelConfig.connection(profile_id)
         const credentials = await modelConnection(connection)
