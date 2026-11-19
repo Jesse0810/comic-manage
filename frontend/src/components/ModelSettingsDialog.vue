@@ -53,7 +53,7 @@ const status = ref('')
 let request = 0
 
 const account = ref<ChatGPTStatus>(disconnected())
-const availableModels = ref<ChatGPTModel[]>([])
+const availableModels = ref<ChatGPTModel[] | null>(null)
 const accountAction = ref<ChatGPTAction | ''>('')
 const accountError = ref('')
 const remoteRevocationUnknown = ref(false)
@@ -73,7 +73,7 @@ const keyRequired = computed(() => {
   return !!host && parseEndpoint()?.hostname === host
 })
 const validDraft = computed(() => !!form.value.name.trim() && !!form.value.model.trim() && (usingChatGPT.value
-  ? account.value.sharing && !accountAction.value && availableModels.value.some(model => model.slug === form.value.model)
+  ? account.value.sharing && !accountAction.value && availableModels.value?.some(model => model.slug === form.value.model)
   : !!parseEndpoint() && (!keyRequired.value || hasKey.value)))
 const isDefault = computed(() => !!original.value && original.value.id === props.configuration.default_id)
 
@@ -198,11 +198,16 @@ function showPlanWelcome() {
   void ElMessageBox.alert('此模型的合资格刮削请求使用你的 ChatGPT 方案或额度。你可在 ChatGPT 设置中查看和管理用量。',
     '正在使用你的 ChatGPT 方案', { confirmButtonText: '知道了', type: 'success' }).catch(() => {})
 }
+function chatGPTRequestError(reason: unknown) {
+  return errorMessage(reason).replace(/^Error invoking remote method 'comic:call': (?:Error: )?/, '')
+}
+
 async function accountRequest(action: ChatGPTAction) {
   if (accountAction.value || !props.modelValue || !usingChatGPT.value) return
   const epoch = ++accountEpoch
   accountAction.value = action
   accountError.value = ''
+  availableModels.value = null
   const stillCurrent = () => epoch === accountEpoch && props.modelValue && usingChatGPT.value
   try {
     const method = { status: 'model_chatgpt_status', signin: 'model_chatgpt_sign_in', disconnect: 'model_chatgpt_disconnect' }[action]
@@ -211,7 +216,6 @@ async function accountRequest(action: ChatGPTAction) {
     account.value = result
     if (action === 'disconnect') remoteRevocationUnknown.value = result.revocationConfirmed === false
     else if (result.connected) remoteRevocationUnknown.value = false
-    availableModels.value = []
     if (!result.connected || !result.sharing) return
     if (action === 'signin') showPlanWelcome()
     const response: { models: ChatGPTModel[] } = await window.comic.invoke('model_chatgpt_models')
@@ -219,7 +223,7 @@ async function accountRequest(action: ChatGPTAction) {
     availableModels.value = response.models
     if (!response.models.length) accountError.value = '此账号暂未返回可用的模型。请检查方案和授权。'
   } catch (reason) {
-    if (stillCurrent()) accountError.value = errorMessage(reason)
+    if (stillCurrent()) accountError.value = chatGPTRequestError(reason)
   } finally {
     if (stillCurrent()) accountAction.value = ''
   }
@@ -232,7 +236,7 @@ function stopSignIn() {
 async function cancelChatGPTSignIn() {
   if (accountAction.value !== 'signin') return
   try { await stopSignIn(); await accountRequest('status') }
-  catch (reason) { accountError.value = errorMessage(reason) }
+  catch (reason) { accountError.value = chatGPTRequestError(reason) }
 }
 async function disconnectChatGPT() {
   if (accountAction.value) return
@@ -244,7 +248,7 @@ async function disconnectChatGPT() {
 }
 async function openChatGPTUsage() {
   try { await window.comic.invoke('model_chatgpt_usage') }
-  catch (reason) { accountError.value = errorMessage(reason) }
+  catch (reason) { accountError.value = chatGPTRequestError(reason) }
 }
 watch([() => props.modelValue, usingChatGPT], ([visible, chatgpt]) => {
   if (visible && chatgpt) {
@@ -253,7 +257,7 @@ watch([() => props.modelValue, usingChatGPT], ([visible, chatgpt]) => {
   }
   if (accountAction.value === 'signin') void stopSignIn().catch(() => {})
   else { ++accountEpoch; accountAction.value = '' }
-  availableModels.value = []
+  availableModels.value = null
   accountError.value = ''
   account.value = disconnected()
 }, { immediate: true })
@@ -344,11 +348,12 @@ watch(() => props.modelValue, visible => {
             </section>
             <el-form-item label="ChatGPT 模型" class="model-wide" required>
               <el-select data-testid="model-chatgpt-model" v-model="form.model" filterable
-                :disabled="!account.sharing || !!accountAction" placeholder="选择账号可用的模型">
-                <el-option v-for="model in availableModels" :key="model.slug" :value="model.slug" :label="model.name" />
+                :disabled="!account.sharing || !!accountAction || !availableModels" placeholder="选择账号可用的模型">
+                <el-option v-if="availableModels === null && form.model" :value="form.model" :label="form.model" disabled />
+                <el-option v-for="model in availableModels || []" :key="model.slug" :value="model.slug" :label="model.name" />
               </el-select>
               <el-button v-if="account.sharing" link data-testid="model-chatgpt-refresh" :disabled="!!accountAction" @click="accountRequest('status')">刷新模型</el-button>
-              <p v-if="account.sharing && form.model && !availableModels.some(model => model.slug === form.model) && !accountAction" class="model-help">已保存的模型在此账号下不可用，请重新选择。</p>
+              <p v-if="account.sharing && availableModels && form.model && !availableModels.some(model => model.slug === form.model) && !accountAction" class="model-help">已保存的模型在此账号下不可用，请重新选择。</p>
             </el-form-item>
           </template>
           <template v-else>

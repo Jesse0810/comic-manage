@@ -61,7 +61,7 @@ async function fixture(t, options = {}) {
       issuer, authorization_endpoint: authorizeUrl, token_endpoint: tokenUrl,
       jwks_uri: jwksUrl, revocation_endpoint: revokeUrl,
     })
-    if (url === jwksUrl) return Response.json(jwks)
+    if (url === jwksUrl) return options.jwksResponse?.() ?? Response.json(jwks)
     if (url === tokenUrl) {
       tokenRequests.push(form)
       if (form.get('grant_type') === 'refresh_token') {
@@ -85,7 +85,7 @@ async function fixture(t, options = {}) {
     }
     if (url === resource + '/models') {
       assert.equal(new Headers(init.headers).get('authorization'), 'Bearer access_fixture_1')
-      return Response.json({ models: [
+      return options.modelResponse?.() ?? Response.json({ models: [
         { visibility: 'list', slug: 'gpt-test', display_name: 'Fixture Model' },
         { visibility: 'hidden', slug: 'internal-fixture', display_name: 'Internal' },
       ] })
@@ -158,6 +158,72 @@ test('browser sign-in verifies the callback and stores only protected credential
   assert.notEqual(second.get('state'), first.get('state'))
   assert.notEqual(second.get('nonce'), first.get('nonce'))
   assert.notEqual(second.get('code_challenge'), first.get('code_challenge'))
+})
+
+
+test('a decompressed model catalog larger than the OAuth response limit still returns visible options', async t => {
+  const options = {
+    // The mock returns the decoded body while retaining the compressed wire length.
+    modelResponse: () => Response.json({ models: [
+      {
+        visibility: 'list', slug: 'gpt-test', display_name: 'Fixture Model',
+        descriptions: 'x'.repeat(600 * 1024),
+      },
+      { visibility: 'list', slug: 'gpt-test', display_name: 'Duplicate model' },
+      { visibility: 'hidden', slug: 'internal-fixture', display_name: 'Internal' },
+    ] }, { headers: { 'Content-Encoding': 'gzip', 'Content-Length': '1024' } }),
+  }
+  const scenario = await fixture(t, options)
+  const auth = scenario.make()
+  await auth.signIn(scenario.open)
+  assert.deepEqual(await auth.modelList(), { models: [{ slug: 'gpt-test', name: 'Fixture Model' }] })
+  assert.equal((await auth.get()).connected, true)
+})
+
+function catalogTooLarge(error) {
+  assert.equal(error.code, 'CHATGPT_RESPONSE')
+  assert.equal(error.message, 'ChatGPT 返回的模型列表过大，请稍后点「刷新模型」重试。')
+  return true
+}
+
+test('a model catalog with an oversized declared content length is rejected', async t => {
+  const scenario = await fixture(t, {
+    modelResponse: () => new Response('{"models":[]}', {
+      headers: { 'Content-Type': 'application/json', 'Content-Length': String(16 * 1024 * 1024 + 1) },
+    }),
+  })
+  const auth = scenario.make()
+  await auth.signIn(scenario.open)
+  await assert.rejects(auth.modelList(), catalogTooLarge)
+  assert.equal((await auth.get()).connected, true)
+})
+
+test('a streamed model catalog cannot exceed the limit when the length is unavailable', async t => {
+  const chunk = new Uint8Array(256 * 1024)
+  let remaining = 65
+  const scenario = await fixture(t, { modelResponse: () => new Response(new ReadableStream({
+    pull(controller) {
+      if (remaining > 0) {
+        remaining -= 1
+        controller.enqueue(chunk)
+      } else {
+        controller.close()
+      }
+    },
+  }), { headers: { 'Content-Type': 'application/json' } }) })
+  const auth = scenario.make()
+  await auth.signIn(scenario.open)
+  await assert.rejects(auth.modelList(), catalogTooLarge)
+  assert.equal((await auth.get()).connected, true)
+})
+
+test('the model catalog allowance does not increase the OAuth response limit', async t => {
+  const scenario = await fixture(t, {
+    jwksResponse: () => Response.json({ ...jwks, descriptions: 'x'.repeat(600 * 1024) }),
+  })
+  const auth = scenario.make()
+  await assert.rejects(auth.signIn(scenario.open), /无法验证 ChatGPT 账号授权/)
+  assert.equal((await auth.get()).connected, false)
 })
 
 test('concurrent access renews expiring tokens once and persists the rotation', async t => {

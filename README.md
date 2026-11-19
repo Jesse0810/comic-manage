@@ -6,7 +6,7 @@ Electron 负责桌面窗口、系统对话框与进程管理，Vue / Element Plu
 
 ## Windows 便携版
 
-解压 `ComicManage-Electron-1.17.1-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
+解压 `ComicManage-Electron-1.17.2-windows-x64.zip`，双击 `ComicManage.exe`，保留整个目录。
 
 选中作品后，常用资料会优先显示，右侧栏随窗口宽度调整。点击“展开编辑”可将整个工作区用于编辑，点“返回列表”恢复分栏。点击封面或页面预览中的“大图预览”可按窗口大小查看完整页面，并在大图中翻页。
 

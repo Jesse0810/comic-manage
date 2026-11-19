@@ -4,6 +4,7 @@
 // Native pickers select synthetic fixtures; the IPC/file-processing path is unchanged.
 const { app, dialog } = require('electron')
 const { createApplication } = require('./main.cjs')
+const { ChatGPTAuth } = require('./chatgpt-auth.cjs')
 app.on('window-all-closed', () => {}) // Keep the test alive until service shutdown is verified.
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -216,6 +217,37 @@ async function run() {
   assert.equal(await evaluate('typeof window.process'), 'undefined')
   assert.equal(await evaluate("window.comic.invoke('arbitrary-shell',{}).then(()=>false,()=>true)"), true)
   await capture('ComicManage-Electron-empty.png')
+  const authMethods = ChatGPTAuth.prototype
+  const { get: savedGet, accessToken: savedAccessToken, request: savedRequest } = authMethods
+  let catalogRequests = 0
+  authMethods.get = async () => ({ connected: true, sharing: true, name: '测试 ChatGPT 账号', email: 'synthetic@example.test' })
+  authMethods.accessToken = async () => 'synthetic-catalog-access'
+  authMethods.request = async (url, init) => {
+    assert.equal(url, 'https://api.openai.com/v1/models')
+    assert.equal(init.headers.Authorization, 'Bearer synthetic-catalog-access')
+    if (++catalogRequests === 1) return new Response(null, { status: 503 })
+    return Response.json({ models: [
+      { slug: 'fixture-chat-model', display_name: '测试 ChatGPT 模型', visibility: 'list', description: 'x'.repeat(600 * 1024) },
+      { slug: 'fixture-hidden-model', display_name: '不在目录展示', visibility: 'hidden' },
+    ] })
+  }
+  try {
+    await toggle('model-settings-open')
+    await click('ChatGPT')
+    await waitFor("document.querySelector('[data-testid=model-chatgpt-error]')?.textContent.includes('ChatGPT 模型列表服务暂时不可用')", 'ChatGPT catalog failure is shown')
+    assert.equal(await evaluate("document.querySelector('[data-testid=model-chatgpt-error]').textContent.includes('Error invoking remote method')"), false)
+    assert.equal(await evaluate("document.querySelector('[data-testid=model-chatgpt-account]').textContent.includes('方案用量已授权')"), true)
+    await toggle('model-chatgpt-refresh')
+    await waitFor("!document.querySelector('[data-testid=model-chatgpt-error]') && document.querySelector('[data-testid=model-chatgpt-refresh]')?.disabled === false", 'ChatGPT catalog retry finishes')
+    await chooseOption('model-chatgpt-model', '测试 ChatGPT 模型')
+    await waitFor("document.querySelector('[data-testid=model-profile-save]')?.disabled === false", 'large catalog supplies a selectable ChatGPT model')
+    assert.equal(catalogRequests, 2)
+    await toggle('model-settings-close')
+    await waitFor("!document.querySelector('[data-testid=model-profile-save]')?.getClientRects().length", 'ChatGPT model settings closed')
+  } finally {
+    Object.assign(authMethods, { get: savedGet, accessToken: savedAccessToken, request: savedRequest })
+  }
+
   await click('添加漫画目录')
   await waitFor("document.querySelector('[data-testid=import-pick-folders]')", 'single folder picker entry')
   assert.equal(await evaluate("document.querySelectorAll('[data-testid=import-pick-folders]').length"), 1)
@@ -1116,7 +1148,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, large ChatGPT catalog with retry, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

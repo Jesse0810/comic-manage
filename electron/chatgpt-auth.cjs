@@ -14,7 +14,12 @@ const JWKS = ISSUER + '/.well-known/jwks.json'
 const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage'
 const CALLBACK = '/auth/callback'
 const SCOPES = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'
-const MAX_JSON = 512 * 1024
+const MAX_AUTH_JSON = 512 * 1024
+const MODEL_LIST_JSON = {
+  limit: 16 * 1024 * 1024,
+  label: '模型列表',
+  oversized: 'ChatGPT 返回的模型列表过大，请稍后点「刷新模型」重试。',
+}
 
 class AuthError extends Error {
   constructor(message, code = 'CHATGPT_AUTH') {
@@ -50,19 +55,28 @@ function publicStatus(value) {
 
 function identityError() { return new AuthError('无法验证 ChatGPT 账号授权，请重新登录。') }
 
-async function readJSON(response) {
-  if (Number(response.headers.get('content-length')) > MAX_JSON || !response.body) {
-    throw new AuthError('ChatGPT 返回了无法读取的授权资料。', 'CHATGPT_RESPONSE')
+async function readJSON(response, {
+  limit = MAX_AUTH_JSON, label = '授权资料', oversized = `ChatGPT 返回的${label}过大。`,
+} = {}) {
+  const unreadable = () => new AuthError(`ChatGPT 返回了无法读取的${label}。`, 'CHATGPT_RESPONSE')
+  if (!response.body) throw unreadable()
+  if (Number(response.headers.get('content-length')) > limit) {
+    void response.body.cancel().catch(() => {})
+    throw new AuthError(oversized, 'CHATGPT_RESPONSE')
   }
   let size = 0
   const chunks = []
-  for await (const chunk of response.body) {
-    size += chunk.length
-    if (size > MAX_JSON) throw new AuthError('ChatGPT 返回的授权资料过大。', 'CHATGPT_RESPONSE')
-    chunks.push(chunk)
+  try {
+    for await (const chunk of response.body) {
+      size += chunk.length
+      if (size > limit) throw new AuthError(oversized, 'CHATGPT_RESPONSE')
+      chunks.push(chunk)
+    }
+    return JSON.parse(Buffer.concat(chunks, size).toString('utf8'))
+  } catch (error) {
+    if (error instanceof AuthError) throw error
+    throw unreadable()
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
-  catch { throw new AuthError('ChatGPT 返回了无法读取的授权资料。', 'CHATGPT_RESPONSE') }
 }
 
 async function atomicWrite(file, value) {
@@ -342,9 +356,10 @@ class ChatGPTAuth {
     const accessToken = await this.accessToken()
     const response = await this.request(RESOURCE + '/models', { headers: { Authorization: 'Bearer ' + accessToken } })
     if (response.status === 429) throw new AuthError('ChatGPT 达到当前使用限制，请查看用量设置。', 'CHATGPT_RATE_LIMIT')
+    if (response.status >= 500) throw new AuthError('ChatGPT 模型列表服务暂时不可用，请稍后刷新。', 'CHATGPT_MODELS')
     if (!response.ok) throw new AuthError('无法获取 ChatGPT 套餐模型，请检查授权和套餐用量。', 'CHATGPT_MODELS')
-    const result = await readJSON(response)
-    if (!Array.isArray(result.models)) throw new AuthError('无法读取 ChatGPT 返回的模型列表。', 'CHATGPT_RESPONSE')
+    const result = await readJSON(response, MODEL_LIST_JSON)
+    if (!Array.isArray(result?.models)) throw new AuthError('无法读取 ChatGPT 返回的模型列表。', 'CHATGPT_RESPONSE')
     const models = new Map()
     for (const item of result.models) {
       const slug = text(item?.slug)
