@@ -6,8 +6,8 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
-const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'agent_prepare', 'agent_apply', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry', 'agent_prepare', 'agent_apply'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
   'release_type', 'publication_format', 'year', 'month', 'day', 'language',
@@ -52,6 +52,31 @@ function validateBatchEdit(changes) {
   }
 }
 
+const AGENT_SELECTION_MAX = 24
+const AGENT_TEXT_MAX = 1200
+const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
+const validAgentID = value => typeof value === 'string' && !!value && value.length <= 128 && !/[^A-Za-z0-9_-]/.test(value)
+
+function validateAgentRequest(method, params) {
+  if (!isRecord(params)) throw new Error('Agent 请求格式无效。')
+  const prepare = method === 'agent_prepare'
+  const allowed = prepare ? ['ids', 'profile_id', 'prompt', 'use_sources'] : ['token', 'books']
+  if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('Agent 请求包含不支持的参数。')
+  if (prepare) {
+    if (!Array.isArray(params.ids) || !params.ids.length || params.ids.length > AGENT_SELECTION_MAX
+        || params.ids.some(id => !validAgentID(id))) throw new Error('每次请选择 1 至 24 本作品。')
+    if (!validAgentID(params.profile_id) || typeof params.prompt !== 'string'
+        || !params.prompt.trim() || [...params.prompt].length > AGENT_TEXT_MAX || params.prompt.includes('\0')
+        || typeof params.use_sources !== 'boolean') throw new Error('请选择模型并填写有效的整理任务。')
+    return
+  }
+  if (!validAgentID(params.token) || !Array.isArray(params.books) || !params.books.length
+      || params.books.length > AGENT_SELECTION_MAX || params.books.some(book => !isRecord(book)
+        || Object.keys(book).some(key => !['id', 'fields'].includes(key)) || !validAgentID(book.id)
+        || !Array.isArray(book.fields) || !book.fields.length || book.fields.length > 40
+        || book.fields.some(field => !validAgentID(field)))) throw new Error('请选择计划中要应用的字段。')
+}
+
 function validateCall(method, params) {
   if (!METHODS.includes(method)) throw new Error('不支持的操作。')
   if (params === null || typeof params !== 'object' || Array.isArray(params)) throw new Error('请求参数无效。')
@@ -92,6 +117,18 @@ function validateCall(method, params) {
     if (method === 'model_assist') {
       string('id')
       if (!isRecord(params.metadata) || (params.siteFields !== undefined && !isRecord(params.siteFields))) throw new Error('作品资料无效。')
+    }
+  }
+  if (method === 'agent_prepare' || method === 'agent_apply') {
+    const { komga_scope, ...rest } = params
+    if (typeof komga_scope !== 'string' || !/^(?:[a-f0-9]{20})?$/.test(komga_scope)) throw new Error('Agent 书库范围无效。')
+    if (method === 'agent_apply') validateAgentRequest(method, rest)
+    else {
+      const { profile, api_key, ...request } = rest
+      validateAgentRequest(method, { ...request, profile_id: 'trusted-profile' })
+      if (!isRecord(profile) || Object.keys(profile).sort().join(',') !== 'base_url,model,provider'
+          || typeof api_key !== 'string' || !/^[\x20-\x7e]*$/.test(api_key)
+          || api_key.length > (profile.provider === 'chatgpt-plan' ? 16384 : 4096)) throw new Error('Agent 模型配置无效。')
     }
   }
   if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
@@ -241,4 +278,4 @@ class ServiceBridge extends EventEmitter {
   }
 }
 
-module.exports = { ServiceBridge, validateCall, METHODS, pythonCommand }
+module.exports = { ServiceBridge, validateCall, validateAgentRequest, METHODS, pythonCommand }

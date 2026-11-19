@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowRight, Collection, Connection, Files, Reading } from '@element-plus/icons-vue'
+import { ArrowRight, Collection, Connection, Files, Reading, Sort, SortDown, SortUp } from '@element-plus/icons-vue'
 import type { Comic } from '../types'
 import { collectionMode, displayTitle, statusLabels, versionLabels } from '../types'
+import type { LibrarySort, LibrarySortKey } from '../library-fields'
+import { nextLibrarySort, sortLibraryEntries } from '../library-fields'
 import type { LibraryGroupRow, LibraryRow } from '../library-groups'
 import { buildLibraryEntries, flattenLibraryRows, toggleComicSelection, updateVisibleSelection, visibleSelectableIds } from '../library-groups'
 
@@ -16,16 +18,18 @@ const props = withDefaults(defineProps<{
   autoSyncLabel?: (comic: Comic) => string
   revealMatches?: boolean
   revealKey?: string
-}>(), { autoSyncLabel: () => '', revealMatches: false, revealKey: '' })
+  sort?: LibrarySort
+}>(), { autoSyncLabel: () => '', revealMatches: false, revealKey: '', sort: null })
 const emit = defineEmits<{
   (e: 'selection-change', ids: string[]): void
   (e: 'row-click', comic: Comic): void
+  (e: 'update:sort', value: LibrarySort): void
 }>()
 
 // Only explicit user choices survive filtering. Search expansion is temporary.
 const expanded = ref(new Set<string>())
 const filterCollapsed = ref(new Set<string>())
-const entries = computed(() => buildLibraryEntries(props.comics, props.allComics))
+const entries = computed(() => sortLibraryEntries(buildLibraryEntries(props.comics, props.allComics), props.sort))
 const allEntries = computed(() => buildLibraryEntries(props.allComics, props.allComics))
 const expandedKeys = computed(() => {
   const result = new Set(expanded.value)
@@ -48,6 +52,17 @@ watch(allEntries, value => {
   filterCollapsed.value = new Set([...filterCollapsed.value].filter(key => keys.has(key)))
 })
 
+function headerIcon(key: LibrarySortKey) {
+  if (props.sort?.key !== key) return Sort
+  return props.sort.direction === 'asc' ? SortUp : SortDown
+}
+function headerLabel(key: LibrarySortKey, label: string) {
+  if (props.sort?.key !== key) return '按' + label + '升序排列'
+  return props.sort.direction === 'asc' ? label + '当前升序，点击切换为降序' : label + '当前降序，点击恢复默认顺序'
+}
+function toggleSort(key: LibrarySortKey) {
+  if (!props.disabled) emit('update:sort', nextLibrarySort(props.sort, key))
+}
 function toggleGroup(row: LibraryGroupRow) {
   if (props.disabled) return
   const next = new Set(expanded.value)
@@ -119,6 +134,7 @@ defineExpose({ clearSelection })
       </template>
     </el-table-column>
     <el-table-column label="作品" min-width="178">
+      <template #header><button type="button" class="library-sort-header" :class="{ active: sort?.key === 'title' }" data-testid="library-sort-title" :data-direction="sort?.key === 'title' ? sort.direction : 'none'" :disabled="disabled" :title="headerLabel('title', '作品')" :aria-label="headerLabel('title', '作品')" :aria-pressed="sort?.key === 'title'" @click.stop="toggleSort('title')"><span>作品</span><el-icon><component :is="headerIcon('title')" /></el-icon></button></template>
       <template #default="scope">
         <div v-if="scope.row.kind === 'group'" class="work-group-cell" data-testid="work-group-row" :data-group-key="scope.row.key">
           <el-button data-testid="work-group-toggle" :data-group-key="scope.row.key" class="work-group-toggle" link :disabled="disabled" :aria-expanded="expandedKeys.has(scope.row.key)" :aria-label="`${expandedKeys.has(scope.row.key) ? '折叠' : '展开'}作品组 ${scope.row.name}`" @click.stop="toggleGroup(scope.row)"><el-icon :class="{ expanded: expandedKeys.has(scope.row.key) }"><ArrowRight /></el-icon></el-button>
@@ -137,13 +153,24 @@ defineExpose({ clearSelection })
         </div>
       </template>
     </el-table-column>
-    <el-table-column label="作者" min-width="86" show-overflow-tooltip><template #default="scope"><span v-if="scope.row.kind === 'group'" class="group-authors">{{ groupAuthors(scope.row) || '待核对' }}</span><span v-else :class="{ 'muted-text': !scope.row.comic.metadata.authors.length }">{{ scope.row.comic.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
-    <el-table-column label="页数" width="54" align="center"><template #default="scope"><span v-if="scope.row.kind === 'group'" class="group-page-summary">{{ scope.row.members.length }} 版</span><span v-else class="page-count">{{ scope.row.comic.page_count }}</span></template></el-table-column>
-    <el-table-column label="状态" width="76"><template #default="scope"><div v-if="scope.row.kind === 'group'" class="group-status-summary"><span v-for="label in groupStatus(scope.row)" :key="label">{{ label }}</span></div><span v-else class="status-pill" :class="scope.row.comic.status">{{ statusLabels[scope.row.comic.status as keyof typeof statusLabels] }}</span></template></el-table-column>
+    <el-table-column label="作者" min-width="86" show-overflow-tooltip>
+      <template #header><button type="button" class="library-sort-header" :class="{ active: sort?.key === 'authors' }" data-testid="library-sort-authors" :data-direction="sort?.key === 'authors' ? sort.direction : 'none'" :disabled="disabled" :title="headerLabel('authors', '作者')" :aria-label="headerLabel('authors', '作者')" :aria-pressed="sort?.key === 'authors'" @click.stop="toggleSort('authors')"><span>作者</span><el-icon><component :is="headerIcon('authors')" /></el-icon></button></template>
+      <template #default="scope"><span v-if="scope.row.kind === 'group'" class="group-authors">{{ groupAuthors(scope.row) || '待核对' }}</span><span v-else :class="{ 'muted-text': !scope.row.comic.metadata.authors.length }">{{ scope.row.comic.metadata.authors.join('、') || '未填写' }}</span></template></el-table-column>
+    <el-table-column label="页数" width="62" align="center">
+      <template #header><button type="button" class="library-sort-header" :class="{ active: sort?.key === 'pages' }" data-testid="library-sort-pages" :data-direction="sort?.key === 'pages' ? sort.direction : 'none'" :disabled="disabled" :title="headerLabel('pages', '页数')" :aria-label="headerLabel('pages', '页数')" :aria-pressed="sort?.key === 'pages'" @click.stop="toggleSort('pages')"><span>页数</span><el-icon><component :is="headerIcon('pages')" /></el-icon></button></template>
+      <template #default="scope"><span v-if="scope.row.kind === 'group'" class="group-page-summary">{{ scope.row.members.length }} 版</span><span v-else class="page-count">{{ scope.row.comic.page_count }}</span></template></el-table-column>
+    <el-table-column label="状态" width="76">
+      <template #header><button type="button" class="library-sort-header" :class="{ active: sort?.key === 'status' }" data-testid="library-sort-status" :data-direction="sort?.key === 'status' ? sort.direction : 'none'" :disabled="disabled" :title="headerLabel('status', '状态')" :aria-label="headerLabel('status', '状态')" :aria-pressed="sort?.key === 'status'" @click.stop="toggleSort('status')"><span>状态</span><el-icon><component :is="headerIcon('status')" /></el-icon></button></template>
+      <template #default="scope"><div v-if="scope.row.kind === 'group'" class="group-status-summary"><span v-for="label in groupStatus(scope.row)" :key="label">{{ label }}</span></div><span v-else class="status-pill" :class="scope.row.comic.status">{{ statusLabels[scope.row.comic.status as keyof typeof statusLabels] }}</span></template></el-table-column>
   </el-table>
 </template>
 
 <style scoped>
+.library-sort-header { display: inline-flex; align-items: center; gap: 3px; padding: 3px 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+.library-sort-header .el-icon { font-size: 10px; color: #819480; }
+.library-sort-header:hover:not(:disabled), .library-sort-header.active, .library-sort-header.active .el-icon { color: #357353; }
+.library-sort-header:focus-visible { outline: 2px solid #6d9b78; outline-offset: 2px; }
+.library-sort-header:disabled { cursor: default; opacity: .55; }
 .work-group-cell { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 2px 0; }
 .work-group-toggle { flex: 0 0 19px; width: 19px; padding: 0 !important; color: #7e967c; }
 .work-group-toggle .el-icon { transition: transform .16s ease; }

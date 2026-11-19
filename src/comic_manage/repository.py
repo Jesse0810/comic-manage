@@ -5,10 +5,12 @@ from __future__ import annotations
 from contextlib import contextmanager, closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
 import sqlite3
+from threading import Event
 
 from .metadata import COLORS, READING_DIRECTIONS, V12_FIELDS, V13_FIELDS, Metadata, legacy_color, migration_warnings, read_variant_fields
 from .komga_client import path_matches
@@ -366,6 +368,55 @@ class Repository:
         state["remote"] = dict(remote) if remote else None
         state["revision"] = db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE comic_id=?", (comic_id,)).fetchone()[0]
         return state
+
+    @staticmethod
+    def agent_revision(state: dict) -> str:
+        encoded = json.dumps(state, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def check_agent_scope(state: dict, scope: str) -> None:
+        if state["status"] not in ("draft", "approved", "packaged"):
+            raise ValueError("作品的状态已变化，请重新读取列表。")
+        if state["kind"] == "komga":
+            remote = state["remote"]
+            if (not remote or not scope or remote["scope"] != scope
+                    or remote["conflict"] or remote["unavailable"]):
+                raise ValueError("远端作品不属于当前可编辑书库，或需要先处理冲突。")
+        elif state["kind"] not in ("folder", "cbz"):
+            raise ValueError("当前来源不可编辑。")
+
+    @staticmethod
+    def checked_agent_values(before: dict, changes: dict) -> dict:
+        if not changes.keys() <= before.keys():
+            raise ValueError("该字段无法写入当前资料。")
+        metadata = Metadata.from_dict({**before, **changes})
+        after = metadata.to_dict()
+        actual = {key: value for key, value in after.items() if before[key] != value}
+        if actual.keys() - changes.keys() or any(after[key] != value for key, value in changes.items()):
+            raise ValueError("这些建议会与已有资料冲突，请人工核对或选择其他候选。")
+        metadata.validate_fields(set(changes))
+        return actual
+
+    def save_agent_draft(self, comic_id: str, expected: str, scope: str, changes: dict, cancel: Event | None = None) -> int:
+        """Write checked fields only, against the same revision previewed by the agent."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._review_state(db, comic_id)
+            self.check_agent_scope(state, scope)
+            if self.agent_revision(state) != expected:
+                raise ValueError("资料在预览后已发生变化，本次已跳过，请重新生成。")
+            before = state["metadata"]
+            actual = self.checked_agent_values(before, changes)
+            if not actual:
+                return 0
+            check_cancel(cancel)
+            self._record_komga_edit(db, comic_id, before, {**before, **actual}, set(actual))
+            raw = json.loads(db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()["metadata"])
+            db.execute("UPDATE comics SET metadata=?,status='draft',updated_at=? WHERE id=?",
+                       (json.dumps({**raw, **actual}, ensure_ascii=False), now(), comic_id))
+            self._edit_event(db, comic_id, "batch_edit", "应用人工确认的 Agent 资料候选。", actual.keys())
+            return 1
 
     def review_state(self, comic_id: str) -> dict:
         """Read the local revision used to bind a one-use batch confirmation."""

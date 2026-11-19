@@ -21,6 +21,7 @@ from .metadata import AGE_RATINGS, GENRES, METADATA_RULES_VERSION, Metadata, to_
 from .scrape import scrape_preview
 from .scrape_http import ScrapeError
 from .model_assist import assist_preview, test_profile
+from .library_agent import AgentError, LibraryAgent
 from .model_transport import ModelTransportError
 from .komga import komga_book_payload, komga_series_payload, komga_warnings
 from .komga_manifest import export_manifest
@@ -184,7 +185,7 @@ def _folder_link(path: Path) -> bool:
 
 
 class ComicService:
-    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview", "model_test", "model_assist",
+    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview", "model_test", "model_assist", "agent_prepare", "agent_apply",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
                          "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
 
@@ -196,6 +197,7 @@ class ComicService:
         self.plans: OrderedDict[str, PreparedExport] = OrderedDict()
         self.imports: OrderedDict[str, PreparedImport] = OrderedDict()
         self.reviews = BatchReview(self.repo, self.progress)
+        self.library_agent = LibraryAgent(self.repo, self.progress)
         self.jobs = KomgaJobs(self.repo)
         self._legacy_variants_checked = False
 
@@ -283,7 +285,7 @@ class ComicService:
         if not isinstance(params, dict):
             raise ServiceError("params 必须是对象。")
         cancel = cancel if cancel is not None else Event()
-        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync", "komga_pull", "prepare_review_sync", "commit_review_sync"):
+        if method not in ("scan", "import", "export", "prepare_import", "commit_import", "cancel", "komga_sync", "komga_pull", "prepare_review_sync", "commit_review_sync", "agent_prepare", "agent_apply"):
             check_cancel(cancel)
         if method == "bootstrap":
             if not self._legacy_variants_checked:
@@ -323,6 +325,16 @@ class ComicService:
                 raise ServiceError(str(error), error.code) from None
             except (OSError, ValueError, KeyError, TypeError, RecursionError):
                 raise ServiceError("无法读取该站点的作品资料，请核对链接或稍后重试。", "SCRAPE_RESPONSE") from None
+        if method in ("agent_prepare", "agent_apply"):
+            try:
+                if method == "agent_prepare":
+                    return self.library_agent.prepare(params, cancel)
+                result = self.library_agent.apply(params, cancel)
+                if result["updated"]:
+                    self.plans.clear()
+                return result
+            except AgentError as error:
+                raise ServiceError(str(error), error.code) from None
         if method in ("model_test", "model_assist"):
             allowed = {"profile", "api_key"}
             if method == "model_assist":

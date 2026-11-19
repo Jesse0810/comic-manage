@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Reading, Collection, Clock, CircleCheck, Box, Plus, FolderAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back } from '@element-plus/icons-vue'
+import { Reading, Collection, Clock, CircleCheck, Box, Plus, FolderAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back, MagicStick } from '@element-plus/icons-vue'
 import DetailsPanel from './components/DetailsPanel.vue'
 import LibraryTable from './components/LibraryTable.vue'
+import LibraryFieldToolbar from './components/LibraryFieldToolbar.vue'
+import AgentWorkspace from './components/AgentWorkspace.vue'
+import { activeLibraryConditions, matchesLibraryConditions, type LibraryCondition, type LibrarySort } from './library-fields'
 import { buildLibraryEntries } from './library-groups'
 import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
@@ -80,6 +83,12 @@ const batchVisible = ref(false)
 const batchIds = ref<string[]>([])
 const scrapeVisible = ref(false)
 const modelSettingsVisible = ref(false)
+const agentMode = ref(false)
+const agentVisited = ref(false)
+const agentWorking = ref(false)
+const fieldConditions = ref<LibraryCondition[]>([])
+const librarySort = ref<LibrarySort>(null)
+const activeConditions = computed(() => activeLibraryConditions(fieldConditions.value))
 const modelConfiguration = ref<ModelConfiguration>({ profiles: [], default_id: '' })
 let modelConfigLoad: Promise<void> | undefined
 let unsubscribe: (() => void) | undefined
@@ -101,16 +110,23 @@ const filtered = computed(() => {
     const searchable = [m.title, m.series, m.localized_series, m.localized_series_label, m.collection_mode, m.work_group, m.text_version, m.original_title, m.chinese_title, ...m.authors, ...m.pencillers, m.publisher, m.translator, m.genre, ...m.tags, ...customTags(m), m.summary, ...m.web, m.number, m.volume, m.year, c.remote?.libraryName].join(' ').normalize('NFKC').toLocaleLowerCase()
     return (section.value === 'all' || c.status === section.value)
       && (!author.value || m.authors.includes(author.value)) && (!term || searchable.includes(term))
+      && matchesLibraryConditions(c, activeConditions.value)
   })
 })
 const libraryWorkCount = computed(() => buildLibraryEntries(filtered.value, sourceComics.value).length)
-const revealMatches = computed(() => !!search.value.trim() || !!author.value || section.value !== 'all')
-const revealKey = computed(() => JSON.stringify([search.value.trim(), author.value, section.value]))
+const revealMatches = computed(() => !!search.value.trim() || !!author.value || section.value !== 'all' || activeConditions.value.length > 0)
+const revealKey = computed(() => JSON.stringify([search.value.trim(), author.value, section.value, activeConditions.value]))
 const filteredIds = computed(() => new Set(filtered.value.map(comic => comic.id)))
 const checkedOutsideFilter = computed(() => selectedIds.value.filter(id => !filteredIds.value.has(id)).length)
 const sectionTitle = computed(() => ({ all: '我的漫画库', draft: '待审核作品', approved: '已审核作品', packaged: '已生成作品' })[section.value])
 const exportIds = computed(() => selectedIds.value.length ? selectedIds.value : (selectedId.value ? [selectedId.value] : []))
-const disabled = computed(() => busy.value || loading.value || !available.value)
+const agentUnavailable = computed(() => busy.value || loading.value || !available.value)
+const disabled = computed(() => agentUnavailable.value || agentWorking.value)
+const agentSelected = computed(() => {
+  const ids = new Set(selectedIds.value)
+  return comics.value.filter(comic => ids.has(comic.id) && canEditComic(comic) && !comic.remote?.conflict)
+})
+const agentFiltered = computed(() => filtered.value.filter(comic => canEditComic(comic) && !comic.remote?.conflict))
 const selectedComics = computed(() => comics.value.filter(comic => exportIds.value.includes(comic.id)))
 const selectionHasRemote = computed(() => selectedComics.value.some(comic => comic.kind === 'komga'))
 const selectionHasInactive = computed(() => selectedComics.value.some(comic => !canEditComic(comic)))
@@ -277,6 +293,21 @@ async function resolveEdits(): Promise<boolean> {
     if (action === 'cancel') { selectData(current.value); return true }
     return false
   }
+}
+
+async function openAgentWorkspace() {
+  if (agentMode.value || disabled.value || !await resolveEdits()) return
+  agentVisited.value = true
+  agentMode.value = true
+}
+function selectLibrarySection(target: Section) {
+  if (agentWorking.value) return
+  agentMode.value = false
+  section.value = target
+}
+async function refreshAfterAgent() {
+  try { await refresh() }
+  catch (reason) { ElMessage.warning('草稿已保存，但列表刷新失败。' + errorMessage(reason)) }
 }
 
 async function selectComic(comic: Comic) {
@@ -587,7 +618,7 @@ async function executeKomgaPull() {
     await refresh()
     sourceFilter.value = 'komga'
     section.value = 'all'
-    author.value = ''; search.value = ''; selectedIds.value = []
+    author.value = ''; search.value = ''; fieldConditions.value = []; selectedIds.value = []
     libraryTable.value?.clearSelection()
     selectData(comics.value.find(comic => result.ids.includes(comic.id) && canEditComic(comic)) || sourceComics.value[0] || null)
     const summary = `读取 ${result.total} 本：新增 ${result.added} 本，更新 ${result.updated} 本，保留现有资料 ${result.kept} 本。${result.retired ? `已清理 ${result.retired} 本已确认入库的本地待上传记录。` : ''}`
@@ -643,14 +674,14 @@ async function exportKomga() {
 }
 
 async function closeRequested() {
-  if (busy.value) { ElMessage.warning('任务进行中，请先取消并等待当前操作结束'); return }
+  if (busy.value || agentWorking.value) { ElMessage.warning('任务进行中，请先取消并等待当前操作结束'); return }
   if (await resolveEdits()) await window.comic.closeWindow()
 }
 
 
 watch(form, () => { if (dirty.value) reviewed.value = false }, { deep: true, flush: 'sync' })
 watch(selectedId, () => { scrapeVisible.value = false }, { flush: 'sync' })
-watch([dirty, busy], () => window.comic?.setWindowState({ dirty: dirty.value, busy: busy.value }), { immediate: true })
+watch([dirty, busy, agentWorking], () => window.comic?.setWindowState({ dirty: dirty.value, busy: busy.value || agentWorking.value }), { immediate: true })
 onMounted(async () => {
   if (!window.comic) {
     available.value = false
@@ -683,13 +714,16 @@ onBeforeUnmount(() => unsubscribe?.())
     <aside class="sidebar">
       <div class="brand"><div class="brand-icon"><el-icon :size="25"><Reading /></el-icon></div><div><strong>漫画整理</strong><span>COMIC MANAGE</span></div></div>
       <div class="workspace-label">我的工作区</div>
-      <nav class="navigation"><button v-for="item in navigation" :key="item.key" :class="{ active: section === item.key }" @click="section = item.key"><el-icon :size="18"><component :is="item.icon" /></el-icon><span>{{ item.title }}</span><b>{{ counts[item.key] }}</b></button></nav>
+      <nav class="navigation">
+        <button v-for="item in navigation" :key="item.key" :class="{ active: !agentMode && section === item.key }" :disabled="agentWorking" @click="selectLibrarySection(item.key)"><el-icon :size="18"><component :is="item.icon" /></el-icon><span>{{ item.title }}</span><b>{{ counts[item.key] }}</b></button>
+        <button data-testid="agent-open" class="agent-nav" :class="{ active: agentMode }" :aria-current="agentMode ? 'page' : undefined" :disabled="disabled" @click="openAgentWorkspace"><el-icon :size="18"><MagicStick /></el-icon><span>Agent</span></button>
+      </nav>
       <div class="sidebar-note"><div class="sidebar-note-icon"><el-icon><Lock /></el-icon></div><div><strong>原图保留，资料有序</strong><p>审核后生成成品，<br />可同步资料到你的 Komga。</p></div></div>
       <div class="sidebar-bottom"><button :disabled="disabled" @click="backup"><el-icon><CopyDocument /></el-icon>备份资料库</button><button data-testid="komga-settings" :disabled="disabled" @click="openKomgaSettings"><el-icon><Setting /></el-icon>Komga 连接设置<span v-if="autoSyncPendingCount" class="sidebar-job-count" :title="`${autoSyncPendingCount} 项同步任务等待或需要处理`">{{ autoSyncPendingCount }}</span></button><button data-testid="model-settings-open" :disabled="disabled" @click="openModelSettings"><el-icon><Connection /></el-icon>模型管理</button><button @click="settingsVisible = true"><el-icon><Monitor /></el-icon>工作区信息</button><div class="version-row"><span>本地桌面版</span><span v-if="version">v{{ version }}</span></div></div>
     </aside>
 
-    <main class="workspace" :class="{ 'workspace-editor-expanded': editorExpanded }">
-      <header v-show="!editorExpanded" class="workspace-header">
+    <main class="workspace" :class="{ 'workspace-editor-expanded': editorExpanded && !agentMode }">
+      <header v-show="!agentMode && !editorExpanded" class="workspace-header">
         <h1>{{ sectionTitle }}<span class="heading-count" title="按独立版本计数">{{ counts[section] }}</span></h1>
         <div class="header-actions">
           <el-button :icon="Refresh" :disabled="disabled" @click="rescan">重新扫描</el-button>
@@ -699,15 +733,19 @@ onBeforeUnmount(() => unsubscribe?.())
 
       <el-alert v-if="startupError" :title="startupError" description="请关闭并重新打开桌面程序。漫画源文件和本机资料库不会被删除。" type="error" :closable="false" show-icon class="startup-error" />
 
-      <div class="work-area">
+      <AgentWorkspace v-if="agentVisited" v-show="agentMode" :selected="agentSelected" :filtered="agentFiltered"
+        :configuration="modelConfiguration" :disabled="agentUnavailable" @model-settings="openModelSettings"
+        @task-state="agentWorking = $event" @applied="refreshAfterAgent" />
+
+      <div v-show="!agentMode" class="work-area">
         <section v-show="!editorExpanded" class="library-panel">
-          <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span></div>
+          <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span><LibraryFieldToolbar v-model:conditions="fieldConditions" v-model:sort="librarySort" :disabled="disabled" /></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
           <div class="library-summary"><span class="library-count-summary">{{ libraryWorkCount }} 部作品 · {{ filtered.length }} 个版本<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span><span v-if="checkedOutsideFilter" class="hidden-selection-count">（筛选外 {{ checkedOutsideFilter }} 本）</span><el-button v-if="selectedIds.length" data-testid="clear-library-selection" link :disabled="disabled" @click="clearLibrarySelection">取消勾选</el-button></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
-            <LibraryTable v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" :comics="filtered" :all-comics="sourceComics" :selected-ids="selectedIds" :current-id="selectedId" :disabled="disabled" :can-select="canEditComic" :auto-sync-label="autoSyncLabel" :reveal-matches="revealMatches" :reveal-key="revealKey" @row-click="selectComic" @selection-change="(ids: string[]) => selectedIds = ids" />
-            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><p>请从左下角“Komga 连接设置”读取书库。</p></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><h2>从第一本漫画开始</h2><p>可以选择一个或多个本地或 NAS 文件夹。<br />预览后确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button></template></div>
+            <LibraryTable v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" v-model:sort="librarySort" :comics="filtered" :all-comics="sourceComics" :selected-ids="selectedIds" :current-id="selectedId" :disabled="disabled" :can-select="canEditComic" :auto-sync-label="autoSyncLabel" :reveal-matches="revealMatches" :reveal-key="revealKey" @row-click="selectComic" @selection-change="(ids: string[]) => selectedIds = ids" />
+            <div v-if="!filtered.length && !loading" class="library-empty"><div class="library-empty-icon"><el-icon :size="38"><Collection /></el-icon><span class="empty-icon-spark"></span></div><template v-if="sourceFilter === 'komga' && !sourceComics.length"><h2>直接整理 Komga 书库</h2><p>读取书库中的作品和资料，编辑并审核后直接同步。<br />再次读取会保留尚未同步的本机修改。</p><p>请从左下角“Komga 连接设置”读取书库。</p></template><template v-else-if="comics.length"><h2>没有找到匹配的作品</h2><p>试试其他标题、作者或标签。</p><el-button plain @click="search = ''; author = ''; fieldConditions = []; section = 'all'; changeSource('all')">清除筛选</el-button></template><template v-else><h2>从第一本漫画开始</h2><p>可以选择一个或多个本地或 NAS 文件夹。<br />预览后确认要入库的作品。</p><el-button type="primary" :icon="FolderAdd" :disabled="disabled" @click="addDirectory">添加漫画目录</el-button></template></div>
           </div>
 
           <footer class="library-footer"><div v-if="selectionHasRemote" class="output-location remote-output-info"><div class="output-icon"><el-icon :size="18"><Connection /></el-icon></div><div class="output-copy"><span>Komga 远端作品</span><span>保存草稿 → 审核 → 同步到 Komga，无需本地打包</span></div></div><div v-else class="output-location"><div class="output-icon"><el-icon :size="18"><FolderOpened /></el-icon></div><div class="output-copy"><span>成品目录</span><button v-if="outputRoot" :title="outputRoot" :disabled="disabled" @click="chooseOutput">{{ outputRoot }}</button><button v-else class="output-unset" :disabled="disabled" @click="chooseOutput">选择一个独立目录…</button></div><el-button link :disabled="disabled" @click="chooseOutput">{{ outputRoot ? '更改' : '选择' }}</el-button></div><el-button type="primary" :icon="Download" :disabled="disabled || !exportIds.length || selectionHasRemote" :title="selectionHasRemote ? '选中包含远端作品，不能生成本地 CBZ' : '生成已审核的本地作品'" @click="prepareExport">生成 CBZ<span v-if="selectedIds.length > 1" class="export-count">{{ selectedIds.length }}</span></el-button></footer>
@@ -747,6 +785,8 @@ onBeforeUnmount(() => unsubscribe?.())
 </template>
 
 <style scoped>
+.navigation .agent-nav { margin-top: 8px; }
+.navigation button:disabled { opacity: .65; cursor: default; }
 .library-source-bar { display: flex; align-items: center; gap: 10px; padding: 13px 19px 0; }
 .library-source-bar > .el-select { width: 165px; flex-shrink: 0; }
 .library-source-bar > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b9b83; font-size: 11px; }

@@ -9,7 +9,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const vm = require('node:vm')
-const { ServiceBridge, validateCall } = require(process.env.COMIC_MANAGE_BRIDGE_MODULE || '../bridge.cjs')
+const { ServiceBridge, validateCall, validateAgentRequest } = require(process.env.COMIC_MANAGE_BRIDGE_MODULE || '../bridge.cjs')
 const { normalizeKomgaUrl } = require(process.env.COMIC_MANAGE_KOMGA_CONFIG_MODULE || '../komga-config.cjs')
 
 const FAKE_SERVICE = String.raw`
@@ -178,9 +178,11 @@ async function mainProcessFixture(options = {}) {
   }
   const fakeRequire = name => {
     if (name === 'electron') return fakeElectron
-    if (name === './bridge.cjs') return {ServiceBridge:FakeBridge, validateCall}
+    if (name === './bridge.cjs') return {ServiceBridge:FakeBridge, validateCall, validateAgentRequest}
     if (name === './chatgpt-auth.cjs') return require('../chatgpt-auth.cjs')
-    if (name === './model-config.cjs') return require('../model-config.cjs')
+    if (name === './model-config.cjs') return options.modelConnection
+      ? { ModelConfigStore: class { connection(id) { return options.modelConnection(id) } } }
+      : require('../model-config.cjs')
     if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore, normalizeKomgaUrl}
     if (name === 'node:fs/promises') return {
       ...require(name), stat: async location => { statPaths.push(location); return {isDirectory:() => true} },
@@ -204,6 +206,48 @@ async function mainProcessFixture(options = {}) {
     invoke: (channel, ...args) => handlers.get(channel)(event, ...args),
   }
 }
+
+test('Agent prepare binds saved model and current Komga scope, while apply accepts only selected fields', async () => {
+  const profile = { provider: 'ollama', base_url: 'http://127.0.0.1:11434', model: 'fixture' }
+  const main = await mainProcessFixture({
+    modelConnection: async id => {
+      assert.equal(id, 'saved-model')
+      return { profile, api_key: 'synthetic-agent-key', name: 'Example' }
+    },
+    respond: method => method === 'agent_prepare' ? { token: 'ticket', books: [], cancelled: false } : { updated: 1 },
+  })
+  const request = { ids: ['book-a'], profile_id: 'saved-model', prompt: '整理标题', use_sources: false }
+  await assert.rejects(main.invoke('comic:call', 'agent_prepare', { ...request, api_key: 'override' }), /不支持的参数/)
+  await assert.rejects(main.invoke('comic:call', 'agent_prepare', { ...request, ids: Array(25).fill('book-a') }), /24/)
+  const plan = await main.invoke('comic:call', 'agent_prepare', request)
+  assert.equal(plan.token, 'ticket')
+  assert(!JSON.stringify(plan).includes('synthetic-agent-key'))
+  const { profile_id, ...work } = request
+  const scope = createHash('sha256').update(main.config.url + '\n' + main.config.libraryId).digest('hex').slice(0, 20)
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[0])), { method: 'agent_prepare', params: {
+    ...work, profile, api_key: 'synthetic-agent-key', komga_scope: scope,
+  } })
+  const edit = { token: 'ticket', books: [{ id: 'book-a', fields: ['title'] }] }
+  await assert.rejects(main.invoke('comic:call', 'agent_apply', { ...edit, komga_scope: 'other' }), /不支持的参数/)
+  await assert.rejects(main.invoke('comic:call', 'agent_apply', { ...edit, books: [{ ...edit.books[0], title: 'fake' }] }), /应用的字段/)
+  await main.invoke('comic:call', 'agent_apply', edit)
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[1])), { method: 'agent_apply', params: { ...edit, komga_scope: scope } })
+})
+
+test('cancelling Agent while model credentials are loading prevents the model call', async () => {
+  let finish
+  let started
+  const waiting = new Promise(resolve => { started = resolve })
+  const model = new Promise(resolve => { finish = resolve })
+  const main = await mainProcessFixture({ modelConnection: () => { started(); return model } })
+  const request = { ids: ['book-a'], profile_id: 'saved-model', prompt: '整理标题', use_sources: false }
+  const running = main.invoke('comic:call', 'agent_prepare', request)
+  await waiting
+  assert.equal((await main.invoke('comic:call', 'cancel')).cancelled, true)
+  finish({ profile: { provider: 'ollama', base_url: 'http://127.0.0.1:11434', model: 'fixture' }, api_key: '', name: 'Example' })
+  assert.equal((await running).cancelled, true)
+  assert.deepEqual(main.calls, [])
+})
 
 test('folder selection remembers the parent across launches and ignores cancellation', async t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comic-picker-'))

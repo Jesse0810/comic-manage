@@ -959,11 +959,91 @@ async function run() {
   await delay(200)
   assert.equal(await evaluate("document.querySelector('.review-footer').getBoundingClientRect().bottom <= window.innerHeight"), true)
   await capture('ComicManage-Electron-compact.png')
+  // Use two synthetic books and the real local service through the desktop Agent.
+  const agentBooks = ['Agent 测试作品甲', 'Agent 测试作品乙']
+  const agentDirectories = []
+  for (const title of agentBooks) {
+    const directory = path.join(fixture, title)
+    await fs.mkdir(directory)
+    await fs.writeFile(path.join(directory, '1.png'), page)
+    if (title === agentBooks[1]) {
+      await fs.writeFile(path.join(directory, '2.png'), page)
+      await fs.writeFile(path.join(directory, '3.png'), page)
+    }
+    agentDirectories.push(directory)
+  }
+  await call('scan', { roots: agentDirectories })
+  await click('重新扫描')
+  await waitFor("document.querySelector('.result-summary')?.textContent.includes('已扫描')", 'agent fixture refresh')
+  await dismissResult()
+  await setInput('搜索作品、系列、作者或分类', 'Agent 测试作品')
+  await waitFor("document.querySelectorAll('[data-testid=comic-row]').length===2", 'agent scope uses filtered works')
+  await toggle('library-sort-pages')
+  await waitFor("document.querySelector('[data-testid=library-sort-pages]')?.dataset.direction === 'asc'", 'page count ascending')
+  assert.match(await evaluate("document.querySelector('[data-testid=comic-row]').textContent"), /作品甲/)
+  await toggle('library-sort-pages')
+  await waitFor("document.querySelector('[data-testid=library-sort-pages]')?.dataset.direction === 'desc'", 'page count descending')
+  assert.match(await evaluate("document.querySelector('[data-testid=comic-row]').textContent"), /作品乙/)
+  await toggle('library-filter-open')
+  await chooseOption('library-filter-field', '页数')
+  await chooseOption('library-filter-operator', '大于或等于')
+  await setField('library-filter-value', '3')
+  await toggle('library-filter-apply')
+  await waitFor("document.querySelectorAll('[data-testid=comic-row]').length === 1", 'page condition combines with current search')
+  assert.match(await evaluate("document.querySelector('[data-testid=comic-row]').textContent"), /作品乙/)
+  await toggle('library-filter-open')
+  await toggle('library-filter-clear')
+  await toggle('library-filter-apply')
+  await waitFor("document.querySelectorAll('[data-testid=comic-row]').length === 2", 'clear field condition retains current search')
+  const agentPrompt = '将出版方统一为“测试出版社”'
+  const agentRequests = []
+  const agentModel = createServer(async (request, response) => {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    agentRequests.push({ payload, authorization: request.headers.authorization, path: request.url })
+    const content = JSON.stringify({ books: [1, 2].map(ref => ({ ref, fields: { publisher: '测试出版社' } })) })
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content } }] }))
+  })
+  await new Promise((resolve, reject) => { agentModel.once('error', reject); agentModel.listen(0, '127.0.0.1', resolve) })
+  try {
+    const configuration = await call('model_config_get')
+    const saved = configuration.profiles.find(profile => profile.id === configuration.default_id)
+    await call('model_profile_save', { profile: {
+      id: saved.id, name: saved.name, provider: saved.provider,
+      base_url: 'http://127.0.0.1:' + agentModel.address().port + '/v1', model: saved.model,
+    }, api_key: 'synthetic-agent-key' })
+    await toggle('agent-open')
+    await waitFor("document.querySelector('[data-testid=agent-prompt]')?.getClientRects().length", 'Agent opens as a workspace')
+    await toggle('agent-scope-filtered')
+    await setField('agent-prompt', agentPrompt)
+    await waitFor("document.querySelector('[data-testid=agent-start]')?.disabled === false", 'filtered Agent scope ready')
+    await toggle('agent-start')
+    await waitFor("[...document.querySelectorAll('[data-testid=agent-book]')].filter(book=>book.textContent.includes('1 项建议')).length === 2", 'Agent returned two editable proposals')
+    assert.equal(agentRequests.length, 1)
+    assert.equal(agentRequests[0].path, '/v1/chat/completions')
+    assert.equal(agentRequests[0].authorization, 'Bearer synthetic-agent-key')
+    assert(!JSON.stringify(agentRequests[0].payload.messages).includes('desktop-smoke-'))
+    const beforeAgent = (await call('bootstrap')).comics.filter(book => agentBooks.includes(book.metadata.title))
+    assert.equal(beforeAgent.length, 2)
+    assert(beforeAgent.every(book => !book.metadata.publisher))
+    await toggle('agent-select-empty')
+    await toggle('agent-apply')
+    await waitFor("document.querySelector('[data-testid=agent-report]')?.getClientRects().length", 'Agent saved selected changes')
+    const afterAgent = (await call('bootstrap')).comics.filter(book => agentBooks.includes(book.metadata.title))
+    assert(afterAgent.every(book => book.metadata.publisher === '测试出版社' && book.status === 'draft'))
+    await evaluate("[...document.querySelectorAll('.navigation button')].find(button=>button.querySelector('span')?.textContent==='全部漫画').click()")
+    await waitFor("!document.querySelector('[data-testid=agent-workspace]')?.getClientRects().length", 'returns to the filtered library')
+    assert.equal(await evaluate("document.querySelector('[data-testid=library-sort-pages]').dataset.direction"), 'desc')
+  } finally {
+    await new Promise(resolve => agentModel.close(resolve))
+  }
   assert.equal(javascriptErrors.filter(x => /Uncaught|TypeError|ReferenceError/.test(x)).length, 0, javascriptErrors.join('\n'))
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

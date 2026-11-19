@@ -5,7 +5,7 @@ const { readFile, realpath, stat, writeFile } = require('node:fs/promises')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
 const { createHash } = require('node:crypto')
-const { ServiceBridge, validateCall } = require('./bridge.cjs')
+const { ServiceBridge, validateCall, validateAgentRequest } = require('./bridge.cjs')
 const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
 const { ChatGPTAuth, CHATGPT_USAGE_URL } = require('./chatgpt-auth.cjs')
 const { ModelConfigStore } = require('./model-config.cjs')
@@ -25,6 +25,12 @@ function defaultDataDirectory() {
 }
 
 const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' }
+function currentKomgaScope(config) {
+  return config.url && config.libraryId
+    ? createHash('sha256').update(normalizeKomgaUrl(config.url) + '\n' + config.libraryId).digest('hex').slice(0, 20)
+    : ''
+}
+
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"
 
 async function createApplication({ dataDir = defaultDataDirectory(), show = true } = {}) {
@@ -61,10 +67,15 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
   let lastImportLocation
   let requestQueue = Promise.resolve()
   let pendingServiceRequests = 0
-  const callService = (method, params = {}) => {
+  let agentTask
+  const callService = (method, params = {}, task) => {
     if (method === 'cancel') return bridge.call(method, params)
     pendingServiceRequests += 1
-    const request = requestQueue.then(() => bridge.call(method, params))
+    const request = requestQueue.then(() => {
+      if (task?.cancelled) return task.emptyResult
+      if (task) task.started = true
+      return bridge.call(method, params)
+    })
     requestQueue = request.catch(() => {})
     return request.finally(() => { pendingServiceRequests -= 1 })
   }
@@ -123,6 +134,35 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     return { comparison, autoSync }
   }
   handle('comic:call', async (method, params = {}) => {
+    if (method === 'cancel' && agentTask && !agentTask.started) {
+      agentTask.cancelled = true
+      return { cancelled: true }
+    }
+    if (method === 'agent_prepare' || method === 'agent_apply') {
+      validateAgentRequest(method, params)
+      if (agentTask) throw new Error('已有 Agent 任务正在运行。')
+      const task = {
+        started: false,
+        cancelled: false,
+        emptyResult: method === 'agent_prepare' ? { token: null, books: [], cancelled: true }
+          : { updated: 0, skipped: 0, errors: [], cancelled: true },
+      }
+      agentTask = task
+      try {
+        const komga_scope = await komgaConfig.get().then(currentKomgaScope).catch(() => '')
+        if (task.cancelled) return task.emptyResult
+        if (method === 'agent_apply') return await callService(method, { ...params, komga_scope }, task)
+        const { profile_id, ...request } = params
+        const { name, ...connection } = await modelConfig.connection(profile_id)
+        const credentials = await modelConnection(connection)
+        return await callService(method, { ...request, ...credentials, komga_scope }, task)
+      } catch (error) {
+        if (task.cancelled) return task.emptyResult
+        throw error
+      } finally {
+        agentTask = undefined
+      }
+    }
     if (['model_chatgpt_status', 'model_chatgpt_sign_in', 'model_chatgpt_cancel', 'model_chatgpt_disconnect', 'model_chatgpt_models', 'model_chatgpt_usage'].includes(method)) {
       if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new Error('ChatGPT 授权请求参数无效。')
       if (method === 'model_chatgpt_status') return chatgptAuth.get()
@@ -157,10 +197,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       const result = await callService(method, params)
       try {
         const config = await komgaConfig.get()
-        const scope = config.url && config.libraryId
-          ? createHash('sha256').update(normalizeKomgaUrl(config.url) + '\n' + config.libraryId).digest('hex').slice(0, 20)
-          : ''
-        return { ...result, komgaScope: scope, komgaLibraryName: config.libraryName }
+        return { ...result, komgaScope: currentKomgaScope(config), komgaLibraryName: config.libraryName }
       } catch {
         return { ...result, komgaScope: '', komgaLibraryName: '' }
       }
