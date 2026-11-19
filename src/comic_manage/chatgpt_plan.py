@@ -217,7 +217,8 @@ def complete_chatgpt_plan(model: str, token: str, system: str, prompt: str, canc
     deadline = time.monotonic() + _STREAM_DEADLINE
     try:
         with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=_SOCKET_TIMEOUT) as response:
-            if response.headers.get_content_type() != "text/event-stream":
+            # The direct ChatGPT route can omit Content-Type even for a valid SSE stream.
+            if response.headers.get("Content-Type") and response.headers.get_content_type() != "text/event-stream":
                 raise _malformed()
             text = _stream_text(response, cancelled, deadline)
         if token in text:

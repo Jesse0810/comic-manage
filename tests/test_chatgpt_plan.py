@@ -47,7 +47,8 @@ class FragmentedStream(BytesIO):
     def __init__(self, data, media_type="text/event-stream; charset=utf-8", cancelled=None):
         super().__init__(data)
         self.headers = Message()
-        self.headers["Content-Type"] = media_type
+        if media_type is not None:
+            self.headers["Content-Type"] = media_type
         self.cancelled = cancelled
 
     def read1(self, size):
@@ -154,6 +155,16 @@ class ChatGptPlanTests(unittest.TestCase):
             factory.return_value.open.return_value = FragmentedStream(completed("正文"), cancelled=cancelled)
             with self.assertRaises(Cancelled):
                 complete_chatgpt_plan(MODEL, TOKEN, SYSTEM, PROMPT, cancelled)
+
+    def test_valid_sse_may_omit_content_type(self):
+        text = '{"status":"ok"}'
+        self.assertEqual(self.with_stream(delta(text) + completed(text), media_type=None), text)
+
+    def test_missing_content_type_still_requires_completed_sse(self):
+        for payload in (b'{"status":"ok"}', delta('{"status":"ok"}')):
+            with self.subTest(payload=payload), self.assertRaises(ModelTransportError) as error:
+                self.with_stream(payload, media_type=None)
+            self.assertEqual(error.exception.code, "MODEL_RESPONSE")
 
     def test_bounds_sse_wire_and_output_text_and_rejects_other_content_types(self):
         with patch("comic_manage.chatgpt_plan.MAX_RESPONSE_BYTES", 50):

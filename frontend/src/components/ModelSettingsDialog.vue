@@ -147,7 +147,10 @@ async function testConnection() {
     const seconds = typeof result?.latency_ms === 'number' ? Math.max(.1, result.latency_ms / 1000).toFixed(1) : ''
     status.value = seconds ? '连接成功，模型已响应（' + seconds + ' 秒）。' : '连接成功，模型已响应。'
   } catch (reason) {
-    if (currentRequest === request) error.value = secret ? errorMessage(reason).replaceAll(secret, '[已隐藏]') : errorMessage(reason)
+    if (currentRequest === request) {
+      const message = input.profile.provider === 'chatgpt-plan' ? chatGPTRequestError(reason) : errorMessage(reason)
+      error.value = secret ? message.replaceAll(secret, '[已隐藏]') : message
+    }
   } finally {
     if (currentRequest === request) busy.value = ''
   }
