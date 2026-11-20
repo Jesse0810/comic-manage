@@ -261,11 +261,12 @@ async function run() {
   await cancelledPicker
   pickerOpened = undefined
   assert.equal(await evaluate("document.querySelectorAll('.folder-tree-node').length"), 1, 'Cancel keeps the selected folder')
-  await folderCheckbox(sourceRoot) // Choose two child folders, leaving their sibling unchecked.
   await evaluate("document.querySelector('[data-testid=import-tree] .el-tree-node__expand-icon').click()")
   await waitFor("document.querySelectorAll('.folder-tree-node').length === 4", 'lazy child folders')
-  await folderCheckbox(source)
-  await folderCheckbox(secondSource)
+  assert.equal(await evaluate("document.querySelectorAll('.folder-tree-node input:checked').length"), 4, 'Lazy children inherit the checked parent')
+  await folderCheckbox(excludedSource)
+  await waitFor("document.querySelector('[data-testid=import-tree] .el-checkbox__input.is-indeterminate')", 'parent is partially checked')
+  assert.equal(await evaluate("document.querySelectorAll('.folder-tree-node input:checked').length"), 2, 'Checked siblings are preserved')
   await click('读取并预览')
   await waitFor("document.body.innerText.includes('发现 2 本漫画')", 'import preview')
   assert.equal((await call('bootstrap')).comics.length, 0, 'Preview must not mutate the catalog')
@@ -274,6 +275,10 @@ async function run() {
   await selectValue('import-authors', '统一作者')
   await toggle('import-enable-genre')
   await chooseOption('import-genre', '漫画')
+  await toggle('import-expand-all')
+  await toggle('import-enable-summary')
+  await setField('import-summary', '导入时预填的简介')
+  await toggle('import-expand-all')
   await capture('ComicManage-Electron-import.png')
   window.setSize(1180, 800)
   await delay(200)
@@ -290,6 +295,7 @@ async function run() {
   const id = imported.id
   const secondId = catalog.comics.find(book => book.id !== id).id
   assert.deepEqual(imported.metadata.authors, ['统一作者'])
+  assert.equal(imported.metadata.summary, '导入时预填的简介')
   assert.equal(imported.metadata.genre, '漫画')
   assert.equal(imported.metadata.publisher, 'pink-noise')
   assert.equal(imported.metadata.translator, '未知汉化')
@@ -1144,11 +1150,41 @@ async function run() {
   } finally {
     desktop.bridge.call = siteBridgeCall
   }
+  for (const book of siteBooks) {
+    await call('save', {id: book.id, metadata: {collection_mode:'series', series:'编号测试', number:'9', volume:'4'}})
+  }
+  window.webContents.reload()
+  await waitFor("document.querySelectorAll('[data-testid=library-select-comic]').length >= 2", 'reopened library for numbering')
+  for (const book of siteBooks) await checkComicId(book.id)
+  await waitFor("document.querySelector('[data-testid=batch-number-open]')?.disabled === false", 'two series explicitly checked')
+  await toggle('batch-number-open')
+  await waitFor("document.querySelectorAll('[data-testid=batch-number-row]').length === 2", 'numbering preview displays checked books')
+  const numberOrder = "Array.from(document.querySelectorAll('[data-testid=batch-number-row]'), row => row.dataset.comicId)"
+  const originalOrder = await evaluate(numberOrder)
+  await evaluate(`(() => {
+    const [first, second] = document.querySelectorAll('[data-testid=batch-number-row]')
+    const handle = second.querySelector('[data-testid=batch-number-drag]')
+    const transfer = new DataTransfer()
+    handle.dispatchEvent(new DragEvent('dragstart', {bubbles:true, cancelable:true, dataTransfer:transfer}))
+    const clientY = first.getBoundingClientRect().top + 1
+    first.dispatchEvent(new DragEvent('dragover', {bubbles:true, cancelable:true, dataTransfer:transfer, clientY}))
+    first.dispatchEvent(new DragEvent('drop', {bubbles:true, cancelable:true, dataTransfer:transfer, clientY}))
+  })()`)
+  const newOrder = await evaluate(numberOrder)
+  assert.deepEqual(newOrder, [...originalOrder].reverse())
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-testid=batch-number-preview]'), el => el.textContent.trim())"), ['1', '2'])
+  await toggle('batch-number-save')
+  await waitFor("!document.querySelector('[data-testid=batch-number-row]')?.getClientRects().length", 'numbering saved')
+  const numbered = (await call('bootstrap')).comics
+  for (const [index, identity] of newOrder.entries()) {
+    const book = numbered.find(item=>item.id === identity)
+    assert.deepEqual([book.metadata.number, book.metadata.volume, book.status], [String(index + 1), '4', 'draft'])
+  }
   assert.equal(javascriptErrors.filter(x => /Uncaught|TypeError|ReferenceError/.test(x)).length, 0, javascriptErrors.join('\n'))
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, large ChatGPT catalog with retry, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, large ChatGPT catalog with retry, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, draggable batch Number, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

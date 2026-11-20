@@ -211,6 +211,11 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
     }
     if (['komga_test', 'source_context', 'komga_jobs_run', 'model_test', 'model_assist'].includes(method)) throw new Error('此操作只允许主进程调用。')
     validateCall(method, params)
+    if (method === 'batch_number') {
+      if (Object.hasOwn(params, 'komga_scope')) throw new Error('批量编号不接受自定义书库范围。')
+      const komga_scope = await komgaConfig.get().then(currentKomgaScope).catch(() => '')
+      return callService(method, { ...params, komga_scope })
+    }
     if (method === 'bootstrap') {
       const result = await callService(method, params)
       try {

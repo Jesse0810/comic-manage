@@ -669,23 +669,24 @@ class Repository:
                         "fields": repair_fields, "parent": str(snapshot.path.parent),
                     }, ensure_ascii=False))
                 if defaults and overwrite_existing:
-                    metadata = repaired
-                    before = metadata.to_dict()
-                    for key, value in defaults.items():
-                        setattr(metadata, key, value)
-                    db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
-                        json.dumps(metadata.to_dict(), ensure_ascii=False), now(), comic_id))
-                    self._edit_event(db, comic_id, "batch_edit", "导入时批量更新作者或类型",
-                                     {key for key, value in metadata.to_dict().items() if before[key] != value})
+                    _, actual = self._checked_import_metadata(repaired, defaults, len(snapshot.pages))
+                    if actual:
+                        row = db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()
+                        updated = {**json.loads(row["metadata"]), **actual}
+                        db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
+                            json.dumps(updated, ensure_ascii=False), now(), comic_id))
+                        self._edit_event(db, comic_id, "batch_edit", "导入时批量填写勾选的资料。", actual.keys())
                 return comic_id
-            for key, value in defaults.items():
-                setattr(metadata, key, value)
+            if defaults:
+                metadata, _ = self._checked_import_metadata(metadata, defaults, len(snapshot.pages))
             db.execute("""INSERT INTO comics
                 (id, source, kind, fingerprint, page_count, metadata, warning, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (
                 comic_id, str(snapshot.path), snapshot.kind, snapshot.fingerprint,
                 len(snapshot.pages), json.dumps(metadata.to_dict(), ensure_ascii=False), warning, now()))
             self._event(db, comic_id, "import", str(snapshot.path))
+            if defaults:
+                self._edit_event(db, comic_id, "batch_edit", "导入时批量填写勾选的资料。", defaults.keys())
         return comic_id
 
     def remove(self, comic_ids: list[str]) -> None:
@@ -706,6 +707,39 @@ class Repository:
             if row is None:
                 raise ValueError("作品记录不存在或已移除。")
 
+    @staticmethod
+    def _checked_batch_metadata(before: dict, changes: dict) -> tuple[Metadata, dict]:
+        metadata = Metadata.from_dict({**before, **changes})
+        actual = {key: value for key, value in metadata.to_dict().items() if before[key] != value}
+        unselected = actual.keys() - changes.keys()
+        if "pencillers" in unselected:
+            raise ValueError("作者和已有绘画者重名，请同时勾选并调整独立绘画者。")
+        if "localized_series" in unselected:
+            raise ValueError("新系列名和已有系列别名相同，请同时勾选并调整系列别名。")
+        if unselected:
+            raise ValueError("本次填写会影响未勾选的字段，请检查批量编辑内容。")
+        if changes.get("uncensored") and metadata.age_rating != "R18+":
+            raise ValueError("只有 R18 作品可以设置为无修正。")
+        metadata.validate_fields(set(changes))
+        return metadata, actual
+
+    @classmethod
+    def _checked_import_metadata(cls, before: Metadata, defaults: dict, page_count: int) -> tuple[Metadata, dict]:
+        metadata, actual = cls._checked_batch_metadata(before.to_dict(), defaults)
+        series_fields = {"series", "number", "count", "localized_series", "localized_series_label"}
+        if metadata.collection_mode != "series" and any(defaults.get(field) for field in series_fields):
+            raise ValueError("填写系列资料前，请将作品组织方式设为多卷系列。")
+        if "cover_index" in defaults and not 0 <= metadata.cover_index < page_count:
+            raise ValueError(f"此作品只有 {page_count} 页，所选封面页码超出范围。")
+        return metadata, actual
+
+    def _write_batch_fields(self, db, comic_id: str, stored: dict, before: dict,
+                            actual: dict, fields: set[str], message: str) -> None:
+        self._record_komga_edit(db, comic_id, before, {**before, **actual}, fields)
+        db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
+            json.dumps({**stored, **actual}, ensure_ascii=False), now(), comic_id))
+        self._edit_event(db, comic_id, "batch_edit", message, actual.keys())
+
     def batch_edit(self, comic_ids: list[str], changes: dict) -> int:
         count = 0
         fields = set(changes)
@@ -716,29 +750,35 @@ class Repository:
                 row = db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()
                 stored = json.loads(row["metadata"])
                 before = Metadata.from_dict(stored).to_dict()
-                metadata = Metadata.from_dict({**before, **changes})
-                actual = {key: value for key, value in metadata.to_dict().items() if before[key] != value}
                 try:
-                    # Canonicalization is allowed for checked fields only.
-                    unselected = actual.keys() - fields
-                    if "pencillers" in unselected:
-                        raise ValueError("作者和已有绘画者重名，请同时勾选并调整独立绘画者。")
-                    if "localized_series" in unselected:
-                        raise ValueError("新系列名和已有系列别名相同，请同时勾选并调整系列别名。")
-                    if unselected:
-                        raise ValueError("本次填写会影响未勾选的字段，请检查批量编辑内容。")
-                    if changes.get("uncensored") and metadata.age_rating != "R18+":
-                        raise ValueError("只有 R18 作品可以设置为无修正。")
-                    metadata.validate_fields(fields)
+                    _, actual = self._checked_batch_metadata(before, changes)
                 except ValueError as error:
                     raise ValueError(f"《{before['title']}》{error}") from error
-                if not actual:
-                    continue
-                self._record_komga_edit(db, comic_id, before, metadata.to_dict(), fields)
-                db.execute("UPDATE comics SET metadata=?, status='draft', updated_at=? WHERE id=?", (
-                    json.dumps({**stored, **actual}, ensure_ascii=False), now(), comic_id))
-                self._edit_event(db, comic_id, "batch_edit", f"批量修改 {', '.join(actual)}。需要重新审核。", actual.keys())
-                count += 1
+                if actual:
+                    self._write_batch_fields(db, comic_id, stored, before, actual, fields,
+                                             f"批量修改 {', '.join(actual)}。需要重新审核。")
+                    count += 1
+        return count
+
+    def batch_number(self, comic_ids: list[str], start: int, scope: str) -> int:
+        count = 0
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for index, comic_id in enumerate(comic_ids, start=start):
+                state = self._review_state(db, comic_id)
+                before = state["metadata"]
+                try:
+                    self.check_agent_scope(state, scope)
+                    if before["collection_mode"] != "series":
+                        raise ValueError("请先将作品组织方式设为多卷系列。")
+                    _, actual = self._checked_batch_metadata(before, {"number": str(index)})
+                except ValueError as error:
+                    raise ValueError(f"《{before['title']}》{error}") from error
+                if actual:
+                    row = db.execute("SELECT metadata FROM comics WHERE id=?", (comic_id,)).fetchone()
+                    self._write_batch_fields(db, comic_id, json.loads(row["metadata"]), before, actual, {"number"},
+                                             "按确认的顺序设置册编号。需要重新审核。")
+                    count += 1
         return count
 
     @staticmethod

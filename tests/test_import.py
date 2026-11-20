@@ -49,6 +49,24 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(self.service.repo.all(), [])
         self.assertEqual(self.service.repo.setting("roots"), "")
 
+    def test_excluded_subtree_preserves_parent_pages_and_explicit_selected_descendant(self):
+        (self.library / "1.jpg").write_bytes(b"parent-page")
+        ignored = self.book("不选的分支", parent=self.first)
+        unexpanded = self.book("未展开但仍选中的分支", parent=self.first)
+        reselected = self.book("重新选中的深层目录", parent=ignored)
+        excluded_again = self.book("更深层的取消勾选", parent=reselected)
+
+        result = self.preview(self.library, reselected, excludedPaths=[str(ignored), str(excluded_again)])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual({item["id"] for item in result["items"]}, {
+            source_id(path) for path in (self.library, self.first, self.second, unexpanded, reselected)
+        })
+
+    def test_excluded_import_paths_must_be_absolute_list_entries(self):
+        for value in (None, "relative", ["relative"]):
+            with self.subTest(value=value), self.assertRaises(ServiceError):
+                self.preview(excludedPaths=value)
+
     def test_only_current_checked_books_are_rescanned_without_saved_roots(self):
         preview = self.preview()
         first_id = source_id(self.first)
@@ -383,6 +401,72 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(preview["items"], [])
         self.assertEqual(len(preview["errors"]), 2)
 
+    def test_import_prefills_all_editable_fields_except_titles(self):
+        (self.first / "2.jpg").write_bytes(b"second-page")
+        preview = self.preview(self.first)
+        source = preview["items"][0]["metadata"]
+        defaults = {
+            "authors": ["通用作者"], "pencillers": ["独立画师"], "publisher": "出版社", "translator": "译者",
+            "collection_mode": "series", "series": "系列", "localized_series": "系列别名",
+            "localized_series_label": "zh-Hans", "number": "2.5", "count": "7", "volume": "3",
+            "genre": "漫画", "age_rating": "R18+", "uncensored": True, "color": "全彩",
+            "tags": ["日常"], "original_works": ["原作"], "characters": ["角色"],
+            "work_group": "版本组", "text_version": "无文字", "release_type": "商业出版",
+            "publication_format": "单行本", "release_methods": ["单次购买"], "release_platforms": ["DLsite"],
+            "year": "2020", "month": "2", "day": "29", "language": "ja", "manga": "YesAndRightToLeft",
+            "reading_direction": "RIGHT_TO_LEFT", "web": ["https://example.org/work?a=1,b=2"],
+            "summary": "第一行\n第二行", "cover_index": 1,
+        }
+        result = self.commit(preview, defaults=defaults)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(self.service.repo.get(source_id(self.first)).metadata.to_dict(), {**source, **defaults})
+
+    def test_import_overwrite_changes_only_checked_fields_and_preserves_on_invalid_cover(self):
+        identity = self.imported()
+        self.service.call("save", {"id": identity, "metadata": {
+            "title": "手动作品名", "chinese_title": "手动译名", "summary": "已有简介", "publisher": "保留出版者",
+        }})
+        before = self.service.repo.get(identity).metadata.to_dict()
+        defaults = {"summary": "批量简介", "cover_index": 1}
+        failed = self.commit(self.preview(self.first), defaults=defaults, overwriteExisting=True)
+        self.assertEqual(failed["count"], 0)
+        self.assertIn("封面页码超出范围", failed["errors"][0])
+        self.assertEqual(self.service.repo.get(identity).metadata.to_dict(), before)
+        result = self.commit(self.preview(self.first), defaults={"summary": "批量简介"}, overwriteExisting=True)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(self.service.repo.get(identity).metadata.to_dict(), {**before, "summary": "批量简介"})
+
+    def test_batch_number_follows_confirmed_order_and_leaves_volume_and_other_fields_intact(self):
+        self.commit(self.preview())
+        identities = [source_id(self.first), source_id(self.second)]
+        before = {}
+        for identity in identities:
+            self.service.call("save", {"id": identity, "metadata": {
+                "collection_mode": "series", "series": "共同系列", "number": "16", "volume": "7", "summary": "保留",
+            }})
+            self.service.repo.mark_packaged(identity, self.root / f"{identity}.cbz", {})
+            before[identity] = self.service.repo.get(identity).metadata.to_dict()
+        order = list(reversed(identities))
+        result = self.service.call("batch_number", {"ids": order, "start": 0})
+        self.assertEqual(result["count"], 2)
+        for index, comic in enumerate(result["comics"]):
+            self.assertEqual(comic["id"], order[index])
+            self.assertEqual(comic["metadata"], {**before[comic["id"]], "number": str(index)})
+            self.assertEqual(comic["status"], "draft")
+            self.assertTrue(comic["output"].endswith(f"{comic['id']}.cbz"))
+        self.assertEqual(self.service.call("batch_number", {"ids": order, "start": 0})["count"], 0)
+
+    def test_batch_number_rolls_back_for_missing_or_one_shot_and_rejects_bad_range(self):
+        self.commit(self.preview())
+        first, second = source_id(self.first), source_id(self.second)
+        self.service.call("save", {"id": first, "metadata": {"collection_mode": "series", "series": "系列", "number": "9"}})
+        for order, start in (([first, second], 1), ([first, "missing"], 1), ([first, first], 1),
+                             ([first, second], 2147483647), ([first, second], True)):
+            with self.subTest(order=order, start=start), self.assertRaises(ValueError):
+                self.service.call("batch_number", {"ids": order, "start": start})
+            self.assertEqual(self.service.repo.get(first).metadata.number, "9")
+
     def test_malformed_bulk_arguments_do_not_mutate_catalog(self):
         identity = self.imported()
         for changes in [{}, {"authors": []}, {"authors": "作者"}, {"genre": " "}, {"genre": 3}, {"genre": "恋爱"},
@@ -398,7 +482,7 @@ class ImportTests(unittest.TestCase):
         with self.assertRaises(ServiceError):
             self.commit(preview, overwriteExisting="true")
         with self.assertRaises(ServiceError):
-            self.commit(preview, defaults={"series": "导入仅支持作者和类型"})
+            self.commit(preview, defaults={"chinese_title": "不得批改的译名"})
         self.assertEqual(self.service.repo.get(identity).metadata.authors, [])
 
 

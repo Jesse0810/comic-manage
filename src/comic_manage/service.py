@@ -132,16 +132,22 @@ def _batch_authors(value) -> list[str]:
 
 
 def _import_defaults(value) -> dict:
-    if not isinstance(value, dict) or set(value) - {"authors", "genre"}:
-        raise ServiceError("导入默认值仅支持作者和类型。")
-    result = {}
-    if "authors" in value:
-        result["authors"] = _batch_authors(value["authors"])
-    if "genre" in value:
-        genre = _string(value["genre"], "类型").strip()
-        if genre not in GENRES:
-            raise ServiceError("内容类型请选择漫画、小说、CG集、画集、设定集或插画集；发行性质与题材请分别填写。")
-        result["genre"] = genre
+    if not isinstance(value, dict):
+        raise ServiceError("导入默认值必须是资料对象。")
+    batch_values = {field: item for field, item in value.items() if field not in {"summary", "cover_index"}}
+    result = _batch_changes(batch_values) if batch_values else {}
+    if "genre" in result and not result["genre"]:
+        raise ServiceError("请选择有效的导入内容类型。")
+    if "summary" in value:
+        summary = value["summary"]
+        if not isinstance(summary, str) or len(summary) > 32767 or "\x00" in summary:
+            raise ServiceError("作品简介必须是长度合适的文本。")
+        result["summary"] = summary.strip()
+    if "cover_index" in value:
+        index = value["cover_index"]
+        if type(index) is not int or not 0 <= index <= 2147483646:
+            raise ServiceError("封面页码必须是有效的正整数。")
+        result["cover_index"] = index
     return result
 
 
@@ -188,7 +194,7 @@ def _folder_link(path: Path) -> bool:
 class ComicService:
     METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview", "model_test", "model_assist", "agent_prepare", "agent_apply", "agent_search", "agent_search_preview",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
-                         "prepare_import", "commit_import", "remove", "batch_edit", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
+                         "prepare_import", "commit_import", "remove", "batch_edit", "batch_number", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
 
     def __init__(self, data_dir: Path, progress: Callable[[str], None] | None = None):
         self.data_dir = data_dir.resolve()
@@ -384,6 +390,22 @@ class ComicService:
             if count:
                 self.plans.clear()
             return {"count": count, "comics": [self.serialize(self.repo.get(i)) for i in identities]}
+        if method == "batch_number":
+            if set(params) - {"ids", "start", "komga_scope"}:
+                raise ServiceError("批量编号包含不支持的参数。")
+            identities = _strings(params.get("ids"), "作品 id")
+            start = params.get("start")
+            scope = params.get("komga_scope", "")
+            if len(identities) < 2 or len(identities) != len(params["ids"]):
+                raise ServiceError("请至少勾选两本不同的作品。")
+            if type(start) is not int or not 0 <= start <= 2147483647 - len(identities) + 1:
+                raise ServiceError("起始册编号和最后一册的编号须在 0 到 2147483647 之间。")
+            if not isinstance(scope, str) or (scope and (len(scope) != 20 or any(c not in "0123456789abcdef" for c in scope))):
+                raise ServiceError("Komga 书库范围无效。")
+            count = self.repo.batch_number(identities, start, scope)
+            if count:
+                self.plans.clear()
+            return {"count": count, "comics": [self.serialize(self.repo.get(identity)) for identity in identities]}
         if method == "export_komga":
             identities = _strings(params.get("ids"), "作品 id")
             return export_manifest(self.repo, identities, _path(params.get("path"), "清单位置"))
@@ -487,6 +509,8 @@ class ComicService:
         recursive = params.get("recursive", True)
         if type(recursive) is not bool:
             raise ServiceError("recursive 必须是布尔值。")
+        excluded_paths = params.get("excludedPaths", [])
+        skipped = [_path(p, "取消勾选的目录") for p in _strings(excluded_paths, "取消勾选的目录")] if excluded_paths != [] else []
         snapshots: dict[str, Snapshot] = {}
         items, errors = [], []
         excluded = self.excluded_sources()
@@ -514,6 +538,11 @@ class ComicService:
 
         cancelled = False
         try:
+            skipped_subtrees = set()
+            for path in skipped:
+                check_cancel(cancel)
+                # Resolve the share or drive alias without following a link at the excluded leaf.
+                skipped_subtrees.add(path.parent.resolve() / path.name)
             for path in paths:
                 check_cancel(cancel)
                 try:
@@ -522,7 +551,7 @@ class ComicService:
                     if any(is_inside(path, root) for root in excluded):
                         raise ValueError("不能将资料库或成品目录作为漫画源导入。")
                     if path.is_dir() and recursive:
-                        for snapshot in discover(path, exclude=excluded, cancel=cancel,
+                        for snapshot in discover(path, exclude=excluded, cancel=cancel, skip_subtrees=skipped_subtrees,
                                                  on_error=lambda p, error: errors.append(f"{p}: {error}")):
                             add(snapshot)
                     else:
@@ -579,7 +608,7 @@ class ComicService:
                         previous = None
                     removed = self.repo.is_removed(identity)
                     self.repo.upsert_scan(fresh, restore=True, defaults=defaults, overwrite_existing=overwrite)
-                    if (previous is not None and not removed and not (defaults and overwrite)
+                    if (previous is not None and not removed
                             and previous.fingerprint == fresh.fingerprint
                             and previous.metadata.to_dict() == self.repo.get(identity).metadata.to_dict()):
                         skipped += 1

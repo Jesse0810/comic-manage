@@ -209,9 +209,11 @@ def inspect_source(path: Path) -> Snapshot:
 
 
 def discover(root: Path, *, exclude: list[Path] | None = None, cancel: Event | None = None,
-             on_error: Callable[[Path, str], None] | None = None) -> Iterator[Snapshot]:
+             on_error: Callable[[Path, str], None] | None = None,
+             skip_subtrees: set[Path] | None = None) -> Iterator[Snapshot]:
     root = root.resolve(strict=True)
     excluded = [p.resolve() for p in (exclude or [])]
+    skip_subtrees = skip_subtrees or set()
     if not root.is_dir():
         raise ValueError("扫描根路径必须是一个目录。")
 
@@ -229,6 +231,7 @@ def discover(root: Path, *, exclude: list[Path] | None = None, cancel: Event | N
             dirs[:] = []
             continue
         dirs[:] = sorted(d for d in dirs if d.casefold() not in SKIP_DIRS
+                         and (folder / d) not in skip_subtrees
                          and not is_link(folder / d)
                          and not any(is_inside(folder / d, p) for p in excluded))
         candidates = ([folder] if any(Path(f).suffix.lower() in IMAGE_EXTENSIONS for f in files) else [])

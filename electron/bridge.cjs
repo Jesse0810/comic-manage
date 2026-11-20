@@ -6,7 +6,7 @@ const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'batch_number', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
@@ -171,8 +171,11 @@ function validateCall(method, params) {
           || api_key.length > (profile.provider === 'chatgpt-plan' ? 16384 : 4096)) throw new Error('Agent 模型配置无效。')
     }
   }
-  if (method === 'prepare_import' && params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
-  if (['remove', 'batch_edit', 'commit_import', 'export_komga', 'komga_sync', 'prepare_review_sync', 'komga_jobs_retry'].includes(method)) strings('ids')
+  if (method === 'prepare_import') {
+    if (params.recursive !== undefined && typeof params.recursive !== 'boolean') throw new Error('递归选项无效。')
+    strings('excludedPaths', false)
+  }
+  if (['remove', 'batch_edit', 'batch_number', 'commit_import', 'export_komga', 'komga_sync', 'prepare_review_sync', 'komga_jobs_retry'].includes(method)) strings('ids')
   if (method === 'komga_jobs' && Object.keys(params).length) throw new Error('同步任务列表不接受额外参数。')
   if (method === 'komga_jobs_retry' && (!params.ids.length || Object.keys(params).some(key => !['ids', 'url', 'libraryId'].includes(key)))) throw new Error('重试任务参数无效。')
   if (method === 'prepare_review_sync' && !params.ids.length) throw new Error('请勾选要批量审核的作品。')
@@ -197,11 +200,21 @@ function validateCall(method, params) {
     string('token')
     if (params.overwriteExisting !== undefined && typeof params.overwriteExisting !== 'boolean') throw new Error('覆盖选项无效。')
     const fields = params.defaults
-    if (fields === null || (fields !== undefined && (typeof fields !== 'object' || Array.isArray(fields)))) throw new Error('批量资料无效。')
-    if (fields) {
-      if (Object.keys(fields).some(key => !['authors', 'genre'].includes(key))) throw new Error('批量字段无效。')
-      if (fields.authors !== undefined && (!Array.isArray(fields.authors) || fields.authors.length > 1000 || fields.authors.some(author => typeof author !== 'string' || !author.trim() || author.length > 32767))) throw new Error('作者无效。')
-      if (fields.genre !== undefined && (typeof fields.genre !== 'string' || !fields.genre || !BATCH_ENUMS.genre.includes(fields.genre))) throw new Error('类型无效。')
+    if (fields !== undefined) {
+      if (!isRecord(fields)) throw new Error('批量资料无效。')
+      const { summary, cover_index, ...batchFields } = fields
+      if (Object.keys(batchFields).length) validateBatchEdit(batchFields)
+      if (Object.hasOwn(fields, 'genre') && !fields.genre) throw new Error('请选择有效的导入内容类型。')
+      if (Object.hasOwn(fields, 'summary') && (typeof summary !== 'string' || summary.length > 32767 || summary.includes('\0'))) throw new Error('作品简介无效。')
+      if (Object.hasOwn(fields, 'cover_index') && (!Number.isInteger(cover_index) || cover_index < 0 || cover_index > 2147483646)) throw new Error('封面页码无效。')
+    }
+  }
+  if (method === 'batch_number') {
+    if (Object.keys(params).some(key => !['ids', 'start', 'komga_scope'].includes(key))
+        || params.ids.length < 2 || new Set(params.ids).size !== params.ids.length
+        || !Number.isInteger(params.start) || params.start < 0 || params.start + params.ids.length - 1 > 2147483647
+        || (params.komga_scope !== undefined && (typeof params.komga_scope !== 'string' || !/^(?:[a-f0-9]{20})?$/.test(params.komga_scope)))) {
+      throw new Error('请选择至少两本不同作品，编号须在 0 到 2147483647 之间。')
     }
   }
   if (method === 'batch_edit') validateBatchEdit(params.changes)

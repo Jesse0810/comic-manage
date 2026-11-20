@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Reading, Collection, Clock, CircleCheck, Box, Plus, FolderAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back, MagicStick } from '@element-plus/icons-vue'
+import { Reading, Collection, Clock, CircleCheck, Box, Plus, FolderAdd, Search, Refresh, Download, FolderOpened, Lock, Monitor, Check, CopyDocument, Edit, Remove, Connection, Setting, FullScreen, Back, MagicStick, Sort } from '@element-plus/icons-vue'
 import DetailsPanel from './components/DetailsPanel.vue'
 import LibraryTable from './components/LibraryTable.vue'
 import LibraryFieldToolbar from './components/LibraryFieldToolbar.vue'
@@ -11,6 +11,7 @@ import { activeLibraryConditions, matchesLibraryConditions, type LibraryConditio
 import { buildLibraryEntries } from './library-groups'
 import ImportDialog from './components/ImportDialog.vue'
 import BatchEditDialog from './components/BatchEditDialog.vue'
+import BatchNumberDialog from './components/BatchNumberDialog.vue'
 import BatchReviewDialog from './components/BatchReviewDialog.vue'
 import BatchReviewResultDialog from './components/BatchReviewResultDialog.vue'
 import KomgaSettingsDialog from './components/KomgaSettingsDialog.vue'
@@ -83,6 +84,8 @@ const reviewError = ref('')
 const importVisible = ref(false)
 const batchVisible = ref(false)
 const batchIds = ref<string[]>([])
+const batchNumberVisible = ref(false)
+const batchNumberComics = ref<Comic[]>([])
 const scrapeVisible = ref(false)
 const modelSettingsVisible = ref(false)
 const siteSettingsVisible = ref(false)
@@ -128,18 +131,24 @@ const sectionTitle = computed(() => ({ all: '我的漫画库', draft: '待审核
 const exportIds = computed(() => selectedIds.value.length ? selectedIds.value : (selectedId.value ? [selectedId.value] : []))
 const agentUnavailable = computed(() => busy.value || loading.value || !available.value)
 const disabled = computed(() => agentUnavailable.value || agentWorking.value)
-const agentSelected = computed(() => {
+const checkedComics = computed(() => {
   const ids = new Set(selectedIds.value)
-  return comics.value.filter(comic => ids.has(comic.id) && canEditComic(comic) && !comic.remote?.conflict)
+  return comics.value.filter(comic => ids.has(comic.id))
 })
+const agentSelected = computed(() => checkedComics.value.filter(comic => canEditComic(comic) && !comic.remote?.conflict))
 const agentFiltered = computed(() => filtered.value.filter(comic => canEditComic(comic) && !comic.remote?.conflict))
 const selectedComics = computed(() => comics.value.filter(comic => exportIds.value.includes(comic.id)))
 const selectionHasRemote = computed(() => selectedComics.value.some(comic => comic.kind === 'komga'))
 const selectionHasInactive = computed(() => selectedComics.value.some(comic => !canEditComic(comic)))
-const checkedSelectionHasInactive = computed(() => selectedIds.value.some(id => {
-  const comic = comics.value.find(item => item.id === id)
-  return !comic || !canEditComic(comic)
-}))
+const checkedSelectionHasInactive = computed(() => checkedComics.value.length !== selectedIds.value.length
+  || checkedComics.value.some(comic => !canEditComic(comic)))
+const numberingUnavailable = computed(() => {
+  if (!selectedIds.value.length) return '请先勾选要编号的系列作品'
+  if (checkedSelectionHasInactive.value) return '请切回所选作品所属的可用 Komga 连接'
+  if (checkedComics.value.some(comic => comic.remote?.conflict)) return '请先处理所选作品的 Komga 冲突'
+  if (checkedComics.value.some(comic => collectionMode(comic.metadata) !== 'series')) return '请勾选设为多卷系列的作品'
+  return ''
+})
 const currentReadOnly = computed(() => !!current.value && !canEditComic(current.value))
 function canEditComic(comic: Comic) { return comic.kind !== 'komga' || (!!komgaScope.value && comic.remote?.scope === komgaScope.value && comic.remote?.unavailable !== true) }
 function clearLibrarySelection() {
@@ -378,6 +387,12 @@ async function openBatchEditor() {
   if (selectionHasInactive.value) { ElMessage.warning('请切回作品所属的 Komga 连接后再批量编辑'); return }
   batchIds.value = [...exportIds.value]
   batchVisible.value = true
+}
+
+async function openBatchNumbering() {
+  if (disabled.value || numberingUnavailable.value || !await resolveEdits() || numberingUnavailable.value) return
+  batchNumberComics.value = [...checkedComics.value]
+  batchNumberVisible.value = true
 }
 
 async function batchSaved(count: number) {
@@ -769,7 +784,7 @@ onBeforeUnmount(() => unsubscribe?.())
         <section v-show="!editorExpanded" class="library-panel">
           <div class="library-source-bar"><el-select data-testid="source-filter" :model-value="sourceFilter" :disabled="disabled" @update:model-value="changeSource" aria-label="作品来源"><el-option label="全部来源" value="all" /><el-option label="本地作品" value="local" /><el-option label="当前 Komga 书库" value="komga" /></el-select><span :title="komgaLibraryName">{{ komgaScope ? `Komga · ${komgaLibraryName || '当前书库'}` : '配置 Komga 后可直接读取书库' }}</span><LibraryFieldToolbar v-model:conditions="fieldConditions" v-model:sort="librarySort" :disabled="disabled" /></div>
           <div class="library-toolbar"><el-input v-model="search" clearable :prefix-icon="Search" placeholder="搜索作品、系列、作者或分类" :disabled="disabled" class="search-input" /><el-select v-model="author" clearable filterable placeholder="全部作者" :disabled="disabled" class="author-select"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div>
-          <div class="library-summary"><span class="library-count-summary">{{ libraryWorkCount }} 部作品 · {{ filtered.length }} 个版本<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span><span v-if="checkedOutsideFilter" class="hidden-selection-count">（筛选外 {{ checkedOutsideFilter }} 本）</span><el-button v-if="selectedIds.length" data-testid="clear-library-selection" link :disabled="disabled" @click="clearLibrarySelection">取消勾选</el-button></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
+          <div class="library-summary"><span class="library-count-summary">{{ libraryWorkCount }} 部作品 · {{ filtered.length }} 个版本<span v-if="selectedIds.length" class="selected-count">已选择 {{ selectedIds.length }} 本</span><span v-if="checkedOutsideFilter" class="hidden-selection-count">（筛选外 {{ checkedOutsideFilter }} 本）</span><el-button v-if="selectedIds.length" data-testid="clear-library-selection" link :disabled="disabled" @click="clearLibrarySelection">取消勾选</el-button></span><div class="library-batch-actions"><el-button link :icon="Edit" :disabled="disabled || !exportIds.length || selectionHasInactive" @click="openBatchEditor">批量编辑</el-button><el-button data-testid="batch-number-open" link :icon="Sort" :disabled="disabled || !!numberingUnavailable" :title="numberingUnavailable || '拖动排序并填写册编号'" @click="openBatchNumbering">批量编号</el-button><el-button data-testid="batch-review-sync" link :icon="CircleCheck" :disabled="disabled || !selectedIds.length || checkedSelectionHasInactive" :title="!selectedIds.length ? '先勾选一本或多本作品；仅选中当前行不会执行批量审核' : checkedSelectionHasInactive ? '请切回所选作品所属的可用 Komga 连接' : '先逐本检查并确认，只审核和同步可通过的作品'" @click="batchReviewSync">批量审核并同步</el-button><el-button data-testid="komga-sync" link :icon="Connection" :disabled="disabled || !exportIds.length || selectionHasInactive" title="同步已审核资料；系列级字段需选全系列" @click="syncKomga">同步到 Komga</el-button><el-button link :icon="Remove" :disabled="disabled || !exportIds.length || selectionHasRemote" title="远端作品在 Komga 中管理，此处不删除服务器内容" @click="removeComics">移出列表</el-button></div><span v-if="counts.draft && !exportIds.length" class="review-reminder"><i></i>{{ counts.draft }} 本等待审核</span><span v-else-if="!exportIds.length" class="review-reminder clear"><el-icon><Check /></el-icon>资料已整理</span></div>
 
           <div class="table-area" v-loading="loading">
             <LibraryTable v-if="comics.length" v-show="filtered.length > 0" ref="libraryTable" v-model:sort="librarySort" :comics="filtered" :all-comics="sourceComics" :selected-ids="selectedIds" :current-id="selectedId" :disabled="disabled" :can-select="canEditComic" :auto-sync-label="autoSyncLabel" :reveal-matches="revealMatches" :reveal-key="revealKey" @row-click="selectComic" @selection-change="(ids: string[]) => selectedIds = ids" />
@@ -790,7 +805,7 @@ onBeforeUnmount(() => unsubscribe?.())
         </DetailsPanel>
       </div>
 
-      <div v-if="busy && !importVisible && !batchVisible && !komgaSettingsVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>
+      <div v-if="busy && !importVisible && !batchVisible && !batchNumberVisible && !komgaSettingsVisible" class="task-bar"><div class="task-indicator"></div><div class="task-copy"><strong>{{ taskTitle }}</strong><span :title="taskMessage">{{ taskMessage }}</span></div><el-button link :disabled="cancelling" @click="cancelTask">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button></div>
       <footer class="workspace-footnote"><span class="connection-dot" :class="{ offline: !available }"></span><span>{{ available ? '本机资料库已连接' : '本机服务不可用' }}</span><span class="footnote-divider">/</span><span>原图保留 · 人工审核 · 无损打包</span><span v-if="dirty" class="unsaved-note">当前作品有未保存修改</span></footer>
     </main>
 
@@ -805,6 +820,8 @@ onBeforeUnmount(() => unsubscribe?.())
     <SiteSettingsDialog v-model="siteSettingsVisible" :disabled="agentWorking" @updated="siteConfig = $event" />
     <ImportDialog v-model="importVisible" :authors="authors" :message="taskMessage" @state="dialogTask" @completed="imported" />
     <BatchEditDialog :has-remote="comics.some(comic => batchIds.includes(comic.id) && comic.kind === 'komga')" v-model="batchVisible" :ids="batchIds" :authors="authors" :modes="comics.filter(comic => batchIds.includes(comic.id)).map(comic => collectionMode(comic.metadata))" :ratings="comics.filter(comic => batchIds.includes(comic.id)).map(comic => comic.metadata.age_rating)" @state="dialogTask" @completed="batchSaved" />
+
+    <BatchNumberDialog v-model="batchNumberVisible" :comics="batchNumberComics" @state="dialogTask" @completed="batchSaved" />
 
     <ExportPlanDialog v-model="planVisible" :plan="plan" :busy="disabled" @confirm="confirmExport" />
 

@@ -365,9 +365,13 @@ test('request boundary rejects arbitrary methods, malformed records and unsafe n
     ['browse_folders', {path:42}],
     ['prepare_import', {paths:['C:\\Comics'],recursive:'yes'}],
     ['commit_import', {token:'token',ids:['book'],defaults:{original_title:'hidden'}}],
-    ['commit_import', {token:'token',ids:['book'],defaults:{series:'不得在导入时修改'}}],
+    ['commit_import', {token:'token',ids:['book'],defaults:{title:'不得在导入时修改'}}],
     ['commit_import', {token:'token',ids:['book'],defaults:{genre:''}}],
     ['commit_import', {token:'token',ids:['book'],overwriteExisting:1}],
+    ['commit_import', {token:'token',ids:['book'],defaults:{cover_index:-1}}],
+    ['batch_number', {ids:['book','book'],start:0}],
+    ['batch_number', {ids:['one','two'],start:2147483647}],
+    ['batch_number', {ids:['one','two'],start:1.5}],
     ['batch_edit', {ids:['book'],changes:{authors:'writer'}}],
     ['batch_edit', {ids:['book'],changes:{authors:[]}}],
     ['batch_edit', {ids:['book'],changes:{genre:' '}}],
@@ -400,6 +404,10 @@ test('staged import and batch actions cross the same restricted bridge', async t
     ['browse_folders', {path:'C:\\Comics'}],
     ['prepare_import', {paths:['C:\\Comics','D:\\漫画'],recursive:true}],
     ['commit_import', {token:'prepared',ids:['one','two'],defaults:{authors:['みずいろめがね'],genre:'漫画'},overwriteExisting:false}],
+    ['batch_number', {ids:['two','one'],start:0}],
+    ['commit_import', {token:'prepared',ids:['one','two'],defaults:{
+      collection_mode:'series', series:'系列', localized_series:'系列别名', summary:'导入简介', cover_index:0,
+    }}],
     ['batch_edit', {ids:['one','two'],changes:{genre:'漫画'}}],
     ['batch_edit', {ids:['one','two'],changes:{
       collection_mode:'series', series:'原作系列', localized_series:'系列译名',
@@ -444,9 +452,21 @@ test('collection patches reject unknown modes, malformed labels and retired colo
       ids:['book'], changes:{collection_mode, localized_series_label:'zh-Hant'},
     }))
   }
-  assert.throws(() => validateCall('commit_import', {
+  assert.doesNotThrow(() => validateCall('commit_import', {
     token:'prepared', ids:['book'], defaults:{collection_mode:'series'},
-  }), /批量字段/)
+  }))
+})
+
+test('batch number binds the configured scope and preserves the checked order', async () => {
+  const main = await mainProcessFixture({respond: method => method === 'batch_number' ? {count:2,comics:[]} : {}})
+  const params = {ids:['next','first'],start:0}
+  await assert.rejects(main.invoke('comic:call','batch_number',{...params,komga_scope:''}), /书库范围/)
+  assert.equal((await main.invoke('comic:call','batch_number',params)).count, 2)
+  const call = main.calls.at(-1)
+  assert.equal(call.method, 'batch_number')
+  assert.deepEqual(JSON.parse(JSON.stringify(call.params.ids)), params.ids)
+  assert.equal(call.params.start, 0)
+  assert.match(call.params.komga_scope, /^[a-f0-9]{20}$/)
 })
 
 test('Komga export validates its selected IDs and destination before sending a request', async t => {

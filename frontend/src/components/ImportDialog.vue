@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { ElMessage, ElTree } from 'element-plus'
-import type { TableInstance, TreeOptionProps } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import type { LoadFunction, TableInstance, TreeOptionProps } from 'element-plus'
 import { FolderAdd, Folder, ArrowLeft, Check, Close } from '@element-plus/icons-vue'
 import type { ImportCandidate, ImportPreview, ImportResult } from '../types'
-import { comicGenres, errorMessage, displayTitle, colorLabels, collectionMode, versionLabels } from '../types'
+import { errorMessage, displayTitle, colorLabels, collectionMode, versionLabels } from '../types'
 import { invoke } from '../api'
+import BulkMetadataFields from './BulkMetadataFields.vue'
 
-interface FolderNode { path: string; name: string; hasChildren: boolean }
+interface FolderEntry { path: string; name: string; hasChildren: boolean }
+interface FolderNode extends FolderEntry { source: string; nodeKey: string }
 const props = defineProps<{ modelValue: boolean; authors: string[]; message: string }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
@@ -15,8 +17,7 @@ const emit = defineEmits<{
   (e: 'completed', result: ImportResult): void
 }>()
 const locations = ref<FolderNode[]>([])
-const checkedPaths = ref<string[]>([])
-const tree = ref<InstanceType<typeof ElTree>>()
+const branchChoices = ref(new Map<string, { path: string; selected: boolean }>())
 const table = ref<TableInstance>()
 const preview = ref<ImportPreview | null>(null)
 const selected = ref<string[]>([])
@@ -24,14 +25,34 @@ const errors = ref<string[]>([])
 const busy = ref(false)
 const cancelling = ref(false)
 const task = ref('')
-const editAuthors = ref(false)
-const editGenre = ref(false)
-const defaultAuthors = ref<string[]>([])
-const defaultGenre = ref('')
+const prefill = ref<InstanceType<typeof BulkMetadataFields>>()
 const overwriteExisting = ref(false)
 const treeProps: TreeOptionProps = { label: 'name', isLeaf: (node) => !node.hasChildren }
-const existingSelected = computed(() => preview.value?.items.filter(item => selected.value.includes(item.id) && item.import_status !== 'new').length || 0)
-const sourceCount = computed(() => checkedPaths.value.length)
+const selectedCandidates = computed(() => {
+  const ids = new Set(selected.value)
+  return preview.value?.items.filter(item => ids.has(item.id)) || []
+})
+const existingSelected = computed(() => selectedCandidates.value.filter(item => item.import_status !== 'new').length)
+const prefillTargets = computed(() => selectedCandidates.value.filter(item => overwriteExisting.value || item.import_status === 'new'))
+const prefillModes = computed(() => prefillTargets.value.map(item => collectionMode(item.metadata)))
+const prefillRatings = computed(() => prefillTargets.value.map(item => item.metadata.age_rating))
+const hasDefaults = computed(() => Object.keys(prefill.value?.changes || {}).length > 0)
+const folderSelection = computed(() => {
+  const paths: string[] = []
+  const excludedPaths: string[] = []
+  for (const { path, selected } of branchChoices.value.values()) {
+    (selected ? paths : excludedPaths).push(path)
+  }
+  return { paths, excludedPaths }
+})
+const sourceCount = computed(() => folderSelection.value.paths.length)
+const partialBranches = computed(() => {
+  const result = new Set<string>()
+  for (const key of branchChoices.value.keys()) {
+    for (let parent = parentKey(key); parent && !result.has(parent); parent = parentKey(parent)) result.add(parent)
+  }
+  return result
+})
 const statusNames = { new: '新作品', existing: '已入库', removed: '已移出' }
 
 function clearPreview() { preview.value = null; selected.value = []; errors.value = [] }
@@ -44,60 +65,97 @@ function setBusy(value: boolean, title = '') {
 function close() { if (!busy.value) emit('update:modelValue', false) }
 function beforeClose(done: () => void) { if (!busy.value) done(); else ElMessage.info('请先取消任务，等待当前操作结束') }
 function baseName(path: string) { return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path }
+function isWindowsPath(path: string) { return /^[a-z]:[\\/]/i.test(path) || /^(?:\\\\|\/\/)[^\\/]/.test(path) }
 function pathKey(path: string) {
-  const windowsPath = /^[a-z]:[\\/]/i.test(path) || /^(?:\\\\|\/\/)[^\\/]/.test(path)
-  const normalized = (windowsPath ? path.replaceAll('\\', '/') : path).replace(/\/+$/, '') || '/'
-  return windowsPath ? normalized.toLocaleLowerCase() : normalized
+  const windows = isWindowsPath(path)
+  const value = (windows ? path.replaceAll('\\', '/') : path).replace(/\/+$/, '') || '/'
+  return windows ? value.toLowerCase() : value
+}
+function folderNode(entry: FolderEntry, source = pathKey(entry.path)): FolderNode {
+  return { ...entry, source, nodeKey: JSON.stringify([source, pathKey(entry.path)]) }
+}
+function parentKey(key: string) {
+  if (key === '/') return ''
+  const slash = key.lastIndexOf('/')
+  return slash === 0 ? '/' : slash > 0 ? key.slice(0, slash) : ''
+}
+function includesPath(root: string, key: string) {
+  return root === key || key.startsWith(root === '/' ? root : root + '/')
+}
+function inheritedSelection(key: string) {
+  for (let cursor = key; cursor; cursor = parentKey(cursor)) {
+    const choice = branchChoices.value.get(cursor)
+    if (choice) return choice.selected
+  }
+  return false
+}
+function selectBranch(path: string, selected: boolean) {
+  if (busy.value) return
+  const key = pathKey(path)
+  for (const current of branchChoices.value.keys()) {
+    if (includesPath(key, current)) branchChoices.value.delete(current)
+  }
+  if (selected !== inheritedSelection(parentKey(key))) branchChoices.value.set(key, { path, selected })
+  clearPreview()
+}
+function isBranchChecked(path: string) {
+  const key = pathKey(path)
+  return !partialBranches.value.has(key) && inheritedSelection(key)
 }
 async function addLocations() {
   if (busy.value) return
   try {
     const chosen = await window.comic.chooseDirectories()
-    if (!chosen.length) return
     const known = new Set(locations.value.map(node => pathKey(node.path)))
-    const added = chosen.filter(path => {
+    for (const path of chosen) {
       const key = pathKey(path)
-      if (known.has(key)) return false
+      if (known.has(key)) continue
       known.add(key)
-      return true
-    })
-    if (!added.length) return
-    locations.value.push(...added.map(path => ({ path, name: baseName(path), hasChildren: true })))
-    clearPreview()
-    checkedPaths.value = [...new Set([...checkedPaths.value, ...added])]
-    await nextTick()
-    tree.value?.setCheckedKeys(checkedPaths.value)
+      locations.value.push(folderNode({ path, name: baseName(path), hasChildren: true }))
+      selectBranch(path, true)
+    }
   } catch (error) { errors.value = [errorMessage(error)] }
 }
-async function loadFolders(node: any, resolve: (nodes: FolderNode[]) => void) {
+const loadFolders: LoadFunction = async (node, resolve, stopLoading) => {
   if (node.level === 0) { resolve(locations.value); return }
+  if (busy.value) { stopLoading(); return }
+  const folder = node.data as FolderNode
   setBusy(true, '读取文件夹列表')
   try {
-    const result = await invoke<{ children: FolderNode[]; errors: string[] }>('browse_folders', { path: node.data.path })
-    resolve(result.children)
+    const result = await invoke<{ children: FolderEntry[]; errors: string[] }>('browse_folders', { path: folder.path })
+    // Keep the picked drive or share spelling across the lazy tree so rules inherit through mapped drives.
+    const windows = isWindowsPath(folder.path)
+    const separator = windows && folder.path.includes('\\') ? '\\' : '/'
+    const parent = folder.path.replace(windows ? /[\\/]+$/ : /\/+$/, '')
+    resolve(result.children.map(child => folderNode({ ...child, path: parent + separator + child.name }, folder.source)))
     if (result.errors.length) errors.value = result.errors
-  } catch (error) { resolve([]); errors.value = [errorMessage(error)] }
+  } catch (error) { stopLoading(); errors.value = [errorMessage(error)] }
   finally { setBusy(false) }
-}
-function checkedChanged(_data: FolderNode, state: { checkedKeys: (string | number)[] }) {
-  checkedPaths.value = state.checkedKeys.map(String)
-  clearPreview()
 }
 function removeLocation(path: string) {
   if (busy.value) return
   const key = pathKey(path)
-  const prefix = key.endsWith('/') ? key : key + '/'
   locations.value = locations.value.filter(item => pathKey(item.path) !== key)
-  checkedPaths.value = checkedPaths.value.filter(item => pathKey(item) !== key && !pathKey(item).startsWith(prefix))
-  nextTick(() => tree.value?.setCheckedKeys(checkedPaths.value))
+  const remaining = locations.value.map(item => {
+    const node = pathKey(item.path)
+    return { path: item.path, node, selected: inheritedSelection(node) }
+  }).sort((first, second) => first.node.length - second.node.length)
+  for (const current of branchChoices.value.keys()) {
+    if (!remaining.some(root => includesPath(root.node, current))) branchChoices.value.delete(current)
+  }
+  for (const root of remaining) {
+    if (root.selected !== inheritedSelection(root.node)) {
+      branchChoices.value.set(root.node, { path: root.path, selected: root.selected })
+    }
+  }
   clearPreview()
 }
 async function prepare() {
-  if (!checkedPaths.value.length || busy.value) return
+  if (!sourceCount.value || busy.value) return
   setBusy(true, '读取并解析漫画资料')
   errors.value = []
   try {
-    const result = await invoke<ImportPreview>('prepare_import', { paths: [...checkedPaths.value], recursive: true })
+    const result = await invoke<ImportPreview>('prepare_import', { ...folderSelection.value, recursive: true })
     preview.value = result
     errors.value = result.errors
     selected.value = []
@@ -109,19 +167,12 @@ async function prepare() {
 }
 async function commit() {
   if (!preview.value || !selected.value.length || busy.value) return
-  const defaults: { authors?: string[]; genre?: string } = {}
-  if (editAuthors.value) {
-    defaults.authors = [...new Set(defaultAuthors.value.map(author => author.trim()).filter(Boolean))]
-    if (!defaults.authors.length) { ElMessage.warning('请输入批量作者，按 Enter 添加'); return }
-  }
-  if (editGenre.value) {
-    defaults.genre = defaultGenre.value.trim()
-    if (!comicGenres.includes(defaults.genre)) { ElMessage.warning('请选择规范中的六类内容类型之一'); return }
-  }
+  const defaults = prefillTargets.value.length ? prefill.value?.validatedChanges() : {}
+  if (!defaults) return
   setBusy(true, '导入选中的漫画')
   try {
     const result = await invoke<ImportResult>('commit_import', {
-      token: preview.value.token, ids: [...selected.value], defaults, overwriteExisting: overwriteExisting.value,
+      token: preview.value.token, ids: [...selected.value], defaults, overwriteExisting: overwriteExisting.value && hasDefaults.value,
     })
     emit('completed', result)
     emit('update:modelValue', false)
@@ -136,9 +187,10 @@ async function cancel() {
 }
 watch(() => props.modelValue, (visible) => {
   if (!visible) return
-  locations.value = []; checkedPaths.value = []
+  locations.value = []; branchChoices.value.clear()
   clearPreview()
-  editAuthors.value = false; editGenre.value = false; defaultAuthors.value = []; defaultGenre.value = ''; overwriteExisting.value = false
+  overwriteExisting.value = false
+  prefill.value?.reset()
 })
 </script>
 
@@ -152,19 +204,37 @@ watch(() => props.modelValue, (visible) => {
           <div class="import-source-copy"><strong>{{ locations.length ? '选择要读取的文件夹' : '从漫画文件夹开始' }}</strong><p>{{ locations.length ? '可以继续追加来源，再勾选想导入的目录。' : '支持本地磁盘与 NAS，一次可选择一个或多个文件夹。' }}</p></div>
           <el-button data-testid="import-pick-folders" class="import-pick-folders" type="primary" :icon="FolderAdd" :disabled="busy" @click="addLocations">选择文件夹</el-button>
         </div>
-        <p v-if="locations.length" class="import-help">勾选父文件夹会读取其中所有作品；只导入部分时，请展开并仅勾选目标子文件夹。“有文字／无文字”子文件夹会识别为同一作品的不同版本。</p>
+        <p v-if="locations.length" class="import-help">勾选父文件夹会选中下面的所有目录，展开后可取消勾选个别分支。“有文字／无文字”子文件夹会识别为同一作品的不同版本。</p>
         <div v-if="locations.length" class="folder-picker" :class="{ 'picker-disabled': busy }">
-          <el-tree ref="tree" data-testid="import-tree" :data="locations" node-key="path" :props="treeProps" lazy :load="loadFolders" show-checkbox check-strictly :expand-on-click-node="false" :check-on-click-node="false" :default-checked-keys="checkedPaths" @check="checkedChanged"><template #default="{ node, data }"><div class="folder-tree-node" :title="data.path"><el-icon><Folder /></el-icon><span>{{ node.level === 1 ? data.path : data.name }}</span><el-button v-if="node.level === 1" link :icon="Close" :disabled="busy" aria-label="移除此来源位置" @click.stop="removeLocation(data.path)" /></div></template></el-tree>
+          <el-tree data-testid="import-tree" :data="locations" node-key="nodeKey" :props="treeProps" lazy :load="loadFolders" :expand-on-click-node="false">
+            <template #default="{ node, data }">
+              <div class="folder-tree-node" :title="data.path">
+                <el-checkbox :model-value="isBranchChecked(data.path)" :indeterminate="partialBranches.has(pathKey(data.path))"
+                  :disabled="busy" :aria-label="'选择文件夹 ' + data.name" @click.stop @change="selectBranch(data.path, $event === true)" />
+                <el-icon><Folder /></el-icon>
+                <span>{{ node.level === 1 ? data.path : data.name }}</span>
+                <el-button v-if="node.level === 1" link :icon="Close" :disabled="busy" aria-label="移除此来源位置" @click.stop="removeLocation(data.path)" />
+              </div>
+            </template>
+          </el-tree>
         </div>
-        <div class="import-source-summary"><span class="import-selected-count">已勾选 {{ sourceCount }} 个文件夹</span></div>
+        <div class="import-source-summary"><span class="import-selected-count">已选 {{ sourceCount }} 个目录范围{{ folderSelection.excludedPaths.length ? `，跳过 ${folderSelection.excludedPaths.length} 个分支` : '' }}</span></div>
       </template>
       <template v-else>
         <div class="import-preview-heading"><div><strong>发现 {{ preview.items.length }} 本漫画</strong><p>检查解析结果，取消勾选暂不需要的作品。新作品默认勾选，已入库或移出的作品需手动勾选。</p></div><el-button link :icon="ArrowLeft" :disabled="busy" @click="clearPreview">重新选择来源</el-button></div>
         <el-table ref="table" data-testid="import-table" :data="preview.items" row-key="id" max-height="260" class="import-preview-table" @selection-change="(rows: ImportCandidate[]) => selected = rows.map(row => row.id)"><el-table-column type="selection" width="42" :selectable="() => !busy" /><el-table-column label="作品名称 / 来源" min-width="230"><template #default="{ row }"><div class="import-title">{{ displayTitle(row.metadata) }}</div><div v-if="versionLabels(row.metadata).length" class="import-version-labels" data-testid="import-version-labels"><span v-for="label in versionLabels(row.metadata)" :key="label" :title="label">{{ label }}</span></div><div class="import-source-path" data-testid="import-collection-mode">{{ collectionMode(row.metadata) === 'series' ? `系列：${row.metadata.series} · 编号 ${row.metadata.number || '待确认'}` : '独立作品 · One-Shot' }}</div><div class="import-source-path" :title="row.source">{{ row.source }}</div><div v-if="row.warning" class="import-warning" :title="row.warning">{{ row.warning }}</div></template></el-table-column><el-table-column label="作者" min-width="120"><template #default="{ row }">{{ row.metadata.authors.join('、') || '待填写' }}</template></el-table-column><el-table-column label="内容 / 发售" width="112"><template #default="{ row }"><div>{{ row.metadata.genre || '待填写' }}</div><small>{{ row.metadata.year ? `${row.metadata.year}${row.metadata.month ? '.' + row.metadata.month.padStart(2, '0') + (row.metadata.day ? '.' + row.metadata.day.padStart(2, '0') : '') : ''}` : '—' }}</small></template></el-table-column><el-table-column label="译者 / 色彩" min-width="130"><template #default="{ row }"><div>{{ row.metadata.translator || '—' }}</div><small>{{ [colorLabels[row.metadata.color || ''] || '色彩待确认', row.metadata.age_rating === 'R18+' && row.metadata.uncensored ? '无修正' : ''].filter(Boolean).join(' · ') }}</small></template></el-table-column><el-table-column label="入库状态" width="84"><template #default="{ row }"><span class="import-status" :class="row.import_status">{{ statusNames[row.import_status as keyof typeof statusNames] }}</span></template></el-table-column></el-table>
         <div v-if="!preview.items.length" class="import-no-items">没有发现可读取的漫画，请返回检查所选文件夹。</div>
-        <div class="import-batch-section"><div class="import-batch-title"><strong>批量填写资料</strong><span>可选，将应用于本次勾选的新作品</span></div><div class="batch-fields"><div class="batch-field"><el-checkbox data-testid="import-enable-authors" v-model="editAuthors" :disabled="busy">统一作者</el-checkbox><el-select data-testid="import-authors" aria-label="导入时统一作者" v-model="defaultAuthors" multiple filterable allow-create default-first-option :reserve-keyword="false" :disabled="busy || !editAuthors" placeholder="输入作者后按 Enter，可添加多位"><el-option v-for="name in authors" :key="name" :label="name" :value="name" /></el-select></div><div class="batch-field"><el-checkbox data-testid="import-enable-genre" v-model="editGenre" :disabled="busy">统一内容类型</el-checkbox><el-select data-testid="import-genre" aria-label="导入时统一内容类型" v-model="defaultGenre" :disabled="busy || !editGenre" placeholder="请选择内容类型"><el-option v-for="genre in comicGenres" :key="genre" :label="genre" :value="genre" /></el-select></div></div><el-checkbox data-testid="import-overwrite-existing" v-model="overwriteExisting" :disabled="busy || (!editAuthors && !editGenre)" class="overwrite-existing">对勾选的已入库 / 已移出作品也应用以上作者和内容类型</el-checkbox><p v-if="existingSelected" class="import-existing-note">已勾选 {{ existingSelected }} 本已有记录。{{ overwriteExisting && (editAuthors || editGenre) ? '作者和内容类型将按上方设置更新，作品需重新审核。' : '保留人工资料；移出的作品会恢复到列表。' }}</p></div>
-        <p class="import-draft-note">自动资料以待审核状态入库。请逐本核对标题、作者、内容类型、年龄分级与真实标签；旧值不明确时保留草稿。可在详情或批量编辑中补充。</p>
       </template>
+      <section v-show="preview?.items.length" class="import-batch-section">
+        <div class="import-batch-title">
+          <strong>批量填写资料</strong>
+          <span>作品名称和译名沿用各自的资料。勾选字段将在导入时应用于 {{ prefillTargets.length }} 本作品。</span>
+        </div>
+        <BulkMetadataFields ref="prefill" mode="import" :authors="authors" :modes="prefillModes" :ratings="prefillRatings" :busy="busy" />
+        <el-checkbox data-testid="import-overwrite-existing" v-model="overwriteExisting" :disabled="busy || (!hasDefaults && !overwriteExisting)" class="overwrite-existing">对勾选的已入库 / 已移出作品也应用预填字段</el-checkbox>
+        <p v-if="existingSelected" class="import-existing-note">已勾选 {{ existingSelected }} 本已有记录。{{ overwriteExisting && hasDefaults ? '勾选字段将按上方设置更新，资料变化后需重新审核。' : '保留人工资料；移出的作品会恢复到列表。' }}</p>
+      </section>
+      <p v-if="preview" class="import-draft-note">新作品以待审核状态入库，请逐本核对资料。</p>
       <div v-if="errors.length" class="import-errors"><strong>{{ errors.length }} 项提示</strong><p v-for="(error, index) in errors" :key="index">{{ error }}</p></div>
     </div>
     <template #footer><div class="import-footer"><span v-if="busy" class="import-progress">{{ message || task }}…</span><span v-else>{{ preview ? `已选择 ${selected.length} 本作品` : '先预览，确认后入库' }}</span><div><el-button v-if="busy" :disabled="cancelling" @click="cancel">{{ cancelling ? '正在取消…' : '取消任务' }}</el-button><template v-else><el-button @click="close">取消</el-button><el-button v-if="!preview" type="primary" :disabled="!sourceCount" @click="prepare">读取并预览</el-button><el-button v-else type="primary" :icon="Check" :disabled="!selected.length" @click="commit">导入选中 {{ selected.length }} 本</el-button></template></div></div></template>
@@ -197,6 +267,7 @@ watch(() => props.modelValue, (visible) => {
 .folder-picker :deep(.el-tree-node__content) { height: 35px; min-width: 0; border-radius: 4px; }
 .folder-picker :deep(.el-tree-node__label) { flex: 1; min-width: 0; }
 .folder-tree-node { min-width: 0; }
+.folder-tree-node > .el-checkbox { flex: none; margin-right: 0; }
 .folder-tree-node > span { flex: 1; min-width: 0; }
 .folder-tree-node > .el-button { margin-left: 3px; }
 .picker-disabled :deep(.el-tree) { pointer-events: none; opacity: .65; }
@@ -208,7 +279,8 @@ watch(() => props.modelValue, (visible) => {
 .import-preview-heading p { overflow-wrap: anywhere; }
 .import-source-path { max-width: 100%; }
 .import-batch-section { margin-top: 14px; padding: 13px 14px 10px; }
-.batch-fields { gap: 12px; }
+.import-batch-section .overwrite-existing { margin-top: 11px; }
+.import-batch-section .overwrite-existing :deep(.el-checkbox__label) { white-space: normal; }
 .import-footer { flex-wrap: wrap; gap: 10px 16px; }
 .import-footer > span { min-width: 0; color: #788d70; font-size: 12px; line-height: 1.6; }
 .import-footer > div { display: flex; gap: 8px; margin-left: auto; }
@@ -223,7 +295,6 @@ watch(() => props.modelValue, (visible) => {
   .import-source-copy { flex-basis: 200px; }
   .is-empty .import-source-copy { flex-basis: auto; }
   .import-preview-heading { flex-wrap: wrap; }
-  .batch-fields { grid-template-columns: minmax(0, 1fr); }
   .import-footer > span { flex-basis: 100%; }
   .import-footer .import-progress { max-width: 100%; }
 }
