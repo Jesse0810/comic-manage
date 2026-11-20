@@ -147,6 +147,56 @@ class ModelTransportTests(TestCase):
         self.assertEqual(body["systemInstruction"]["parts"], [{"text": "rules"}])
         self.assertEqual(body["contents"], [{"role": "user", "parts": [{"text": "task"}]}])
 
+    def test_settings_use_native_fields_without_changing_request_targets(self):
+        cases = (
+            ("openai", "sample", {"reasoning": "high", "temperature": .3, "top_p": .8, "output_tokens": 1200},
+             {"reasoning_effort": "high", "temperature": .3, "top_p": .8, "max_tokens": 1200}),
+            ("openai-responses", "sample", {"reasoning": "max", "speed": "ultrafast", "output_tokens": 9000},
+             {"reasoning": {"effort": "max"}, "service_tier": "ultrafast", "max_output_tokens": 9000, "store": False}),
+            ("ollama", "library/gpt-oss:20b", {"reasoning": "medium", "top_k": 20, "output_tokens": 800},
+             {"think": "medium", "options": {"num_predict": 800, "top_k": 20}}),
+            ("ollama", "qwen3", {"reasoning": "none"}, {"think": False}),
+            ("anthropic", "claude-sonnet-4-6", {"reasoning": "high"},
+             {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}}),
+            ("anthropic", "claude-3-7-sonnet-20250219", {"reasoning": "medium", "output_tokens": 5000},
+             {"thinking": {"type": "enabled", "budget_tokens": 2048}, "max_tokens": 5000}),
+            ("gemini", "gemini-3.1-pro-preview", {"reasoning": "high", "temperature": .5, "top_p": .8, "top_k": 12, "output_tokens": 4500},
+             {"generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH"}, "temperature": .5, "topP": .8, "topK": 12, "maxOutputTokens": 4500}}),
+            ("gemini", "gemini-2.5-flash", {"reasoning": "none"},
+             {"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}, "maxOutputTokens": 4096}}),
+        )
+        for provider, model, options, expected in cases:
+            with self.subTest(provider=provider, model=model):
+                settings = models.validate_profile({**profile(provider, "http://127.0.0.1:9000/v1", model),
+                                                   "options": {**options, "timeout_seconds": 90, "rpm": 0, "concurrency": 2}})
+                request = models._make_request(settings, "", "rules", "task")
+                body = json.loads(request.data)
+                self.assertEqual({key: body[key] for key in expected}, expected)
+                self.assertTrue(request.full_url.startswith("http://127.0.0.1:9000/v1/"))
+                self.assertTrue({"timeout_seconds", "rpm", "concurrency"}.isdisjoint(body))
+                self.assertNotIn("tools", body)
+
+    def test_invalid_model_options_are_rejected_before_opening_requests(self):
+        cases = (
+            ("openai", "sample", {"reasoning": []}),
+            ("openai", "sample", {"temperature": float("nan")}),
+            ("openai", "sample", {"stream": True}),
+            ("openai", "sample", {"input_tokens": True}),
+            ("openai", "sample", {"output_tokens": 0}),
+            ("ollama", "qwen3", {"speed": "fast"}),
+            ("ollama", "gpt-oss:20b", {"reasoning": "none"}),
+            ("gemini", "gemini-2.5-pro", {"reasoning": "none"}),
+            ("anthropic", "claude-sonnet-4-6", {"reasoning": "low", "temperature": .4}),
+            ("anthropic", "claude-3-7-sonnet-20250219", {"reasoning": "medium", "output_tokens": 1200}),
+        )
+        with patch.object(models, "_read_response") as reader:
+            for provider, model, options in cases:
+                with self.subTest(provider=provider, options=options), self.assertRaises(models.ModelTransportError) as raised:
+                    models.complete({**profile(provider, "http://127.0.0.1:9000/v1", model), "options": options},
+                                    "", "rules", "task")
+                self.assertEqual(raised.exception.code, "MODEL_CONFIG")
+        reader.assert_not_called()
+
     def test_refuses_to_follow_redirects_with_credentials(self):
         with model_server({}, status=307, headers={"Location": "/other"}) as (base_url, calls):
             with self.assertRaises(models.ModelTransportError) as raised:

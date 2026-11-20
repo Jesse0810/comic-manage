@@ -2,12 +2,13 @@
 
 const fs = require('node:fs/promises')
 const path = require('node:path')
+const { modelOptions } = require('./model-options.cjs')
 const { randomUUID } = require('node:crypto')
 
 const PROVIDERS = new Set(['openai', 'openai-responses', 'ollama', 'anthropic', 'gemini', 'chatgpt-plan'])
 const PROFILE_ID = /^[a-f0-9-]{36}$/
 const MAX_PROFILES = 32
-const PUBLIC_FIELDS = ['id', 'name', 'provider', 'base_url', 'model']
+const PUBLIC_FIELDS = ['id', 'name', 'provider', 'base_url', 'model', 'options']
 
 function record(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -54,6 +55,7 @@ function profileInput(value) {
     provider: value.provider,
     base_url: baseUrl,
     model: clean(value.model, 256, '模型 ID'),
+    ...(value.options === undefined ? {} : { options: modelOptions(value.options) }),
   }
 }
 
@@ -145,8 +147,8 @@ class ModelConfigStore {
     return { profile: this.requestProfile(stored), api_key: await this.decrypt(stored.encrypted_key), name: stored.name }
   }
 
-  requestProfile({ provider, base_url, model }) {
-    return { provider, base_url, model }
+  requestProfile({ provider, base_url, model, options }) {
+    return { provider, base_url, model, ...(options && Object.keys(options).length ? { options } : {}) }
   }
 
   change(update) {
@@ -192,6 +194,16 @@ class ModelConfigStore {
       if (index < 0) throw new Error('该模型配置已被删除。')
       current.profiles.splice(index, 1)
       if (current.default_id === id) current.default_id = current.profiles[0]?.id || ''
+    })
+  }
+
+  duplicate(id) {
+    return this.change(current => {
+      const source = current.profiles.find(profile => profile.id === checkId(id))
+      if (!source) throw new Error('该模型配置已被删除。')
+      if (current.profiles.length >= MAX_PROFILES) throw new Error('最多保存 32 个模型配置。')
+      const name = source.name.slice(0, 112).replace(/[\uD800-\uDBFF]$/, '') + '（副本）'
+      current.profiles.push({ ...source, id: randomUUID(), name })
     })
   }
 

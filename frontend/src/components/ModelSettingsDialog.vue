@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Check, Connection, Delete, Plus, Star } from '@element-plus/icons-vue'
+import { Check, Connection, CopyDocument, Delete, Plus, Refresh, Star } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import { invoke } from '../api'
 import { errorMessage } from '../types'
-import type { ModelConfiguration, ModelProfile, ModelProtocol } from '../types'
+import type { ModelConfiguration, ModelOptions, ModelProfile, ModelProtocol, ModelReasoning, ModelSpeed } from '../types'
+import { profileOptions, reasoningOptions, samplingOptionFields, speedOptions, taskOptionFields } from '../model-options'
+import type { NumericModelOption } from '../model-options'
 
 interface ProfileDraft {
   id?: string
@@ -12,6 +14,7 @@ interface ProfileDraft {
   provider: ModelProtocol
   base_url: string
   model: string
+  options: ModelOptions
 }
 
 type ChatGPTStatus = { connected: boolean; sharing: boolean; name: string; email: string; revocationConfirmed?: boolean }
@@ -43,11 +46,12 @@ const presets: { label: string; provider: ModelProtocol; endpoint?: string }[] =
   { label: 'Anthropic', provider: 'anthropic' },
   { label: 'Gemini', provider: 'gemini' },
 ]
-const emptyForm = (): ProfileDraft => ({ name: '', provider: 'openai', base_url: '', model: '' })
+const emptyForm = (): ProfileDraft => ({ name: '', provider: 'openai', base_url: '', model: '', options: {} })
 const form = ref<ProfileDraft>(emptyForm())
 const apiKey = ref('')
 const clearKey = ref(false)
-const busy = ref<'load' | 'test' | 'save' | 'delete' | 'default' | ''>('')
+const busy = ref<'load' | 'test' | 'save' | 'delete' | 'default' | 'duplicate' | 'discover' | ''>('')
+const discoveredModels = ref<ChatGPTModel[]>([])
 const error = ref('')
 const status = ref('')
 let request = 0
@@ -76,6 +80,12 @@ const validDraft = computed(() => !!form.value.name.trim() && !!form.value.model
   ? account.value.sharing && !accountAction.value && availableModels.value?.some(model => model.slug === form.value.model)
   : !!parseEndpoint() && (!keyRequired.value || hasKey.value)))
 const isDefault = computed(() => !!original.value && original.value.id === props.configuration.default_id)
+const reasoningChoices = computed(() => reasoningOptions(form.value))
+const speedChoices = computed(() => speedOptions(form.value))
+const effectiveOptions = computed(() => profileOptions(form.value, form.value.options))
+const taskFields = computed(() => taskOptionFields(form.value))
+const samplingFields = computed(() => samplingOptionFields(form.value, effectiveOptions.value.reasoning))
+const canDiscover = computed(() => !usingChatGPT.value && !!parseEndpoint() && (!keyRequired.value || hasKey.value))
 
 function parseEndpoint() {
   try {
@@ -87,29 +97,43 @@ function parseEndpoint() {
 }
 function resetFeedback() { error.value = ''; status.value = '' }
 function selectProfile(profile?: ModelProfile) {
-  form.value = profile ? { id: profile.id, name: profile.name, provider: profile.provider, base_url: profile.base_url, model: profile.model } : emptyForm()
+  form.value = profile ? { id: profile.id, name: profile.name, provider: profile.provider, base_url: profile.base_url, model: profile.model, options: { ...profile.options } } : emptyForm()
   apiKey.value = ''
   clearKey.value = false
+  discoveredModels.value = []
   resetFeedback()
 }
 function chooseProvider(provider: ModelProtocol) {
   if (provider === form.value.provider) return
   if (provider === 'chatgpt-plan' || usingChatGPT.value) form.value.model = ''
+  form.value.options = {}
   form.value.provider = provider
   form.value.base_url = protocols[provider].endpoint
 }
 function usePreset(preset: typeof presets[number]) {
   const model = preset.provider === form.value.provider ? form.value.model : ''
-  form.value = { ...form.value, name: preset.label, provider: preset.provider, model, base_url: preset.endpoint || protocols[preset.provider].endpoint }
+  const options = preset.provider === form.value.provider ? form.value.options : {}
+  form.value = { ...form.value, name: preset.label, provider: preset.provider, model, options, base_url: preset.endpoint || protocols[preset.provider].endpoint }
 }
-function profileInput() {
+function setReasoning(value: ModelReasoning) {
+  form.value.options.reasoning = value
+}
+function setSpeed(value: ModelSpeed) {
+  form.value.options.speed = value
+}
+function setNumber(field: NumericModelOption, value: number | null | undefined) {
+  if (typeof value === 'number' && Number.isFinite(value)) form.value.options[field] = value
+  else delete form.value.options[field]
+}
+function profileInput(forCatalog = false) {
   return {
     profile: {
       ...(form.value.id ? { id: form.value.id } : {}),
-      name: form.value.name.trim(),
+      name: form.value.name.trim() || (forCatalog ? '模型列表' : ''),
       provider: form.value.provider,
       base_url: usingChatGPT.value ? chatgptEndpoint : normalizeEndpoint(form.value.base_url),
-      model: form.value.model.trim(),
+      model: form.value.model.trim() || (forCatalog ? 'catalog' : ''),
+      options: effectiveOptions.value,
     },
     ...(!usingChatGPT.value && apiKey.value.trim() ? { api_key: apiKey.value.trim() } :
       clearKey.value || (original.value?.has_key && connectionChanged.value) ? { clear_key: true } : {}),
@@ -155,7 +179,28 @@ async function testConnection() {
     if (currentRequest === request) busy.value = ''
   }
 }
-async function updateProfile(action: 'save' | 'delete' | 'default') {
+async function discoverModels() {
+  if (busy.value || !canDiscover.value) return
+  const currentRequest = ++request
+  const secret = apiKey.value.trim()
+  resetFeedback()
+  busy.value = 'discover'
+  try {
+    const result = await invoke<{ models: ChatGPTModel[] }>('model_profile_models', profileInput(true))
+    if (currentRequest !== request || !props.modelValue) return
+    discoveredModels.value = result.models
+    if (result.models.length === 1 && !form.value.model.trim()) form.value.model = result.models[0].slug
+    status.value = result.models.length ? '已获取 ' + result.models.length + ' 个模型。' : '接口未返回可选模型，可手动填入模型 ID。'
+  } catch (reason) {
+    if (currentRequest === request) {
+      const message = chatGPTRequestError(reason)
+      error.value = secret ? message.replaceAll(secret, '[已隐藏]') : message
+    }
+  } finally {
+    if (currentRequest === request) busy.value = ''
+  }
+}
+async function updateProfile(action: 'save' | 'delete' | 'default' | 'duplicate') {
   if (busy.value || (action === 'save' ? !validDraft.value : !original.value)) return
   const profileId = form.value.id
   const oldIds = new Set(props.configuration.profiles.map(profile => profile.id))
@@ -166,13 +211,16 @@ async function updateProfile(action: 'save' | 'delete' | 'default') {
   try {
     const result = action === 'save'
       ? await invoke<ModelConfiguration>('model_profile_save', profileInput())
-      : await invoke<ModelConfiguration>(action === 'delete' ? 'model_profile_delete' : 'model_profile_default', { id: profileId })
+      : await invoke<ModelConfiguration>({
+        delete: 'model_profile_delete', default: 'model_profile_default', duplicate: 'model_profile_duplicate',
+      }[action], { id: profileId })
     if (currentRequest !== request || !props.modelValue) return
     emit('updated', result)
     const saved = result.profiles.find(profile => profile.id === profileId) || result.profiles.find(profile => !oldIds.has(profile.id))
     if (action === 'save') selectProfile(saved)
+    if (action === 'duplicate') selectProfile(result.profiles.find(profile => !oldIds.has(profile.id)))
     if (action === 'delete') selectProfile(activeProfile(result))
-    status.value = { save: '模型配置已保存。', delete: '模型配置已删除。', default: '已设为默认模型。' }[action]
+    status.value = { save: '模型配置已保存。', delete: '模型配置已删除。', default: '已设为默认模型。', duplicate: '已复制模型配置。' }[action]
   } catch (reason) {
     if (currentRequest === request) error.value = secret ? errorMessage(reason).replaceAll(secret, '[已隐藏]') : errorMessage(reason)
   } finally {
@@ -270,6 +318,7 @@ function visibility(value: boolean) {
   if (value || canClose.value) emit('update:modelValue', value)
 }
 watch([() => form.value.provider, () => form.value.base_url], () => { apiKey.value = ''; clearKey.value = false }, { flush: 'sync' })
+watch([() => form.value.provider, () => form.value.base_url, apiKey, clearKey], () => { discoveredModels.value = [] })
 watch([form, apiKey, clearKey], resetFeedback, { deep: true, flush: 'sync' })
 watch(() => props.modelValue, visible => {
   if (visible) void load()
@@ -308,8 +357,12 @@ watch(() => props.modelValue, visible => {
       <section class="model-editor" :aria-busy="!!busy">
         <div class="model-editor-heading">
           <h3>{{ original ? '编辑模型' : '新增模型' }}</h3>
-          <el-button v-if="original" data-testid="model-profile-default" :icon="Star" size="small" :disabled="!!busy || isDefault"
-            :loading="busy === 'default'" @click="updateProfile('default')">{{ isDefault ? '默认模型' : '设为默认' }}</el-button>
+          <div v-if="original" class="model-heading-actions">
+            <el-button data-testid="model-profile-duplicate" :icon="CopyDocument" size="small" :loading="busy === 'duplicate'" :disabled="!!busy"
+              title="复制已保存的配置" @click="updateProfile('duplicate')">生成副本</el-button>
+            <el-button data-testid="model-profile-default" :icon="Star" size="small" :disabled="!!busy || isDefault"
+              :loading="busy === 'default'" @click="updateProfile('default')">{{ isDefault ? '默认模型' : '设为默认' }}</el-button>
+          </div>
         </div>
         <div v-if="!original" class="model-presets" aria-label="快速填入服务地址">
           <el-button v-for="preset in presets" :key="preset.label" size="small" plain :disabled="!!busy" @click="usePreset(preset)">{{ preset.label }}</el-button>
@@ -366,7 +419,16 @@ watch(() => props.modelValue, visible => {
             <p class="model-help">本机或局域网服务可用 HTTP，公网服务使用 HTTPS。API Key 请单独填写。</p>
           </el-form-item>
           <el-form-item label="模型 ID" class="model-wide" required>
-            <el-input data-testid="model-profile-model" v-model="form.model" autocomplete="off" maxlength="240" placeholder="填写服务端提供的模型名称或 ID" />
+            <div class="model-id-actions">
+              <el-input data-testid="model-profile-model" v-model="form.model" autocomplete="off" maxlength="240" placeholder="填写服务端提供的模型名称或 ID" />
+              <el-button data-testid="model-profile-discover" :icon="Refresh" :disabled="!!busy || !canDiscover" :loading="busy === 'discover'"
+                @click="discoverModels">获取列表</el-button>
+            </div>
+            <el-select v-if="discoveredModels.length" class="model-catalog-choice" data-testid="model-profile-catalog"
+              :model-value="discoveredModels.some(model => model.slug === form.model) ? form.model : undefined" filterable
+              placeholder="从服务端列表选择" aria-label="服务端模型列表" @update:model-value="form.model = $event">
+              <el-option v-for="model in discoveredModels" :key="model.slug" :value="model.slug" :label="model.name === model.slug ? model.slug : model.name + ' · ' + model.slug" />
+            </el-select>
           </el-form-item>
           <el-form-item label="API Key" class="model-wide" :required="keyRequired">
             <el-input data-testid="model-profile-key" v-model="apiKey" type="password" autocomplete="new-password" maxlength="2048" :disabled="clearKey"
@@ -376,6 +438,52 @@ watch(() => props.modelValue, visible => {
             <p v-else class="model-help">API Key 加密保存在这台电脑。</p>
           </el-form-item>
           </template>
+
+          <section class="model-wide model-parameters" data-testid="model-profile-options" aria-label="模型参数">
+            <div class="model-parameter-heading">
+              <strong>请求参数</strong>
+              <el-button data-testid="model-profile-reset-options" link :disabled="!!busy || !Object.keys(form.options).length"
+                @click="form.options = {}">恢复默认参数</el-button>
+            </div>
+            <div class="model-parameter-grid">
+              <el-form-item label="思考等级">
+                <el-select data-testid="model-profile-reasoning" :model-value="effectiveOptions.reasoning ?? 'default'" :disabled="reasoningChoices.length < 2"
+                  aria-label="思考等级" @update:model-value="setReasoning">
+                  <el-option v-for="level in reasoningChoices" :key="level.value" :label="level.label" :value="level.value" />
+                </el-select>
+                <p class="model-help">{{ reasoningChoices.length > 1 ? '较高的档位通常需要更多时间和用量，取决于所选模型。' : '当前模型采用服务默认的思考设置。' }}</p>
+              </el-form-item>
+              <el-form-item label="速度等级">
+                <el-select data-testid="model-profile-speed" :model-value="effectiveOptions.speed ?? 'default'" :disabled="speedChoices.length < 2"
+                  aria-label="速度等级" @update:model-value="setSpeed">
+                  <el-option v-for="level in speedChoices" :key="level.value" :label="level.label" :value="level.value" />
+                </el-select>
+                <p class="model-help">{{ speedChoices.length > 1 ? '能否加速由服务商、模型和账号决定，可能更快消耗额度或增加费用。' : '当前接口采用服务默认的速度。' }}</p>
+              </el-form-item>
+            </div>
+            <details class="model-parameter-group" data-testid="model-profile-task-options">
+              <summary>任务限制</summary>
+              <div class="model-parameter-grid">
+                <el-form-item v-for="field in taskFields" :key="field.key" :label="field.label">
+                  <el-input-number :data-testid="'model-profile-' + field.key.replaceAll('_', '-')" :model-value="effectiveOptions[field.key]"
+                    :min="field.min" :max="field.max" :step="field.step" :precision="0" controls-position="right"
+                    placeholder="默认" :aria-label="field.label" @update:model-value="setNumber(field.key, $event)" />
+                  <p class="model-help">{{ field.hint }}</p>
+                </el-form-item>
+              </div>
+            </details>
+            <details v-if="samplingFields.length" class="model-parameter-group" data-testid="model-profile-sampling-options">
+              <summary>高级采样</summary>
+              <div class="model-parameter-grid">
+                <el-form-item v-for="field in samplingFields" :key="field.key" :label="field.label">
+                  <el-input-number :data-testid="'model-profile-' + field.key.replaceAll('_', '-')" :model-value="effectiveOptions[field.key]"
+                    :min="field.min" :max="field.max" :step="field.step" :precision="field.step === 1 ? 0 : 3" controls-position="right"
+                    placeholder="服务默认" :aria-label="field.label" @update:model-value="setNumber(field.key, $event)" />
+                  <p class="model-help">{{ field.hint }}</p>
+                </el-form-item>
+              </div>
+            </details>
+          </section>
         </el-form>
         <el-alert v-if="usingChatGPT && accountError" :title="accountError" type="error" :closable="false" show-icon class="model-feedback" data-testid="model-chatgpt-error" />
         <el-alert v-if="error" data-testid="model-profile-result" :title="error" type="error" :closable="false" show-icon class="model-feedback" />
@@ -419,6 +527,18 @@ watch(() => props.modelValue, visible => {
 .model-empty { margin: 9px 2px; color: #73856b; font-size: 12px; }
 .model-editor { min-width: 0; }
 .model-editor-heading { min-height: 27px; margin: 2px 0 13px; }
+.model-heading-actions, .model-id-actions, .model-parameter-heading { display: flex; align-items: center; gap: 8px; }
+.model-heading-actions .el-button { margin: 0; }
+.model-id-actions { width: 100%; }
+.model-id-actions .el-input { min-width: 0; }
+.model-catalog-choice { margin-top: 7px; }
+.model-parameters { min-width: 0; margin-bottom: 14px; padding: 11px 13px 3px; border: 1px solid #e4ebe0; border-radius: 8px; background: #f7f9f5; }
+.model-parameter-heading { justify-content: space-between; min-height: 25px; margin-bottom: 9px; color: #3c5741; font-size: 13px; }
+.model-parameter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+.model-parameter-grid .el-input-number { width: 100%; }
+.model-parameter-group { padding: 9px 0; border-top: 1px solid #e4ebe0; }
+.model-parameter-group summary { color: #456450; font-size: 13px; font-weight: 600; cursor: pointer; }
+.model-parameter-group[open] .model-parameter-grid { margin-top: 8px; }
 .model-presets { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
 .model-presets .el-button { margin: 0; }
 .model-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 14px; }
@@ -448,6 +568,6 @@ watch(() => props.modelValue, visible => {
   .model-profile-list { max-height: 20dvh; }
 }
 @media (max-width: 460px) {
-  .model-form { grid-template-columns: minmax(0, 1fr); }
+  .model-form, .model-parameter-grid { grid-template-columns: minmax(0, 1fr); }
 }
 </style>

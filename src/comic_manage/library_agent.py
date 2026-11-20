@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 import re
@@ -13,6 +14,7 @@ from typing import Callable
 from . import model_transport
 from .metadata import COLORS, GENRES, Metadata, RELEASE_PLATFORMS, RELEASE_TYPES, TEXT_VERSIONS, title_key, unique
 from .model_assist import _allowed_text, _grounded_fields, _object_answer, _safe_text
+from .model_scheduler import estimated_input_tokens
 from .repository import Repository
 from .scrape import SITE_PROPOSAL_FIELDS, _fields, scrape_preview, work_link
 from .scrape_http import ScrapeError
@@ -286,8 +288,9 @@ _STOP_MODEL_CODES = {"MODEL_AUTH", "MODEL_CONFIG", "MODEL_RATE_LIMIT", "MODEL_NO
 
 
 def _model_problem(error: model_transport.ModelTransportError) -> str:
+    if error.code in {"MODEL_CONFIG", "MODEL_INPUT_LIMIT"}:
+        return str(error)
     messages = {
-        "MODEL_CONFIG": "模型配置无效，请检查接口与模型名称。",
         "MODEL_AUTH": "模型认证失败，请检查模型授权。",
         "MODEL_RATE_LIMIT": "所选模型当前受到用量或速率限制。",
         "MODEL_NETWORK": "本批模型请求连接失败或超时。",
@@ -297,6 +300,31 @@ def _model_problem(error: model_transport.ModelTransportError) -> str:
         "MODEL_CHATGPT_USAGE_LIMIT": "已达到 ChatGPT 套餐或此应用的用量上限。",
     }
     return messages.get(error.code, "所选模型无法完成本批资料整理。")
+
+
+def _encode_request(context: dict, works: list[_Work]) -> str:
+    payload = {**context, "books": [{"ref": ref, "draft": work.draft, "site": work.site}
+                                    for ref, work in enumerate(works, 1)]}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _split_model_batches(works: list[_Work], context: dict, limit: int | None) -> list:
+    batches = []
+    group: list[_Work] = []
+    for work in works:
+        single = _encode_request(context, [work])
+        if limit and estimated_input_tokens(_SYSTEM, single) > limit:
+            work.warnings.append("该作品的估算输入 Token 超出模型限制，请缩短任务或提高上限。")
+            continue
+        trial = [*group, work]
+        if len(trial) > _BATCH_SIZE or (group and limit and estimated_input_tokens(_SYSTEM, _encode_request(context, trial)) > limit):
+            batches.append((group, _encode_request(context, group)))
+            group = [work]
+        else:
+            group = trial
+    if group:
+        batches.append((group, _encode_request(context, group)))
+    return batches
 
 
 class LibraryAgent:
@@ -312,18 +340,35 @@ class LibraryAgent:
         identities = _ids(params.get("ids"))
         profile, api_key = params.get("profile"), params.get("api_key", "")
         use_sources, scope = params.get("use_sources", False), _scope(params.get("komga_scope", ""))
-        if not isinstance(profile, dict) or not isinstance(api_key, str) or len(api_key) > 16384:
+        if (not isinstance(profile, dict) or not isinstance(profile.get("provider"), str)
+                or not isinstance(profile.get("model"), str) or not isinstance(api_key, str) or len(api_key) > 16384):
             raise AgentError("请选择有效的已保存模型。")
         if type(use_sources) is not bool:
             raise AgentError("来源读取选项无效。")
         task = _clean_task(params.get("prompt"), api_key)
         literals = _explicit_assignments(task, api_key)
+        try:
+            options = model_transport.validate_options(profile.get("options", {}), profile.get("provider"), profile.get("model", ""))
+        except model_transport.ModelTransportError as error:
+            raise AgentError(str(error), error.code) from None
+        workers = options.get("concurrency", 0) or 1
+        input_limit = options.get("input_tokens")
+        context = {"task": task, "explicit_values": literals,
+                   "allowed": {"genre": GENRES, "release_type": RELEASE_TYPES[1:], "release_platforms": RELEASE_PLATFORMS}}
+
+        def request_model(prompt: str):
+            try:
+                return model_transport.complete(profile, api_key, _SYSTEM, prompt, cancelled=cancel)
+            except model_transport.ModelTransportError as error:
+                return error
+
         rows, planned = {}, {}
         paused = None
+        window = _BATCH_SIZE * workers
         try:
-            for offset in range(0, len(identities), _BATCH_SIZE):
+            for offset in range(0, len(identities), window):
                 check_cancel(cancel)
-                next_ids = identities[offset:offset + _BATCH_SIZE]
+                next_ids = identities[offset:offset + window]
                 self.progress(f"Agent 正在整理第 {offset + 1}–{offset + len(next_ids)} 本，共 {len(identities)} 本…")
                 works = []
                 for identity in next_ids:
@@ -359,40 +404,47 @@ class LibraryAgent:
                     works.append(_Work(identity, title, self.repo.agent_revision(state), before, draft, site, row["warnings"]))
                 if not works:
                     continue
-                payload = {
-                    "task": task, "explicit_values": literals,
-                    "allowed": {"genre": GENRES, "release_type": RELEASE_TYPES[1:], "release_platforms": RELEASE_PLATFORMS},
-                    "books": [{"ref": ref, "draft": work.draft, "site": work.site}
-                              for ref, work in enumerate(works, 1)],
-                }
-                try:
-                    answer = model_transport.complete(profile, api_key, _SYSTEM,
-                        json.dumps(payload, ensure_ascii=False, separators=(",", ":")), cancelled=cancel)
-                except model_transport.ModelTransportError as error:
-                    warning = _model_problem(error)
-                    for work in works:
-                        work.warnings.append(warning)
-                    if error.code in _STOP_MODEL_CODES:
-                        paused = warning
-                    continue
-                check_cancel(cancel)
-                answers = _answer_rows(answer, len(works))
-                for ref, work in enumerate(works, 1):
-                    raw = answers.get(ref)
-                    if raw is None:
-                        work.warnings.append("模型没有为这本作品返回可复核的字段。")
+                requests = _split_model_batches(works, context, input_limit)
+                for first in range(0, len(requests), workers):
+                    check_cancel(cancel)
+                    wave = requests[first:first + workers]
+                    if paused:
+                        for group, _ in wave:
+                            for work in group:
+                                work.warnings.append(paused)
                         continue
-                    values = _proposals(raw, work, literals, api_key)
-                    if not values:
-                        work.warnings.append("没有可核对的资料变化。")
-                        continue
-                    rows[work.identity]["fields"] = [
-                        {"field": field,
-                         "before": {key: work.before[key] for key in _DATES} if field == "release_date" else work.before[field],
-                         "after": value}
-                        for field, value in values.items()
-                    ]
-                    planned[work.identity] = (work.title, work.revision, values)
+                    prompts = [prompt for _, prompt in wave]
+                    if len(wave) == 1:
+                        results = [request_model(prompts[0])]
+                    else:
+                        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                            results = list(pool.map(request_model, prompts))
+                    check_cancel(cancel)
+                    for (group, _), result in zip(wave, results, strict=True):
+                        if isinstance(result, model_transport.ModelTransportError):
+                            warning = _model_problem(result)
+                            for work in group:
+                                work.warnings.append(warning)
+                            if result.code in _STOP_MODEL_CODES:
+                                paused = warning
+                            continue
+                        answers = _answer_rows(result, len(group))
+                        for ref, work in enumerate(group, 1):
+                            raw = answers.get(ref)
+                            if raw is None:
+                                work.warnings.append("模型没有为这本作品返回可复核的字段。")
+                                continue
+                            values = _proposals(raw, work, literals, api_key)
+                            if not values:
+                                work.warnings.append("没有可核对的资料变化。")
+                                continue
+                            rows[work.identity]["fields"] = [
+                                {"field": field,
+                                 "before": {key: work.before[key] for key in _DATES} if field == "release_date" else work.before[field],
+                                 "after": value}
+                                for field, value in values.items()
+                            ]
+                            planned[work.identity] = (work.title, work.revision, values)
             check_cancel(cancel)
         except Cancelled:
             return {"token": None, "books": [rows[identity] for identity in identities if identity in rows],

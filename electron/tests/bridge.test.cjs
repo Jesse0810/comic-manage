@@ -184,6 +184,7 @@ async function mainProcessFixture(options = {}) {
       ? { ModelConfigStore: class { connection(id) { return options.modelConnection(id) } } }
       : require('../model-config.cjs')
     if (name === './site-config.cjs') return require('../site-config.cjs')
+    if (name === './model-options.cjs') return require('../model-options.cjs')
     if (name === './komga-config.cjs') return {KomgaConfigStore:FakeConfigStore, normalizeKomgaUrl}
     if (name === 'node:fs/promises') return {
       ...require(name), stat: async location => { statPaths.push(location); return {isDirectory:() => true} },
@@ -207,6 +208,21 @@ async function mainProcessFixture(options = {}) {
     invoke: (channel, ...args) => handlers.get(channel)(event, ...args),
   }
 }
+
+test('Agent quick options override only requested fields without changing the saved settings', async () => {
+  const profile = {provider:'openai-responses',base_url:'https://example.test/v1',model:'fixture',
+    options:{reasoning:'low',speed:'standard',input_tokens:2048}}
+  const main = await mainProcessFixture({
+    modelConnection: async () => ({profile,api_key:'non-sensitive-fixture',name:'Example'}),
+    respond: () => ({token:null,books:[],cancelled:false}),
+  })
+  const request = {ids:['work'], profile_id:'model', prompt:'整理资料', use_sources:false}
+  await assert.rejects(main.invoke('comic:call','agent_prepare',{...request,options:{temperature:2}}),/无效/)
+  await main.invoke('comic:call','agent_prepare',{...request,options:{reasoning:'default',speed:'ultrafast'}})
+  assert.deepEqual(JSON.parse(JSON.stringify(main.calls[0].params.profile.options)),
+    {reasoning:'default',speed:'ultrafast',input_tokens:2048})
+  assert.deepEqual(profile.options,{reasoning:'low',speed:'standard',input_tokens:2048})
+})
 
 test('Agent prepare binds saved model and current Komga scope, while apply accepts only selected fields', async () => {
   const profile = { provider: 'ollama', base_url: 'http://127.0.0.1:11434', model: 'fixture' }

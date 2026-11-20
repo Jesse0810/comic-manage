@@ -80,3 +80,22 @@ test('concurrent updates serialize and invalid configurations do not replace goo
   await assert.rejects(store.save({ profile: local }), /本机模型配置无法读取/)
   assert.equal(await fs.readFile(path.join(dir, 'model-connections.json'), 'utf8'), '{')
 })
+
+test('model defaults survive reopening and duplication while retaining only encrypted keys', async t => {
+  const {dir, storage, store} = await fixture(t)
+  const options = {reasoning:'high', input_tokens:2048, rpm:30, temperature:0}
+  const {default_id:id} = await store.save({profile:{...cloud,options},api_key:'synthetic-duplicate-key'})
+  const restored = new ModelConfigStore(dir,storage)
+  assert.deepEqual((await restored.connection(id)).profile.options, options)
+  const duplicated = await restored.duplicate(id)
+  assert.equal(duplicated.default_id,id)
+  assert.equal(duplicated.profiles.length,2)
+  assert.deepEqual(duplicated.profiles[1].options, options)
+  assert(!JSON.stringify(duplicated).includes('synthetic-duplicate-key'))
+  const copy = duplicated.profiles[1].id
+  assert.equal((await restored.connection(copy)).api_key,'synthetic-duplicate-key')
+  await assert.rejects(restored.save({profile:{...cloud,id,options:{rpm:-1}}}), /超出范围/)
+  await restored.save({profile:{...cloud,id,options:{}}})
+  assert.equal((await restored.connection(id)).profile.options, undefined)
+  assert.deepEqual((await restored.connection(copy)).profile.options, options)
+})

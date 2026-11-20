@@ -129,7 +129,138 @@ def validate_profile(profile: dict) -> dict:
         model = model.removeprefix("models/")
         if not re.fullmatch(r"[A-Za-z0-9._-]+", model) or model in (".", ".."):
             raise ModelTransportError("Gemini 模型 ID 无效。请输入模型名称。", "MODEL_CONFIG")
-    return {"provider": provider, "base_url": _normalize_url(profile.get("base_url"), provider, model), "model": model}
+    settings = {"provider": provider, "base_url": _normalize_url(profile.get("base_url"), provider, model), "model": model}
+    if "options" in profile:
+        settings["options"] = validate_options(profile["options"], provider, model)
+    return settings
+
+
+REASONING_LEVELS = frozenset({"default", "none", "minimal", "low", "medium", "high", "xhigh", "max"})
+RESPONSE_SPEED_TIERS = {"standard": "default", "fast": "priority", "ultrafast": "ultrafast"}
+_OPTION_BOUNDS = {
+    "temperature": (0, 2), "top_p": (0, 1), "top_k": (1, 1024),
+    "output_tokens": (1, 16384), "input_tokens": (1, 1_000_000),
+    "concurrency": (0, 8), "rpm": (0, 6000), "timeout_seconds": (10, 600),
+}
+_SAMPLING = {"temperature", "top_p", "top_k"}
+_THINKING_BUDGETS = {"low": 1024, "medium": 2048, "high": 3072}
+_GEMINI_LEVELS = (
+    ("gemini-4-neon", ("low", "medium", "high", "xhigh")),
+    ("gemini-4-hydrogen", ("low", "medium", "high", "xhigh")),
+    ("gemini-4-carbon", ("low", "medium", "high")),
+    ("gemini-4-argon", ("low", "medium", "high")),
+    ("gemini-3.8-flash", ("low", "medium", "high")),
+    ("gemini-3.6-flash", ("minimal", "low", "medium", "high")),
+    ("gemini-3.5-flash-lite", ("minimal", "low", "medium", "high")),
+    ("gemini-3.1-flash-lite-image", ("minimal", "high")),
+    ("gemini-3.1-flash-lite", ("minimal", "low", "medium", "high")),
+    ("gemini-3.1-pro", ("low", "medium", "high")),
+    ("gemini-3-flash", ("minimal", "low", "medium", "high")),
+    ("gemini-3-pro", ("low", "high")),
+    ("gemini-robotics-er-2", ("minimal", "low", "medium", "high")),
+)
+
+
+def _option_error(message: str) -> ModelTransportError:
+    return ModelTransportError(message, "MODEL_CONFIG")
+
+
+def validate_options(options: dict, provider: str, model: str = "") -> dict:
+    """Validate optional profile settings without replacing explicit provider defaults."""
+    if not isinstance(options, dict) or set(options) - {*_OPTION_BOUNDS, "reasoning", "speed"}:
+        raise _option_error("模型参数包含无法识别的字段。")
+    reasoning, speed = options.get("reasoning", "default"), options.get("speed", "default")
+    if not isinstance(reasoning, str) or reasoning not in REASONING_LEVELS:
+        raise _option_error("请选择有效的思考等级。")
+    if not isinstance(speed, str) or speed not in {"default", *RESPONSE_SPEED_TIERS}:
+        raise _option_error("请选择有效的速度等级。")
+    if speed != "default" and provider not in {"chatgpt-plan", "openai-responses"}:
+        raise _option_error("此接口不支持速度等级。请使用默认档位。")
+    if provider == "chatgpt-plan" and options.keys() & (_SAMPLING | {"output_tokens"}):
+        raise _option_error("ChatGPT 账号授权接口不支持自定义采样参数或输出 Token 上限。")
+    if "top_k" in options and provider not in {"ollama", "anthropic", "gemini"}:
+        raise _option_error("此接口不支持 Top K。")
+    for name, (minimum, maximum) in _OPTION_BOUNDS.items():
+        if name not in options:
+            continue
+        value = options[name]
+        if name == "temperature" and provider == "anthropic":
+            maximum = 1
+        expected = (int, float) if name in {"temperature", "top_p"} else (int,)
+        if type(value) not in expected or not minimum <= value <= maximum:
+            raise _option_error(f"{name} 必须在 {minimum} 至 {maximum} 之间。")
+    if model and reasoning != "default":
+        if provider == "ollama":
+            _ollama_thinking(model, reasoning)
+        elif provider == "gemini":
+            _gemini_thinking(model, reasoning)
+        elif provider == "anthropic":
+            thinking, _ = _anthropic_thinking(model, reasoning, options.get("output_tokens", MAX_OUTPUT_TOKENS))
+            if thinking["type"] not in {"disabled", "between_tools"} and options.keys() & _SAMPLING:
+                raise _option_error("Claude 开启思考时请清除自定义采样参数。")
+    return dict(options)
+
+
+def _ollama_thinking(model: str, effort: str) -> str | bool:
+    model_name = model.casefold().rsplit("/", 1)[-1]
+    if model_name == "gpt-oss" or model_name.startswith("gpt-oss:"):
+        if effort in {"low", "medium", "high"}:
+            return effort
+    elif effort in {"none", "low"}:
+        return effort == "low"
+    raise _option_error("此 Ollama 模型不支持所选思考等级。")
+
+
+def _gemini_thinking(model: str, effort: str) -> dict:
+    model_name = model.casefold().removeprefix("models/")
+    if model_name.startswith(("gemini-2.5-pro", "gemini-2.5-flash")):
+        if effort in {"low", "medium", "high"} or (effort == "none" and model_name.startswith("gemini-2.5-flash")):
+            return {"thinkingBudget": {"none": 0, "low": 1024, "medium": 4096, "high": 8192}[effort]}
+    else:
+        for prefix, allowed in _GEMINI_LEVELS:
+            if model_name == prefix or model_name.startswith(prefix + "-"):
+                if effort in allowed:
+                    return {"thinkingLevel": effort.upper()}
+                break
+    raise _option_error("此 Gemini 模型不支持所选思考等级。")
+
+
+def _anthropic_thinking(model: str, effort: str, output_tokens: int) -> tuple[dict, dict | None]:
+    name = model.casefold()
+    if name == "claude-mythos-preview":
+        adaptive, named_levels, cannot_disable = True, {"low", "medium", "high", "max"}, True
+    else:
+        family = re.match(r"^claude-(opus|sonnet|haiku|fable|mythos)-(4|5)(?:-([0-9])(?=-|$))?(?:-|$)", name)
+        if not family and not name.startswith("claude-3-7-sonnet"):
+            raise _option_error("此 Claude 模型没有可配置的思考等级。")
+        kind, major, minor = family.groups() if family else ("sonnet", "3", "7")
+        adaptive = major == "5" or (kind in {"opus", "sonnet"} and major == "4" and int(minor or "0") >= 6)
+        named_levels = {"low", "medium", "high", "max"}
+        if major == "5" or (kind == "opus" and major == "4" and int(minor or "0") >= 7):
+            named_levels.add("xhigh")
+        cannot_disable = kind in {"fable", "mythos"}
+    if effort == "none":
+        if cannot_disable:
+            raise _option_error("此 Claude 模型的思考功能不能关闭。")
+        return {"type": "between_tools" if name.startswith("claude-sonnet-5-5") else "disabled"}, None
+    if adaptive and effort in named_levels:
+        return {"type": "adaptive"}, {"effort": effort}
+    if not adaptive and effort in _THINKING_BUDGETS:
+        budget = _THINKING_BUDGETS[effort]
+        if output_tokens <= budget:
+            raise _option_error(f"使用该 Claude 思考等级时，输出 Token 上限须大于 {budget}。")
+        return {"type": "enabled", "budget_tokens": budget}, None
+    raise _option_error("此 Claude 模型不支持所选思考等级。")
+
+
+def responses_options(options: dict) -> dict:
+    """Map shared options for the OpenAI Responses and ChatGPT plan transports."""
+    result = {}
+    if options.get("reasoning", "default") != "default":
+        result["reasoning"] = {"effort": options["reasoning"]}
+    if options.get("speed", "default") != "default":
+        result["service_tier"] = RESPONSE_SPEED_TIERS[options["speed"]]
+    return result
 
 
 def _credential(value: str) -> str:
@@ -148,25 +279,44 @@ def _make_request(profile: dict, api_key: str, system: str, prompt: str) -> Requ
     if not api_key and provider in _OFFICIAL_PREFIXES.get(host, {}):
         raise ModelTransportError("此接口需要 API Key。请在模型管理中填写。", "MODEL_AUTH")
 
+    options = profile.get("options", {})
+    output_tokens = options.get("output_tokens", MAX_OUTPUT_TOKENS)
+    effort = options.get("reasoning", "default")
+    sampling = {key: options[key] for key in _SAMPLING if key in options}
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     suffix = _ENDPOINTS.get(provider)
     if provider == "openai":
         token_field = "max_completion_tokens" if host == "api.openai.com" else "max_tokens"
-        body = {"model": model, "messages": messages, "stream": False, token_field: MAX_OUTPUT_TOKENS}
+        body = {"model": model, "messages": messages, "stream": False, token_field: output_tokens, **sampling}
+        if effort != "default":
+            body["reasoning_effort"] = effort
     elif provider == "openai-responses":
         body = {"model": model, "instructions": system, "input": prompt, "stream": False,
-                "store": False, "max_output_tokens": MAX_OUTPUT_TOKENS}
+                "store": False, "max_output_tokens": output_tokens, **sampling, **responses_options(options)}
     elif provider == "ollama":
-        body = {"model": model, "messages": messages, "stream": False, "options": {"num_predict": MAX_OUTPUT_TOKENS}}
+        body = {"model": model, "messages": messages, "stream": False, "options": {"num_predict": output_tokens, **sampling}}
+        if effort != "default":
+            body["think"] = _ollama_thinking(model, effort)
     elif provider == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
-        body = {"model": model, "system": system, "messages": [messages[1]], "max_tokens": MAX_OUTPUT_TOKENS}
+        body = {"model": model, "system": system, "messages": [messages[1]], "max_tokens": output_tokens, **sampling}
+        if effort != "default":
+            thinking, output_config = _anthropic_thinking(model, effort, output_tokens)
+            body["thinking"] = thinking
+            if output_config:
+                body["output_config"] = output_config
     else:
         suffix = f"/models/{quote(model, safe='')}:generateContent"
+        config = {"maxOutputTokens": output_tokens}
+        for source, target in (("temperature", "temperature"), ("top_p", "topP"), ("top_k", "topK")):
+            if source in sampling:
+                config[target] = sampling[source]
+        if effort != "default":
+            config["thinkingConfig"] = _gemini_thinking(model, effort)
         body = {"systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS}}
+                "generationConfig": config}
 
     if api_key:
         if provider == "anthropic":
@@ -196,11 +346,11 @@ def _http_error(status: int) -> ModelTransportError:
     return ModelTransportError(f"模型服务未接受请求（HTTP {status}）。请核对接口协议和模型 ID。", "MODEL_HTTP")
 
 
-def _read_response(request: Request, cancelled) -> bytes:
-    deadline = time.monotonic() + RESPONSE_DEADLINE
+def _read_response(request: Request, cancelled, timeout: int | None = None) -> bytes:
+    deadline = time.monotonic() + (timeout or RESPONSE_DEADLINE)
     check_cancel(cancelled)
     try:
-        with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=REQUEST_TIMEOUT) as response:
+        with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=timeout or REQUEST_TIMEOUT) as response:
             media_type = response.headers.get_content_type()
             if media_type not in ("application/json", "text/json") and not media_type.endswith("+json"):
                 raise ModelTransportError("模型服务未返回可读取的 JSON。请检查接口协议。", "MODEL_RESPONSE")
@@ -292,13 +442,22 @@ def complete(profile: dict, api_key: str, system: str, prompt: str, cancelled=No
     """Send a single text request and return assistant text without executing tools."""
     if not isinstance(system, str) or not isinstance(prompt, str) or not prompt.strip():
         raise ModelTransportError("模型请求需要有效的文本。", "MODEL_CONFIG")
+    from .model_scheduler import check_input_budget, wait_for_model_slot
+
     if isinstance(profile, dict) and profile.get("provider") == "chatgpt-plan":
         if profile.get("base_url") != "https://api.openai.com/v1":
             raise ModelTransportError("ChatGPT 套餐仅使用 OpenAI 官方地址。", "MODEL_CONFIG")
         from .chatgpt_plan import complete_chatgpt_plan
-        return complete_chatgpt_plan(profile.get("model"), api_key, system, prompt, cancelled=cancelled)
+        options = validate_options(profile.get("options", {}), "chatgpt-plan")
+        settings = {**profile, "options": options}
+        check_input_budget(settings, system, prompt)
+        wait_for_model_slot(settings, cancelled)
+        return complete_chatgpt_plan(profile.get("model"), api_key, system, prompt,
+                                     cancelled=cancelled, options=options)
     settings = validate_profile(profile)
     request = _make_request(settings, _credential(api_key), system, prompt)
-    data = _read_response(request, cancelled)
+    check_input_budget(settings, system, prompt)
+    wait_for_model_slot(settings, cancelled)
+    data = _read_response(request, cancelled, settings.get("options", {}).get("timeout_seconds"))
     check_cancel(cancelled)
     return _extract_text(settings["provider"], data)

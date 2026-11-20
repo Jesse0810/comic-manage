@@ -1,12 +1,13 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event
+from threading import Barrier, Event
 import unittest
 from unittest.mock import patch
 
 from comic_manage.library_agent import MAX_AGENT_BOOKS
 from comic_manage.metadata import Metadata
+from comic_manage.model_scheduler import estimated_input_tokens
 from comic_manage.model_transport import ModelTransportError
 from comic_manage.scrape_http import ScrapeError
 from comic_manage.service import ComicService, ServiceError
@@ -52,8 +53,9 @@ class LibraryAgentTests(unittest.TestCase):
         }, Metadata(**{"title": name, **metadata}), {}, "version-1", 1, "")
         return name
 
-    def _prepare(self, ids, *, task="规范这批漫画的元数据", scope="", use_sources=False, cancel=None):
-        return self.service.call("agent_prepare", {"ids": ids, "prompt": task, "profile": PROFILE, "api_key": API_KEY,
+    def _prepare(self, ids, *, task="规范这批漫画的元数据", scope="", use_sources=False, cancel=None, options=None):
+        profile = {**PROFILE, "options": options} if options is not None else PROFILE
+        return self.service.call("agent_prepare", {"ids": ids, "prompt": task, "profile": profile, "api_key": API_KEY,
                                                   "use_sources": use_sources, "komga_scope": scope}, cancel)
 
     def _apply(self, prepared, choices, *, scope="", cancel=None):
@@ -61,6 +63,36 @@ class LibraryAgentTests(unittest.TestCase):
             "token": prepared["token"], "books": [{"id": identity, "fields": fields} for identity, fields in choices],
             "komga_scope": scope,
         }, cancel)
+
+    def test_input_budget_splits_model_calls_and_warns_before_single_overflow(self):
+        ids = [self._comic(f"书名{index}") for index in range(2)]
+        with patch(MOCK_COMPLETION, return_value=_answer({}, {})) as model:
+            self._prepare(ids)
+        _, _, system, text = model.call_args.args
+        draft = json.loads(text)
+        draft["books"] = draft["books"][:1]
+        limit = estimated_input_tokens(system, json.dumps(draft, ensure_ascii=False, separators=(",", ":")))
+        with patch(MOCK_COMPLETION, return_value=_answer({})) as model:
+            self._prepare(ids, options={"input_tokens": limit})
+            self.assertEqual(model.call_count, 2)
+        with patch(MOCK_COMPLETION) as model:
+            result = self._prepare(ids, options={"input_tokens": 1})
+            model.assert_not_called()
+        self.assertTrue(all(any("Token" in warn for warn in book["warnings"]) for book in result["books"]))
+
+    def test_configured_parallel_batches_keep_catalog_order(self):
+        ids = [self._comic(f"独立书名{index}") for index in range(5)]
+        pending = Barrier(2)
+
+        def complete(profile, api_key, system, prompt, **kwargs):
+            books = json.loads(prompt)["books"]
+            pending.wait(timeout=3)
+            return _answer(*[{} for _ in books])
+
+        with patch(MOCK_COMPLETION, side_effect=complete) as model:
+            result = self._prepare(ids, options={"concurrency": 2})
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual([book["id"] for book in result["books"]], ids)
 
     def test_groups_multiple_books_and_applies_only_selected_checked_fields(self):
         first = self._comic("【晨光手记】[作者:林野]", collection_mode="series", series="旧系列")

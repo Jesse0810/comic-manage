@@ -11,6 +11,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from .model_transport import (
     MAX_OUTPUT_CHARS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, ModelTransportError, _NoRedirects,
+    responses_options, validate_options,
 )
 from .sources import check_cancel
 
@@ -27,7 +28,7 @@ _ERROR_CODES = {
     "subscription_sharing_user_not_eligible": ("当前 ChatGPT 账号或工作区暂不符合套餐调用条件。", "MODEL_CHATGPT_INELIGIBLE"),
     "subscription_sharing_usage_limit_exceeded": ("已达到 ChatGPT 套餐或此应用的用量上限。请在 ChatGPT 设置中查看用量。", "MODEL_CHATGPT_USAGE_LIMIT"),
     "subscription_sharing_usage_unavailable": ("暂时无法查询 ChatGPT 套餐用量，请稍后重试。", "MODEL_NETWORK"),
-    "subscription_sharing_unsupported_capability": ("此 ChatGPT 模型或套餐不支持当前请求。请更换已授权的模型。", "MODEL_NOT_FOUND"),
+    "subscription_sharing_unsupported_capability": ("此 ChatGPT 模型或套餐不支持当前请求。请检查思考或速度档位，或更换已授权的模型。", "MODEL_NOT_FOUND"),
     "subscription_sharing_route_not_supported": ("ChatGPT 套餐未对当前调用提供权限。请检查应用授权。", "MODEL_CHATGPT_ACCESS"),
     "subscription_sharing_invalid_user": ("ChatGPT 账号授权已无效，请在模型管理中检查账号连接。", "MODEL_AUTH"),
     "chatpass_v2_scope_not_authorized": ("ChatGPT 授权未包含套餐调用权限，请在模型管理中核对授权。", "MODEL_CHATGPT_ACCESS"),
@@ -75,7 +76,7 @@ def _plan_error(code: str, status: int | None = None) -> ModelTransportError:
     return ModelTransportError("ChatGPT 未完成本次模型请求。", "MODEL_RESPONSE")
 
 
-def _make_request(model: str, token: str, system: str, prompt: str) -> Request:
+def _make_request(model: str, token: str, system: str, prompt: str, options: dict) -> Request:
     if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
         raise ModelTransportError("请选择当前 ChatGPT 账号的有效模型。", "MODEL_CONFIG")
     if not isinstance(token, str) or len(token) > MAX_TOKEN_CHARS or not _BEARER.fullmatch(token):
@@ -84,7 +85,7 @@ def _make_request(model: str, token: str, system: str, prompt: str) -> Request:
         raise ModelTransportError("模型请求需要有效的文本。", "MODEL_CONFIG")
     try:
         data = json.dumps({"model": model, "instructions": system, "input": [{"role": "user", "content": prompt}],
-                           "store": False, "stream": True}, ensure_ascii=False).encode("utf-8")
+                           "store": False, "stream": True, **responses_options(options)}, ensure_ascii=False).encode("utf-8")
     except UnicodeError:
         raise ModelTransportError("发送给模型的文本无法编码。", "MODEL_CONFIG") from None
     if len(data) > MAX_REQUEST_BYTES:
@@ -210,13 +211,15 @@ def _stream_text(response, cancelled, deadline) -> str:
     raise ModelTransportError("ChatGPT 回复在完成前中断，请重试。", "MODEL_RESPONSE")
 
 
-def complete_chatgpt_plan(model: str, token: str, system: str, prompt: str, cancelled=None) -> str:
+def complete_chatgpt_plan(model: str, token: str, system: str, prompt: str, cancelled=None, *, options=None) -> str:
     """Return text only after an official ChatGPT plan stream completes."""
     check_cancel(cancelled)
-    request = _make_request(model, token, system, prompt)
-    deadline = time.monotonic() + _STREAM_DEADLINE
+    options = validate_options({} if options is None else options, "chatgpt-plan")
+    request = _make_request(model, token, system, prompt, options)
+    timeout = options.get("timeout_seconds")
+    deadline = time.monotonic() + (timeout or _STREAM_DEADLINE)
     try:
-        with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=_SOCKET_TIMEOUT) as response:
+        with build_opener(ProxyHandler({}), _NoRedirects()).open(request, timeout=timeout or _SOCKET_TIMEOUT) as response:
             # The direct ChatGPT route can omit Content-Type even for a valid SSE stream.
             if response.headers.get("Content-Type") and response.headers.get_content_type() != "text/event-stream":
                 raise _malformed()

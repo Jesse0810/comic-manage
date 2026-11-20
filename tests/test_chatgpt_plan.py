@@ -86,6 +86,28 @@ class ChatGptPlanTests(unittest.TestCase):
             "store": False, "stream": True,
         })
 
+    def test_plan_thinking_and_speed_are_sent_to_official_responses(self):
+        for speed, tier in (("standard", "default"), ("fast", "priority"), ("ultrafast", "ultrafast")):
+            with self.subTest(speed=speed), patch("comic_manage.chatgpt_plan.build_opener") as factory:
+                factory.return_value.open.return_value = FragmentedStream(completed("ok"))
+                self.assertEqual(complete_chatgpt_plan(MODEL, TOKEN, SYSTEM, PROMPT,
+                    options={"reasoning": "max", "speed": speed, "timeout_seconds": 125, "rpm": 0}), "ok")
+                request = factory.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url, RESPONSES_URL)
+                self.assertEqual(factory.return_value.open.call_args.kwargs["timeout"], 125)
+                self.assertEqual(json.loads(request.data), {
+                    "model": MODEL, "instructions": SYSTEM, "input": [{"role": "user", "content": PROMPT}],
+                    "store": False, "stream": True, "reasoning": {"effort": "max"}, "service_tier": tier,
+                })
+
+    def test_plan_forbidden_generation_fields_are_rejected_before_network(self):
+        with patch("comic_manage.chatgpt_plan.build_opener") as factory:
+            for options in ({"output_tokens": 2000}, {"temperature": .2}, {"top_p": .8}, {"top_k": 12}):
+                with self.subTest(options=options), self.assertRaises(ModelTransportError) as raised:
+                    complete_chatgpt_plan(MODEL, TOKEN, SYSTEM, PROMPT, options=options)
+                self.assertEqual(raised.exception.code, "MODEL_CONFIG")
+        factory.assert_not_called()
+
     def test_distinct_text_parts_keep_order_and_reasoning_is_ignored(self):
         self.assertEqual(self.with_stream(delta("后", output_index=2) + delta("前", output_index=1) + completed("前", "后")), "前\n后")
         self.assertEqual(self.with_stream(completed("完整文本")), "完整文本")

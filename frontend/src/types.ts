@@ -22,7 +22,14 @@ export type ScrapeFieldKey = typeof scrapeFieldKeys[number]
 export type ScrapeFields = Partial<Pick<Metadata, ScrapeFieldKey>>
 export interface ScrapePreview { provider: ScrapeProvider; sourceUrl: string; fields: ScrapeFields; warnings: string[] }
 export type ModelProtocol = 'openai' | 'openai-responses' | 'ollama' | 'anthropic' | 'gemini' | 'chatgpt-plan'
-export interface ModelProfile { id: string; name: string; provider: ModelProtocol; base_url: string; model: string; has_key: boolean }
+export type ModelReasoning = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ModelSpeed = 'default' | 'standard' | 'fast' | 'ultrafast'
+export interface ModelOptions {
+  reasoning?: ModelReasoning; speed?: ModelSpeed
+  input_tokens?: number; output_tokens?: number; concurrency?: number; rpm?: number; timeout_seconds?: number
+  temperature?: number; top_p?: number; top_k?: number
+}
+export interface ModelProfile { id: string; name: string; provider: ModelProtocol; base_url: string; model: string; has_key: boolean; options?: ModelOptions }
 export interface ModelConfiguration { profiles: ModelProfile[]; default_id: string }
 export interface ModelAssistPreview { fields: ScrapeFields; warnings: string[]; model_name: string }
 export interface ScrapeApplication { id: string; baseline: Metadata; patch: ScrapeFields; sourceUrl?: string }

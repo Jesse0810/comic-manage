@@ -5,8 +5,9 @@ const { EventEmitter } = require('node:events')
 const { createInterface } = require('node:readline')
 const { existsSync } = require('node:fs')
 const path = require('node:path')
+const { modelOptions } = require('./model-options.cjs')
 
-const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'batch_number', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
+const METHODS = Object.freeze(['bootstrap', 'scan', 'import', 'browse_folders', 'prepare_import', 'commit_import', 'remove', 'batch_edit', 'batch_number', 'save', 'approve', 'page', 'xml', 'scrape_preview', 'model_test', 'model_assist', 'model_catalog', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview', 'plan', 'export', 'cancel', 'set_output', 'backup', 'export_komga', 'komga_test', 'komga_sync', 'komga_pull', 'komga_resolve', 'source_context', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs', 'komga_jobs_retry', 'komga_jobs_run'])
 const LONG_METHODS = new Set(['scan', 'import', 'prepare_import', 'commit_import', 'plan', 'export', 'komga_sync', 'komga_pull', 'prepare_review_sync', 'commit_review_sync', 'komga_jobs_run', 'komga_jobs_retry', 'agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'])
 const BATCH_TEXT_FIELDS = new Set([
   'genre', 'series', 'localized_series', 'number', 'count', 'volume', 'translator', 'publisher', 'work_group', 'text_version',
@@ -57,6 +58,13 @@ const AGENT_TEXT_MAX = 1200
 const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
 const validAgentID = value => typeof value === 'string' && !!value && value.length <= 128 && !/[^A-Za-z0-9_-]/.test(value)
 
+function transportProfile(profile) {
+  if (!isRecord(profile)) return false
+  const { options, ...connection } = profile
+  modelOptions(options)
+  return Object.keys(connection).sort().join(',') === 'base_url,model,provider'
+}
+
 const SEARCH_SITES = new Set(['dlsite', 'dmm', 'ehentai', 'nhentai'])
 
 function validateSearchRequest(method, params) {
@@ -96,7 +104,7 @@ function validateAgentRequest(method, params) {
   if (!isRecord(params)) throw new Error('Agent 请求格式无效。')
   if (method === 'agent_search' || method === 'agent_search_preview') return validateSearchRequest(method, params)
   const prepare = method === 'agent_prepare'
-  const allowed = prepare ? ['ids', 'profile_id', 'prompt', 'use_sources'] : ['token', 'books']
+  const allowed = prepare ? ['ids', 'profile_id', 'prompt', 'use_sources', 'options'] : ['token', 'books']
   if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('Agent 请求包含不支持的参数。')
   if (prepare) {
     if (!Array.isArray(params.ids) || !params.ids.length || params.ids.length > AGENT_SELECTION_MAX
@@ -104,6 +112,7 @@ function validateAgentRequest(method, params) {
     if (!validAgentID(params.profile_id) || typeof params.prompt !== 'string'
         || !params.prompt.trim() || [...params.prompt].length > AGENT_TEXT_MAX || params.prompt.includes('\0')
         || typeof params.use_sources !== 'boolean') throw new Error('请选择模型并填写有效的整理任务。')
+    modelOptions(params.options, true)
     return
   }
   if (!validAgentID(params.token) || !Array.isArray(params.books) || !params.books.length
@@ -143,11 +152,10 @@ function validateCall(method, params) {
       }
     }
   }
-  if (['model_test', 'model_assist'].includes(method)) {
-    const allowed = method === 'model_test' ? ['profile', 'api_key'] : ['profile', 'api_key', 'id', 'metadata', 'siteFields']
+  if (['model_test', 'model_assist', 'model_catalog'].includes(method)) {
+    const allowed = method === 'model_assist' ? ['profile', 'api_key', 'id', 'metadata', 'siteFields'] : ['profile', 'api_key']
     const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
-    if (Object.keys(params).some(key => !allowed.includes(key)) || !isRecord(params.profile)
-        || Object.keys(params.profile).sort().join(',') !== 'base_url,model,provider'
+    if (Object.keys(params).some(key => !allowed.includes(key)) || !transportProfile(params.profile)
         || typeof params.api_key !== 'string' || !/^[\x20-\x7e]*$/.test(params.api_key)
         || params.api_key.length > (params.profile.provider === 'chatgpt-plan' ? 16384 : 4096)) throw new Error('模型服务请求参数无效。')
     if (method === 'model_assist') {
@@ -166,7 +174,7 @@ function validateCall(method, params) {
     else {
       const { profile, api_key, ...request } = rest
       validateAgentRequest(method, { ...request, profile_id: 'trusted-profile' })
-      if (!isRecord(profile) || Object.keys(profile).sort().join(',') !== 'base_url,model,provider'
+      if (!transportProfile(profile)
           || typeof api_key !== 'string' || !/^[\x20-\x7e]*$/.test(api_key)
           || api_key.length > (profile.provider === 'chatgpt-plan' ? 16384 : 4096)) throw new Error('Agent 模型配置无效。')
     }
@@ -298,7 +306,8 @@ class ServiceBridge extends EventEmitter {
       const timer = LONG_METHODS.has(method) ? undefined : setTimeout(() => {
         this.pending.delete(id)
         reject(new Error('文件服务响应超时；网络目录可能不可用。请等待或取消当前任务。'))
-      }, 120000)
+      }, ['model_test', 'model_assist'].includes(method)
+        ? Math.max(120000, ((params.profile?.options?.timeout_seconds ?? 75) + 65) * 1000) : 120000)
       this.pending.set(id, { resolve, reject, timer })
       this.child.stdin.write(JSON.stringify({ id, method, params }) + '\n', error => {
         if (error) { clearTimeout(timer); this.pending.delete(id); reject(error) }

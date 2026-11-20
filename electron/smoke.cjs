@@ -145,6 +145,12 @@ async function run() {
     const received = []
     const testKey = 'synthetic-model-test-key'
     const modelServer = createServer(async (req, res) => {
+      if (req.method === 'GET' && req.url === '/v1/models') {
+        assert.equal(req.headers.authorization, 'Bearer ' + testKey)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({data:[{id:'fixture-model'}]}))
+        return
+      }
       const body = []
       for await (const chunk of req) body.push(chunk)
       const input = JSON.parse(Buffer.concat(body).toString('utf8'))
@@ -165,6 +171,8 @@ async function run() {
       await setField('model-profile-endpoint', base)
       await setField('model-profile-model', 'fixture-model')
       await setField('model-profile-key', testKey)
+      await toggle('model-profile-discover')
+      await waitFor("document.querySelector('[data-testid=model-profile-catalog]')?.getClientRects().length", 'local model discovery')
       await toggle('model-profile-test')
       await waitFor("document.querySelector('[data-testid=model-profile-result]')?.textContent.includes('连接成功')", 'model request to a real local server')
       assert.deepEqual(await call('model_config_get'), { profiles: [], default_id: '' })
@@ -1056,12 +1064,15 @@ async function run() {
     await waitFor("document.querySelector('[data-testid=agent-prompt]')?.getClientRects().length", 'Agent opens as a workspace')
     await toggle('agent-scope-filtered')
     await setField('agent-prompt', agentPrompt)
+    await chooseOption('agent-reasoning', '高 · High')
     await waitFor("document.querySelector('[data-testid=agent-start]')?.disabled === false", 'filtered Agent scope ready')
     await toggle('agent-start')
     await waitFor("[...document.querySelectorAll('[data-testid=agent-book]')].filter(book=>book.textContent.includes('1 项建议')).length === 2", 'Agent returned two editable proposals')
     assert.equal(agentRequests.length, 1)
     assert.equal(agentRequests[0].path, '/v1/chat/completions')
     assert.equal(agentRequests[0].authorization, 'Bearer synthetic-agent-key')
+    assert.equal(agentRequests[0].payload.reasoning_effort, 'high')
+    assert.equal((await call('model_config_get')).profiles.find(profile => profile.id === saved.id).options?.reasoning, undefined)
     assert(!JSON.stringify(agentRequests[0].payload.messages).includes('desktop-smoke-'))
     const beforeAgent = (await call('bootstrap')).comics.filter(book => agentBooks.includes(book.metadata.title))
     assert.equal(beforeAgent.length, 2)
@@ -1184,7 +1195,7 @@ async function run() {
   window.destroy()
   await desktop.bridge.stop()
   await komgaFixture.close()
-  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, large ChatGPT catalog with retry, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with source isolation and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, draggable batch Number, compact layout', fixture, screenshots }
+  const result = { passed: true, checks: 'isolated renderer, lazy multi-folder checks, read-only parsed preview, import defaults, unchecked siblings excluded, expanded metadata editor, independent title and series, volume/number/count/day, conditional R18 correction, source URLs, namespaced custom tags, Komga Characters and tags, encrypted Komga configuration, connection test, reviewed native metadata direct sync without repackaging, partial field preservation, supplementary payload and manifest, One-Shot path and XML, review, preview, cover markers, verified export, batch edit changes only checked metadata and revokes review, remove without file deletion, rescan skips removed, restore preserves metadata, backup, remote-only library read and authenticated preview, no-change review sends zero PATCH, remote conflict rebase preserves edits, title-only differential sync, checked remote batch fields and shared publisher sync preserve native age/genre/direction, v1.3 optional work-group and text-version fields, checked-only batch version edits, independent same-title One-Shots, version tags and Book entities, no series or read-progress edits, durable automatic entity task UI, real idle scheduler, entity-only reconciliation and lock verification, current-connection retry without repackaging, parent work titles and authors inherited for version subfolders, distinct edition badges and page counts, collapsed work groups, visible-only header selection, independent child selection editing and review, hidden checked child badges and explicit clear, search and status reveal only matching versions, expansion survives refresh, website metadata preview, saved model settings with encrypted key, local model discovery, large ChatGPT catalog with retry, real local model request and draft-only candidates, column sorting, field constraint combined with search, real two-book Agent workspace with per-task reasoning and batch draft apply, encrypted site settings reused for search and preview, site search and ambiguous candidate review, draggable batch Number, compact layout', fixture, screenshots }
   await fs.writeFile(path.join(root, 'build', 'desktop-last-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
   app.exit(0)

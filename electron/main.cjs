@@ -9,6 +9,7 @@ const { ServiceBridge, validateCall, validateAgentRequest } = require('./bridge.
 const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
 const { ChatGPTAuth, CHATGPT_USAGE_URL } = require('./chatgpt-auth.cjs')
 const { ModelConfigStore } = require('./model-config.cjs')
+const { modelOptions } = require('./model-options.cjs')
 const { SiteConfigStore } = require('./site-config.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
@@ -160,8 +161,11 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
           return await callService(method, { ...params, credentials, komga_scope }, task)
         }
         if (method === 'agent_apply') return await callService(method, { ...params, komga_scope }, task)
-        const { profile_id, ...request } = params
+        const { profile_id, options, ...request } = params
         const { name, ...connection } = await modelConfig.connection(profile_id)
+        if (options && Object.keys(options).length) {
+          connection.profile = { ...connection.profile, options: { ...connection.profile.options, ...modelOptions(options, true) } }
+        }
         const credentials = await modelConnection(connection)
         return await callService(method, { ...request, ...credentials, komga_scope }, task)
       } catch (error) {
@@ -190,7 +194,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       if (method === 'model_chatgpt_models') return chatgptAuth.modelList()
       return shell.openExternal(CHATGPT_USAGE_URL)
     }
-    if (['model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_assist_preview'].includes(method)) {
+    if (['model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_profile_models', 'model_profile_duplicate', 'model_assist_preview'].includes(method)) {
       if (!params || typeof params !== 'object' || Array.isArray(params)
           || Buffer.byteLength(JSON.stringify(params), 'utf8') > 256 * 1024) throw new Error('模型请求参数无效。')
       if (method === 'model_config_get') {
@@ -198,9 +202,15 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
         return modelConfig.get()
       }
       if (method === 'model_profile_save') return modelConfig.save(params)
-      if (['model_profile_delete', 'model_profile_default'].includes(method)) {
+      if (['model_profile_delete', 'model_profile_default', 'model_profile_duplicate'].includes(method)) {
         if (Object.keys(params).some(key => key !== 'id')) throw new Error('模型配置请求参数无效。')
+        if (method === 'model_profile_duplicate') return modelConfig.duplicate(params.id)
         return method === 'model_profile_delete' ? modelConfig.delete(params.id) : modelConfig.setDefault(params.id)
+      }
+      if (method === 'model_profile_models') {
+        const credentials = await modelConfig.testCredentials(params)
+        if (credentials.profile.provider === 'chatgpt-plan') return chatgptAuth.modelList()
+        return callService('model_catalog', credentials)
       }
       if (method === 'model_profile_test') return callService('model_test', await modelConnection(await modelConfig.testCredentials(params)))
       const { profile_id, ...work } = params
@@ -209,7 +219,7 @@ async function createApplication({ dataDir = defaultDataDirectory(), show = true
       const result = await callService('model_assist', { ...work, ...await modelConnection(connection) })
       return { ...result, model_name: name }
     }
-    if (['komga_test', 'source_context', 'komga_jobs_run', 'model_test', 'model_assist'].includes(method)) throw new Error('此操作只允许主进程调用。')
+    if (['komga_test', 'source_context', 'komga_jobs_run', 'model_test', 'model_assist', 'model_catalog'].includes(method)) throw new Error('此操作只允许主进程调用。')
     validateCall(method, params)
     if (method === 'batch_number') {
       if (Object.hasOwn(params, 'komga_scope')) throw new Error('批量编号不接受自定义书库范围。')

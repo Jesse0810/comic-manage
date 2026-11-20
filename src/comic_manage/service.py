@@ -21,6 +21,7 @@ from .metadata import AGE_RATINGS, GENRES, METADATA_RULES_VERSION, Metadata, to_
 from .scrape import scrape_preview
 from .scrape_http import ScrapeError
 from .model_assist import assist_preview, test_profile
+from .model_catalog import discover_models
 from .library_agent import AgentError, LibraryAgent
 from .library_search import LibrarySearch
 from .model_transport import ModelTransportError
@@ -192,7 +193,7 @@ def _folder_link(path: Path) -> bool:
 
 
 class ComicService:
-    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview", "model_test", "model_assist", "agent_prepare", "agent_apply", "agent_search", "agent_search_preview",
+    METHODS = frozenset({"bootstrap", "scan", "import", "save", "approve", "page", "xml", "scrape_preview", "model_test", "model_assist", "model_catalog", "agent_prepare", "agent_apply", "agent_search", "agent_search_preview",
                          "plan", "export", "cancel", "set_output", "backup", "browse_folders",
                          "prepare_import", "commit_import", "remove", "batch_edit", "batch_number", "export_komga", "komga_test", "komga_sync", "komga_pull", "komga_resolve", "source_context", "prepare_review_sync", "commit_review_sync", "komga_jobs", "komga_jobs_retry", "komga_jobs_run"})
 
@@ -347,7 +348,7 @@ class ComicService:
                 return result
             except AgentError as error:
                 raise ServiceError(str(error), error.code) from None
-        if method in ("model_test", "model_assist"):
+        if method in ("model_test", "model_assist", "model_catalog"):
             allowed = {"profile", "api_key"}
             if method == "model_assist":
                 allowed.update(("id", "metadata", "siteFields"))
@@ -357,6 +358,8 @@ class ComicService:
             if not isinstance(profile, dict) or not isinstance(api_key, str):
                 raise ServiceError("模型接口或密钥格式无效。")
             try:
+                if method == "model_catalog":
+                    return discover_models(profile, api_key, cancelled=cancel)
                 if method == "model_test":
                     started = time.monotonic()
                     result = test_profile(profile, api_key, cancelled=cancel)

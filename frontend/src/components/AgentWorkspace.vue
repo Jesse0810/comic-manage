@@ -3,7 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowDown, ArrowRight, Check, Collection, Filter, Loading, MagicStick, Operation, Setting, VideoPause } from '@element-plus/icons-vue'
 import { invoke } from '../api'
 import { displayTitle, errorMessage } from '../types'
-import type { Comic, ModelConfiguration } from '../types'
+import type { Comic, ModelConfiguration, ModelOptions, ModelReasoning, ModelSpeed } from '../types'
+import { reasoningLabel, reasoningOptions, speedLabel, speedOptions } from '../model-options'
 
 const props = defineProps<{
   selected: Comic[]
@@ -42,12 +43,16 @@ interface ApplyResult {
   errors: { id: string; title: string; message: string }[]
   cancelled: boolean
 }
+type QuickOptions = Partial<Pick<ModelOptions, 'reasoning' | 'speed'>>
 interface TaskInput {
   scope: Scope
   ids: string[]
   model: string
   prompt: string
   sources: boolean
+  options: QuickOptions
+  modelRevision: string
+  modelSummary: string[]
 }
 
 const MAX_BOOKS = 24
@@ -66,6 +71,8 @@ const examples = [
 const scope = ref<Scope>('selected')
 const prompt = ref('')
 const model = ref('')
+const reasoningOverride = ref<ModelReasoning | 'inherit'>('inherit')
+const speedOverride = ref<ModelSpeed | 'inherit'>('inherit')
 const useSources = ref(false)
 const showTargets = ref(false)
 const work = ref<Work | ''>('')
@@ -82,6 +89,30 @@ const expanded = ref(new Set<string>())
 let unsubscribe: (() => void) | undefined
 
 const modelProfile = computed(() => props.configuration.profiles.find(item => item.id === model.value))
+const reasoningChoices = computed(() => modelProfile.value ? reasoningOptions(modelProfile.value) : [])
+const speedChoices = computed(() => modelProfile.value ? speedOptions(modelProfile.value) : [])
+const hasReasoning = computed(() => reasoningChoices.value.some(option => option.value !== 'default'))
+const hasSpeed = computed(() => speedChoices.value.some(option => option.value !== 'default'))
+const savedReasoning = computed(() => selectedOption(modelProfile.value?.options?.reasoning, reasoningChoices.value) ?? 'default')
+const savedSpeed = computed(() => selectedOption(modelProfile.value?.options?.speed, speedChoices.value) ?? 'default')
+const quickOptions = computed<QuickOptions>(() => {
+  const reasoning = selectedOption(reasoningOverride.value, reasoningChoices.value)
+  const speed = selectedOption(speedOverride.value, speedChoices.value)
+  return {
+    ...(hasReasoning.value && reasoning ? { reasoning } : {}),
+    ...(hasSpeed.value && speed ? { speed } : {}),
+  }
+})
+const modelSummary = computed(() => [
+  ...(hasReasoning.value ? ['思考 ' + reasoningLabel(quickOptions.value.reasoning ?? savedReasoning.value)] : []),
+  ...(hasSpeed.value ? ['速度 ' + speedLabel(quickOptions.value.speed ?? savedSpeed.value)] : []),
+])
+const modelRevision = computed(() => {
+  const profile = modelProfile.value
+  if (!profile) return ''
+  const options = Object.entries({ ...profile.options, ...quickOptions.value }).sort(([a], [b]) => a.localeCompare(b))
+  return JSON.stringify([profile.provider, profile.base_url, profile.model, options])
+})
 const targets = computed(() => [...new Map(props[scope.value].map(book => [book.id, book])).values()])
 const caseCount = computed(() => targets.value.length)
 const request = computed<TaskInput>(() => ({
@@ -90,6 +121,9 @@ const request = computed<TaskInput>(() => ({
   model: model.value,
   prompt: prompt.value.trim(),
   sources: useSources.value,
+  options: quickOptions.value,
+  modelRevision: modelRevision.value,
+  modelSummary: modelSummary.value,
 }))
 const availableForPrompt = computed(() => !props.disabled && !work.value)
 const canGenerate = computed(() => availableForPrompt.value && !!modelProfile.value && !!request.value.prompt &&
@@ -98,7 +132,7 @@ const isStale = computed(() => {
   const past = submitted.value
   const current = request.value
   return past != null && (past.scope !== current.scope || past.model !== current.model ||
-    past.prompt !== current.prompt || past.sources !== current.sources ||
+    past.modelRevision !== current.modelRevision || past.prompt !== current.prompt || past.sources !== current.sources ||
     past.ids.length !== current.ids.length || past.ids.some(id => !current.ids.includes(id)))
 })
 const reviewEnabled = computed(() => availableForPrompt.value && !isStale.value && !report.value &&
@@ -111,6 +145,19 @@ const chosen = computed(() => (plan.value?.books ?? []).flatMap(book => {
   return fields.length ? [{ id: book.id, fields }] : []
 }))
 const chosenFields = computed(() => chosen.value.reduce((sum, item) => sum + item.fields.length, 0))
+
+function selectedOption<T extends string>(value: T | 'inherit' | undefined, choices: readonly { value: T }[]): T | undefined {
+  return value && value !== 'inherit' && choices.some(option => option.value === value) ? value : undefined
+}
+
+watch(model, () => {
+  reasoningOverride.value = 'inherit'
+  speedOverride.value = 'inherit'
+}, { flush: 'sync' })
+watch([reasoningChoices, speedChoices], ([thinking, speeds]) => {
+  if (!selectedOption(reasoningOverride.value, thinking)) reasoningOverride.value = 'inherit'
+  if (!selectedOption(speedOverride.value, speeds)) speedOverride.value = 'inherit'
+})
 
 watch(() => props.configuration, config => {
   if (!config.profiles.some(item => item.id === model.value)) {
@@ -197,6 +244,7 @@ async function prepare() {
   try {
     const response = await invoke<AgentPlan>('agent_prepare', {
       ids: input.ids, profile_id: input.model, prompt: input.prompt, use_sources: input.sources,
+      ...(Object.keys(input.options).length ? { options: input.options } : {}),
     })
     plan.value = response
     const first = response.books.find(book => book.fields.length) || response.books.find(book => book.warnings.length)
@@ -277,6 +325,36 @@ async function openChatGPTUsage() {
               {{ item.label }}
             </button>
           </div>
+          <div class="agent-model-toolbar" role="group" aria-label="本次任务模型" title="在此为 Agent 设置独立模型参数" data-testid="agent-quick-model">
+            <div class="agent-model-field">
+              <div class="agent-model-label">
+                <label for="agent-model-select">使用模型</label>
+                <el-button link :icon="Setting" :disabled="!!work" data-testid="agent-open-model-settings"
+                  @click="emit('model-settings')">模型管理</el-button>
+              </div>
+              <el-select id="agent-model-select" v-model="model" :disabled="!availableForPrompt"
+                data-testid="agent-model" filterable
+                :placeholder="configuration.profiles.length ? '选择模型' : '请先添加模型'">
+                <el-option v-for="item in configuration.profiles" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </div>
+            <div class="agent-model-field">
+              <div class="agent-model-label"><label for="agent-reasoning-select">思考等级</label></div>
+              <el-select id="agent-reasoning-select" v-model="reasoningOverride"
+                :disabled="!availableForPrompt || !hasReasoning" data-testid="agent-reasoning">
+                <el-option :label="hasReasoning ? '沿用配置（' + reasoningLabel(savedReasoning) + '）' : '由供应商决定'" value="inherit" />
+                <el-option v-for="item in reasoningChoices" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </div>
+            <div class="agent-model-field">
+              <div class="agent-model-label"><label for="agent-speed-select">速度等级</label></div>
+              <el-select id="agent-speed-select" v-model="speedOverride" :disabled="!availableForPrompt || !hasSpeed"
+                data-testid="agent-speed" title="速度等级由供应商提供。优先档位可能使用更多额度。">
+                <el-option :label="hasSpeed ? '沿用配置（' + speedLabel(savedSpeed) + '）' : '由供应商决定'" value="inherit" />
+                <el-option v-for="item in speedChoices" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </div>
+          </div>
           <div class="agent-actions">
             <span>每次最多 {{ MAX_BOOKS }} 本</span>
             <el-button
@@ -298,7 +376,7 @@ async function openChatGPTUsage() {
           </div>
         </form>
 
-        <aside class="agent-card agent-settings" aria-label="本次整理范围和模型">
+        <aside class="agent-card agent-settings" aria-label="本次整理范围和来源">
           <div class="agent-card-heading"><h2><el-icon><Operation /></el-icon>任务范围</h2></div>
           <div class="agent-scopes" role="group" aria-label="整理范围">
             <button
@@ -330,25 +408,6 @@ async function openChatGPTUsage() {
             </ul>
           </template>
 
-          <div class="agent-model-heading">
-            <label for="agent-model-select">使用模型</label>
-            <el-button
-              link
-              :icon="Setting"
-              :disabled="!!work"
-              data-testid="agent-open-model-settings"
-              @click="emit('model-settings')"
-            >模型管理</el-button>
-          </div>
-          <el-select
-            id="agent-model-select"
-            v-model="model"
-            :disabled="!availableForPrompt"
-            data-testid="agent-model"
-            :placeholder="configuration.profiles.length ? '选择模型' : '请在模型管理添加配置'"
-          >
-            <el-option v-for="item in configuration.profiles" :key="item.id" :label="item.name" :value="item.id" />
-          </el-select>
           <div v-if="modelProfile?.provider === 'chatgpt-plan'" class="agent-plan-usage">
             <span>使用 ChatGPT 套餐</span>
             <el-button link data-testid="agent-chatgpt-usage" @click="openChatGPTUsage">管理用量</el-button>
@@ -371,7 +430,7 @@ async function openChatGPTUsage() {
         <div class="agent-review-header">
           <div>
             <h2 id="agent-result-heading">整理方案</h2>
-            <p>{{ submittedModel }} · 检查 {{ plan.books.length }} 本 · {{ actionable.length }} 本有建议 · {{ totalChanges }} 项字段</p>
+            <p data-testid="agent-result-settings">{{ [submittedModel, ...submitted.modelSummary].join(' · ') }} · 检查 {{ plan.books.length }} 本 · {{ actionable.length }} 本有建议 · {{ totalChanges }} 项字段</p>
           </div>
           <div v-if="totalChanges" class="agent-review-tools">
             <el-button link :disabled="!reviewEnabled" data-testid="agent-select-empty" @click="chooseBlankFields">勾选空白字段</el-button>
@@ -456,13 +515,19 @@ async function openChatGPTUsage() {
 .agent-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
 .agent-card-heading h2 { display: flex; align-items: center; gap: 7px; }
 .agent-card-heading h2 .el-icon { color: #659474; }
-.agent-composer label, .agent-model-heading label { display: block; color: #516d5e; font-weight: 600; margin-bottom: 8px; }
+.agent-composer label { display: block; color: #516d5e; font-weight: 600; margin-bottom: 8px; }
 .agent-composer :deep(.el-textarea__inner) { background: #fbfcfa; font-size: 13px; color: var(--agent-ink); line-height: 1.7; padding: 12px 13px 24px; }
 .agent-composer :deep(.el-input__count) { background: #fbfcfa; color: var(--agent-muted); }
 .agent-examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 13px 0 15px; }
 .agent-examples button { color: #547363; border: 1px solid #dfe9df; background: #f7faf6; border-radius: 7px; padding: 5px 11px; min-height: 28px; }
 .agent-examples button:hover:not(:disabled) { color: #2d6248; border-color: #b9d2be; background: #eaf4e9; }
 .agent-examples button:disabled { opacity: .62; }
+.agent-model-toolbar { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr)); gap: 12px; padding: 11px 12px 12px; margin-bottom: 12px; border: 1px solid #e4ebe2; border-radius: 8px; background: #f8faf7; }
+.agent-model-field { min-width: 0; }
+.agent-model-label { display: flex; align-items: center; justify-content: space-between; gap: 5px; min-height: 22px; margin-bottom: 5px; }
+.agent-model-label label { font-size: 11px; margin: 0; }
+.agent-model-label .el-button { flex-shrink: 0; margin: 0; padding: 0; font-size: 11px; }
+.agent-model-field .el-select { width: 100%; }
 .agent-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-top: 1px solid #edf1eb; padding-top: 13px; color: var(--agent-muted); }
 .agent-running-badge { display: inline-flex; align-items: center; gap: 5px; color: #4a7c62; font-size: 12px; }
 
@@ -479,13 +544,9 @@ async function openChatGPTUsage() {
 .agent-target-toggle { margin-top: 6px; padding: 3px 0; border: 0; background: transparent; color: #507663; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 .agent-target-toggle:hover { color: #29654b; }
 .agent-targets { margin: 5px 0; padding-left: 21px; color: #55715f; max-height: 145px; overflow: auto; line-height: 1.68; overflow-wrap: anywhere; }
-.agent-model-heading { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding-top: 13px; margin-top: 11px; border-top: 1px solid #e9eee7; }
-.agent-model-heading label { margin-bottom: 0; }
-.agent-model-heading .el-button { padding-right: 0; }
-.agent-settings .el-select { width: 100%; }
 .agent-settings .el-checkbox { margin: 8px 0 0; height: auto; white-space: normal; }
 .agent-settings :deep(.el-checkbox__label) { white-space: normal; line-height: 1.45; }
-.agent-plan-usage { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; margin: 5px 0 0; color: var(--agent-muted); font-size: 11px; }
+.agent-plan-usage { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; margin: 12px 0 0; padding-top: 8px; border-top: 1px solid #e9eee7; color: var(--agent-muted); font-size: 11px; }
 
 .agent-activity, .agent-review { margin-top: 15px; }
 .agent-activity { display: grid; gap: 8px; padding-top: 13px; padding-bottom: 13px; color: #54715e; }
@@ -535,5 +596,9 @@ async function openChatGPTUsage() {
 @media (max-width: 870px) {
   .agent-layout { grid-template-columns: minmax(0, 1fr); }
   .agent-settings { grid-row: 1; }
+}
+@media (max-width: 560px) {
+  .agent-model-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-model-field:first-child { grid-column: 1 / -1; }
 }
 </style>
