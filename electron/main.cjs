@@ -1,0 +1,406 @@
+'use strict'
+
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, safeStorage } = require('electron')
+const { readFile, realpath, stat, writeFile } = require('node:fs/promises')
+const { mkdirSync } = require('node:fs')
+const path = require('node:path')
+const { createHash } = require('node:crypto')
+const { ServiceBridge, validateCall, validateAgentRequest } = require('./bridge.cjs')
+const { KomgaConfigStore, normalizeKomgaUrl } = require('./komga-config.cjs')
+const { ChatGPTAuth, CHATGPT_USAGE_URL } = require('./chatgpt-auth.cjs')
+const { ModelConfigStore } = require('./model-config.cjs')
+const { modelOptions } = require('./model-options.cjs')
+const { SiteConfigStore } = require('./site-config.cjs')
+
+protocol.registerSchemesAsPrivileged([{ scheme: 'comic', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
+
+function argument(name) {
+  const index = process.argv.indexOf(name)
+  return index >= 0 ? process.argv[index + 1] : undefined
+}
+
+function defaultDataDirectory() {
+  // Keep the v1 SQLite catalog in place; Chromium cache gets its own subdirectory.
+  return process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'ComicManage', 'ComicManage')
+    : path.join(app.getPath('appData'), 'ComicManage')
+}
+
+const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' }
+function currentKomgaScope(config) {
+  return config.url && config.libraryId
+    ? createHash('sha256').update(normalizeKomgaUrl(config.url) + '\n' + config.libraryId).digest('hex').slice(0, 20)
+    : ''
+}
+
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"
+
+async function createApplication({ dataDir = defaultDataDirectory(), show = true } = {}) {
+  const root = path.resolve(__dirname, '..')
+  const rendererRoot = path.join(root, 'renderer-dist')
+  const devURL = !app.isPackaged ? process.env.COMIC_MANAGE_DEV_URL : undefined
+  if (devURL && new URL(devURL).origin !== 'http://127.0.0.1:5173') throw new Error('开发界面地址无效。')
+
+  if (!protocol.isProtocolHandled || !(await protocol.isProtocolHandled('comic'))) {
+    protocol.handle('comic', async request => {
+      try {
+        const url = new URL(request.url)
+        if (url.hostname !== 'ui' || request.method !== 'GET') return new Response('Not found', { status: 404 })
+        const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
+        const file = path.resolve(rendererRoot, relative)
+        const actualRoot = await realpath(rendererRoot)
+        const actualFile = await realpath(file)
+        if (!actualFile.startsWith(actualRoot + path.sep)) return new Response('Forbidden', { status: 403 })
+        return new Response(await readFile(actualFile), { headers: {
+          'Content-Type': mimeTypes[path.extname(actualFile)] || 'application/octet-stream',
+          'Content-Security-Policy': CSP,
+        } })
+      } catch { return new Response('Not found', { status: 404 }) }
+    })
+  }
+
+  const bridge = new ServiceBridge({ root, dataDir, resourcesPath: process.resourcesPath, packaged: app.isPackaged })
+  const komgaConfig = new KomgaConfigStore(dataDir, safeStorage)
+  const modelConfig = new ModelConfigStore(dataDir, safeStorage)
+  const siteConfig = new SiteConfigStore(dataDir, safeStorage)
+  const chatgptAuth = new ChatGPTAuth(dataDir, safeStorage)
+  const modelConnection = async credentials => credentials.profile.provider === 'chatgpt-plan'
+    ? { ...credentials, api_key: await chatgptAuth.accessToken() } : credentials
+  const importLocationFile = path.join(dataDir, 'last-import-location.json')
+  let lastImportLocation
+  let requestQueue = Promise.resolve()
+  let pendingServiceRequests = 0
+  let agentTask
+  const callService = (method, params = {}, task) => {
+    if (method === 'cancel') return bridge.call(method, params)
+    pendingServiceRequests += 1
+    const request = requestQueue.then(() => {
+      if (task?.cancelled) return task.emptyResult
+      if (task) task.started = true
+      return bridge.call(method, params)
+    })
+    requestQueue = request.catch(() => {})
+    return request.finally(() => { pendingServiceRequests -= 1 })
+  }
+  const window = new BrowserWindow({
+    width: 1500, height: 980, minWidth: 1120, minHeight: 740,
+    title: 'Comic Manage · 漫画整理', backgroundColor: '#f6f8fa', show: false,
+    autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true,
+      spellcheck: false, devTools: !app.isPackaged },
+  })
+  let windowState = { dirty: false, busy: false }
+  let allowClose = false
+  let automaticRunning = false
+  let automaticTickPending = false
+  const send = (event, data) => {
+    if (automaticRunning && ['progress', 'task-progress'].includes(event)) return
+    if (!window.isDestroyed()) window.webContents.send('comic:event', event, data)
+  }
+  const automaticTick = async () => {
+    if (window.isDestroyed() || automaticTickPending || pendingServiceRequests || windowState.busy || windowState.dirty) return
+    automaticTickPending = true
+    try {
+      const config = await komgaConfig.get()
+      if (!config.autoSyncEnabled || !config.hasApiKey || !config.libraryId || !config.url) return
+      const connection = await komgaConfig.connection()
+      if (window.isDestroyed() || pendingServiceRequests || windowState.busy || windowState.dirty) return
+      automaticRunning = true
+      const result = await callService('komga_jobs_run', connection)
+      if (result.processed) send('komga-jobs-updated', { jobs: result.jobs })
+    } catch {
+      // Task errors are persisted by the service. Configuration errors remain in settings.
+    } finally {
+      automaticRunning = false
+      automaticTickPending = false
+    }
+  }
+  const automaticTimer = setInterval(automaticTick, 20000)
+  automaticTimer.unref()
+  bridge.on('event', send)
+  const trusted = event => {
+    const expected = devURL || 'comic://ui/'
+    if (window.isDestroyed() || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('请求来源无效。')
+    const url = event.senderFrame.url
+    if (devURL ? new URL(url).origin !== new URL(expected).origin : !url.startsWith(expected)) throw new Error('请求来源无效。')
+  }
+  const handle = (channel, callback) => {
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, (event, ...args) => { trusted(event); return callback(...args) })
+  }
+  const uploadConfiguration = async () => {
+    const config = await komgaConfig.get()
+    const comparison = config.url && config.libraryId ? await komgaConfig.connection() : undefined
+    const autoSync = comparison && config.autoSyncEnabled
+      ? { url: comparison.url, libraryId: comparison.libraryId } : undefined
+    return { comparison, autoSync }
+  }
+  handle('comic:call', async (method, params = {}) => {
+    if (method === 'cancel' && agentTask && !agentTask.started) {
+      agentTask.cancelled = true
+      return { cancelled: true }
+    }
+    if (['agent_prepare', 'agent_apply', 'agent_search', 'agent_search_preview'].includes(method)) {
+      validateAgentRequest(method, params)
+      if (agentTask) throw new Error('已有 Agent 任务正在运行。')
+      const task = {
+        started: false,
+        cancelled: false,
+        emptyResult: method === 'agent_apply' ? { updated: 0, skipped: 0, errors: [], cancelled: true }
+          : { token: null, books: [], cancelled: true },
+      }
+      agentTask = task
+      try {
+        const komga_scope = await komgaConfig.get().then(currentKomgaScope).catch(() => '')
+        if (task.cancelled) return task.emptyResult
+        if (method === 'agent_search' || method === 'agent_search_preview') {
+          // The service resolves saved candidate IDs to providers during preview.
+          const providers = method === 'agent_search' ? params.providers : ['dmm', 'nhentai']
+          const credentials = await siteConfig.credentials(providers)
+          return await callService(method, { ...params, credentials, komga_scope }, task)
+        }
+        if (method === 'agent_apply') return await callService(method, { ...params, komga_scope }, task)
+        const { profile_id, options, ...request } = params
+        const { name, ...connection } = await modelConfig.connection(profile_id)
+        if (options && Object.keys(options).length) {
+          connection.profile = { ...connection.profile, options: { ...connection.profile.options, ...modelOptions(options, true) } }
+        }
+        const credentials = await modelConnection(connection)
+        return await callService(method, { ...request, ...credentials, komga_scope }, task)
+      } catch (error) {
+        if (task.cancelled) return task.emptyResult
+        throw error
+      } finally {
+        agentTask = undefined
+      }
+    }
+    if (['site_config_get', 'site_config_save', 'site_config_clear'].includes(method)) {
+      if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('站点设置参数无效。')
+      if (method === 'site_config_save') return siteConfig.save(params)
+      if (method === 'site_config_clear') {
+        if (Object.keys(params).length !== 1 || !Object.hasOwn(params, 'provider')) throw new Error('请选择要清除的站点。')
+        return siteConfig.clear(params.provider)
+      }
+      if (Object.keys(params).length) throw new Error('读取站点设置不接受额外参数。')
+      return siteConfig.get()
+    }
+    if (['model_chatgpt_status', 'model_chatgpt_sign_in', 'model_chatgpt_cancel', 'model_chatgpt_disconnect', 'model_chatgpt_models', 'model_chatgpt_usage'].includes(method)) {
+      if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new Error('ChatGPT 授权请求参数无效。')
+      if (method === 'model_chatgpt_status') return chatgptAuth.get()
+      if (method === 'model_chatgpt_sign_in') return chatgptAuth.signIn(url => shell.openExternal(url))
+      if (method === 'model_chatgpt_cancel') return chatgptAuth.cancel()
+      if (method === 'model_chatgpt_disconnect') return chatgptAuth.disconnect()
+      if (method === 'model_chatgpt_models') return chatgptAuth.modelList()
+      return shell.openExternal(CHATGPT_USAGE_URL)
+    }
+    if (['model_config_get', 'model_profile_save', 'model_profile_delete', 'model_profile_default', 'model_profile_test', 'model_profile_models', 'model_profile_duplicate', 'model_assist_preview'].includes(method)) {
+      if (!params || typeof params !== 'object' || Array.isArray(params)
+          || Buffer.byteLength(JSON.stringify(params), 'utf8') > 256 * 1024) throw new Error('模型请求参数无效。')
+      if (method === 'model_config_get') {
+        if (Object.keys(params).length) throw new Error('读取模型配置不接受额外参数。')
+        return modelConfig.get()
+      }
+      if (method === 'model_profile_save') return modelConfig.save(params)
+      if (['model_profile_delete', 'model_profile_default', 'model_profile_duplicate'].includes(method)) {
+        if (Object.keys(params).some(key => key !== 'id')) throw new Error('模型配置请求参数无效。')
+        if (method === 'model_profile_duplicate') return modelConfig.duplicate(params.id)
+        return method === 'model_profile_delete' ? modelConfig.delete(params.id) : modelConfig.setDefault(params.id)
+      }
+      if (method === 'model_profile_models') {
+        const credentials = await modelConfig.testCredentials(params)
+        if (credentials.profile.provider === 'chatgpt-plan') return chatgptAuth.modelList()
+        return callService('model_catalog', credentials)
+      }
+      if (method === 'model_profile_test') return callService('model_test', await modelConnection(await modelConfig.testCredentials(params)))
+      const { profile_id, ...work } = params
+      if (Object.keys(work).some(key => !['id', 'metadata', 'siteFields'].includes(key))) throw new Error('刮削请求参数无效。')
+      const { name, ...connection } = await modelConfig.connection(profile_id)
+      const result = await callService('model_assist', { ...work, ...await modelConnection(connection) })
+      return { ...result, model_name: name }
+    }
+    if (['komga_test', 'source_context', 'komga_jobs_run', 'model_test', 'model_assist', 'model_catalog'].includes(method)) throw new Error('此操作只允许主进程调用。')
+    validateCall(method, params)
+    if (method === 'batch_number') {
+      if (Object.hasOwn(params, 'komga_scope')) throw new Error('批量编号不接受自定义书库范围。')
+      const komga_scope = await komgaConfig.get().then(currentKomgaScope).catch(() => '')
+      return callService(method, { ...params, komga_scope })
+    }
+    if (method === 'bootstrap') {
+      const result = await callService(method, params)
+      try {
+        const config = await komgaConfig.get()
+        return { ...result, komgaScope: currentKomgaScope(config), komgaLibraryName: config.libraryName }
+      } catch {
+        return { ...result, komgaScope: '', komgaLibraryName: '' }
+      }
+    }
+    if (method === 'komga_pull') {
+      if (Object.keys(params).length) throw new Error('请使用当前配置的 Komga 书库。')
+      return callService(method, await komgaConfig.connection())
+    }
+    if (method === 'komga_jobs') {
+      if (Object.keys(params).length) throw new Error('同步任务列表不接受额外参数。')
+      return callService(method, {})
+    }
+    if (method === 'komga_jobs_retry') {
+      if (Object.keys(params).some(key => key !== 'ids')) throw new Error('重试只接受选中的同步任务。')
+      const config = await komgaConfig.get()
+      if (!config.url || !config.libraryId) throw new Error('请先配置 Komga 服务器和书库。')
+      const result = await callService(method, { ids: params.ids, url: normalizeKomgaUrl(config.url), libraryId: config.libraryId })
+      send('komga-jobs-updated', { jobs: result.jobs })
+      return result
+    }
+    if (method === 'plan') {
+      if (Object.keys(params).some(key => !['ids', 'outputRoot'].includes(key))) throw new Error('生成计划参数无效。')
+      const { comparison } = await uploadConfiguration()
+      return callService(method, { ...params, ...(comparison ? { comparison } : {}) })
+    }
+    if (method === 'export') {
+      if (Object.keys(params).some(key => !['token', 'ids', 'confirmedIds'].includes(key))) throw new Error('生成只接受已确认的计划。')
+      const { comparison, autoSync } = await uploadConfiguration()
+      const result = await callService(method, { ...params, ...(comparison ? { comparison } : {}), ...(autoSync ? { autoSync } : {}) })
+      send('komga-jobs-updated', {})
+      return result
+    }
+    if (method === 'komga_resolve') {
+      if (Object.keys(params).some(key => !['id', 'resolution'].includes(key))) throw new Error('冲突处理参数无效。')
+      return callService(method, { ...params, ...await komgaConfig.connection() })
+    }
+    if (['prepare_review_sync', 'commit_review_sync'].includes(method)) {
+      const allowed = method === 'prepare_review_sync' ? 'ids' : 'token'
+      if (Object.keys(params).some(key => key !== allowed)) throw new Error('批量审核只接受所选作品或本次检查凭证。')
+      return callService(method, { ...params, ...await komgaConfig.connection() })
+    }
+    if (['approve', 'page'].includes(method)) {
+      const allowed = method === 'approve' ? ['id', 'metadata'] : ['id', 'index']
+      if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('作品请求参数无效。')
+      const context = await callService('source_context', { id: params.id })
+      if (context.kind === 'komga') {
+        return callService(method, { ...params, ...await komgaConfig.connection() })
+      }
+    }
+    if (method === 'komga_sync') {
+      if (Object.keys(params).some(key => key !== 'ids')) throw new Error('同步只接受选中的作品。')
+      return callService(method, { ...params, ...await komgaConfig.connection() })
+    }
+    const result = await callService(method, params)
+    if (['save', 'approve', 'batch_edit', 'remove'].includes(method)) send('komga-jobs-updated', {})
+    return result
+  })
+  handle('comic:komga-config', () => komgaConfig.get())
+  handle('comic:save-komga-config', input => komgaConfig.save(input))
+  handle('comic:test-komga-config', async input => callService('komga_test', await komgaConfig.credentials(input)))
+  handle('comic:open-komga-book', async id => {
+    if (typeof id !== 'string' || !id || id.length > 32767) throw new Error('作品 ID 无效。')
+    const context = await callService('source_context', { id })
+    const config = await komgaConfig.get()
+    const remote = context.remote
+    if (context.kind !== 'komga' || !remote || !config.url || !config.libraryId
+        || remote.serverUrl !== normalizeKomgaUrl(config.url) || remote.libraryId !== config.libraryId) {
+      throw new Error('请先切换到这本漫画所属的 Komga 服务器和书库。')
+    }
+    await shell.openExternal(normalizeKomgaUrl(config.url) + '/book/' + encodeURIComponent(remote.bookId))
+  })
+  handle('comic:version', () => app.getVersion())
+  handle('comic:choose-directory', async () => {
+    const result = await dialog.showOpenDialog(window, { title: '选择本地或 NAS 目录', properties: ['openDirectory', 'createDirectory'] })
+    return result.canceled ? null : result.filePaths[0]
+  })
+  handle('comic:choose-directories', async () => {
+    if (!lastImportLocation) {
+      try {
+        const saved = JSON.parse(await readFile(importLocationFile, 'utf8'))
+        if (typeof saved === 'string' && path.isAbsolute(saved) && !saved.includes('\0')) {
+          lastImportLocation = saved
+        }
+      } catch { /* Use the system default when there is no readable saved location. */ }
+    }
+    const options = { title: '选择一个或多个漫画文件夹', properties: ['openDirectory', 'multiSelections'] }
+    // Let the system dialog resolve NAS paths. The trailing separator marks a directory
+    // on Windows even when the share is temporarily unreachable.
+    if (lastImportLocation) options.defaultPath = path.join(lastImportLocation, path.sep)
+    const result = await dialog.showOpenDialog(window, options)
+    if (result.canceled || !result.filePaths.length) return []
+
+    // The chooser returns selected folders, so their parent is where users can pick siblings.
+    lastImportLocation = path.dirname(result.filePaths[0])
+    await writeFile(importLocationFile, JSON.stringify(lastImportLocation), { mode: 0o600 })
+      .catch(() => { /* An unsaved preference must not block folder selection. */ })
+    return result.filePaths
+  })
+  handle('comic:choose-backup', async () => {
+    const result = await dialog.showSaveDialog(window, { title: '备份资料库', defaultPath: `ComicManage-${new Date().toISOString().slice(0, 10)}.sqlite3`,
+      filters: [{ name: 'SQLite 资料库', extensions: ['sqlite3'] }] })
+    return result.canceled ? null : result.filePath
+  })
+  handle('comic:choose-komga-manifest', async () => {
+    const result = await dialog.showSaveDialog(window, {
+      title: '导出 Komga 同步清单',
+      defaultPath: 'komga_notable_entities_manifest.json',
+      filters: [{ name: 'Komga 同步清单', extensions: ['json'] }],
+    })
+    return result.canceled ? null : result.filePath
+  })
+  handle('comic:open-location', async (kind, id) => {
+    if (!['source', 'output'].includes(kind) || typeof id !== 'string') throw new Error('打开位置参数无效。')
+    const catalog = await callService('bootstrap')
+    const comic = catalog.comics.find(item => item.id === id)
+    if (!comic) throw new Error('作品记录不存在。')
+    if (comic.kind === 'komga') throw new Error('远端作品请使用“在 Komga 中查看”。')
+    const location = kind === 'source' ? comic.source : comic.output
+    if (!location) throw new Error('此作品尚未生成成品。')
+    const info = await stat(location)
+    const directory = info.isDirectory() ? location : path.dirname(location)
+    const failure = await shell.openPath(directory)
+    if (failure) throw new Error(failure)
+  })
+  handle('comic:close', () => { allowClose = true; window.close() })
+  const stateListener = (event, state) => {
+    try { trusted(event); windowState = { dirty: state?.dirty === true, busy: state?.busy === true } } catch { /* ignore untrusted frames */ }
+  }
+  ipcMain.on('comic:window-state', stateListener)
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event, url) => {
+    if (devURL ? new URL(url).origin !== new URL(devURL).origin : !url.startsWith('comic://ui/')) event.preventDefault()
+  })
+  window.webContents.on('will-attach-webview', event => event.preventDefault())
+  window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+  window.on('close', event => {
+    if (!allowClose && (windowState.dirty || windowState.busy)) { event.preventDefault(); send('close-request', {}) }
+  })
+  window.on('closed', () => { chatgptAuth.cancel(); clearInterval(automaticTimer); ipcMain.removeListener('comic:window-state', stateListener) })
+  window.once('ready-to-show', () => { if (show) window.show() })
+  await window.loadURL(devURL || 'comic://ui/index.html')
+  return { window, bridge, dataDir }
+}
+
+async function main() {
+  const dataDir = path.resolve(argument('--data-dir') || defaultDataDirectory())
+  mkdirSync(dataDir, { recursive: true })
+  mkdirSync(path.join(dataDir, 'electron'), { recursive: true })
+  app.setPath('userData', path.join(dataDir, 'electron'))
+  if (!app.requestSingleInstanceLock()) { app.quit(); return }
+  let desktop
+  let stopping = false
+  app.on('second-instance', () => {
+    if (desktop && !desktop.window.isDestroyed()) { desktop.window.restore(); desktop.window.focus() }
+  })
+  app.on('before-quit', event => {
+    if (stopping) return
+    event.preventDefault()
+    stopping = true
+    Promise.resolve(desktop?.bridge.stop()).finally(() => app.exit(0))
+  })
+  app.on('window-all-closed', () => app.quit())
+  await app.whenReady()
+  try { desktop = await createApplication({ dataDir }) }
+  catch (error) {
+    dialog.showErrorBox('无法启动漫画整理', error.message)
+    await desktop?.bridge.stop()
+    app.exit(1)
+  }
+}
+
+if (require.main === module) main()
+module.exports = { createApplication, defaultDataDirectory, CSP }
