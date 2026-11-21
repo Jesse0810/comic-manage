@@ -13,7 +13,7 @@ class UploadReviewTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = Path(tmp.name).resolve()
         self.data = self.root / 'db'
         self.output = self.root / 'out'
         self.connection = {'url': 'http://example.test', 'apiKey': 'fixture', 'libraryId': 'books'}
